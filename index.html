@@ -1,0 +1,723 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="description"
+      content="面向灵感、大纲、短剧和漫剧剧本的本地优先 AI 创作工作台"
+    />
+    <title>AI 创作工作台</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#workspaceMain">跳到正文编辑区</a>
+
+    <svg class="svg-definitions" aria-hidden="true">
+      <symbol id="icon-logo" viewBox="0 0 24 24">
+        <path d="M12 3.5c.8 3.4 3.1 5.7 6.5 6.5-3.4.8-5.7 3.1-6.5 6.5-.8-3.4-3.1-5.7-6.5-6.5 3.4-.8 5.7-3.1 6.5-6.5Z" />
+        <path d="M18.5 15.5c.3 1.4 1.3 2.4 2.7 2.7-1.4.3-2.4 1.3-2.7 2.7-.3-1.4-1.3-2.4-2.7-2.7 1.4-.3 2.4-1.3 2.7-2.7Z" />
+      </symbol>
+      <symbol id="icon-pen" viewBox="0 0 24 24">
+        <path d="m15 5 4 4L8 20l-5 1 1-5L15 5Z" />
+        <path d="m13 7 4 4" />
+      </symbol>
+      <symbol id="icon-lightbulb" viewBox="0 0 24 24">
+        <path d="M9 18h6" />
+        <path d="M10 22h4" />
+        <path d="M8.2 14.3A7 7 0 1 1 15.8 14.3c-.7.6-.8 1.1-.8 1.7H9c0-.6-.1-1.1-.8-1.7Z" />
+      </symbol>
+      <symbol id="icon-book" viewBox="0 0 24 24">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z" />
+      </symbol>
+      <symbol id="icon-database" viewBox="0 0 24 24">
+        <ellipse cx="12" cy="5" rx="8" ry="3" />
+        <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" />
+        <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" />
+      </symbol>
+      <symbol id="icon-plug" viewBox="0 0 24 24">
+        <path d="m12 22 4-4" />
+        <path d="M19 12.9 11.1 5 6 10.1a4.9 4.9 0 0 0 0 6.9l1 1a4.9 4.9 0 0 0 6.9 0l5.1-5.1Z" />
+        <path d="m15 2-3 3" />
+        <path d="m22 9-3 3" />
+      </symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" />
+      </symbol>
+      <symbol id="icon-search" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="7" />
+        <path d="m20 20-4-4" />
+      </symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14" />
+      </symbol>
+      <symbol id="icon-chevron-right" viewBox="0 0 24 24">
+        <path d="m9 18 6-6-6-6" />
+      </symbol>
+      <symbol id="icon-chevron-down" viewBox="0 0 24 24">
+        <path d="m6 9 6 6 6-6" />
+      </symbol>
+      <symbol id="icon-file" viewBox="0 0 24 24">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+        <path d="M14 2v6h6M8 13h8M8 17h6" />
+      </symbol>
+      <symbol id="icon-users" viewBox="0 0 24 24">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8" />
+      </symbol>
+      <symbol id="icon-layers" viewBox="0 0 24 24">
+        <path d="m12 2 9 5-9 5-9-5 9-5Z" />
+        <path d="m3 12 9 5 9-5M3 17l9 5 9-5" />
+      </symbol>
+      <symbol id="icon-more" viewBox="0 0 24 24">
+        <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
+        <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+        <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
+      </symbol>
+      <symbol id="icon-panel-left" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M9 4v16" />
+      </symbol>
+      <symbol id="icon-panel-right" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M15 4v16" />
+      </symbol>
+      <symbol id="icon-history" viewBox="0 0 24 24">
+        <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+        <path d="M3 3v5h5M12 7v5l3 2" />
+      </symbol>
+      <symbol id="icon-redo" viewBox="0 0 24 24">
+        <path d="m15 7 5 5-5 5" />
+        <path d="M4 18v-2a4 4 0 0 1 4-4h12" />
+      </symbol>
+      <symbol id="icon-undo" viewBox="0 0 24 24">
+        <path d="m9 7-5 5 5 5" />
+        <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+      </symbol>
+      <symbol id="icon-sparkles" viewBox="0 0 24 24">
+        <path d="m12 3-1 4a5 5 0 0 1-4 4l-4 1 4 1a5 5 0 0 1 4 4l1 4 1-4a5 5 0 0 1 4-4l4-1-4-1a5 5 0 0 1-4-4l-1-4Z" />
+      </symbol>
+      <symbol id="icon-send" viewBox="0 0 24 24">
+        <path d="m22 2-7 20-4-9-9-4Z" />
+        <path d="M22 2 11 13" />
+      </symbol>
+      <symbol id="icon-stop" viewBox="0 0 24 24">
+        <rect x="6" y="6" width="12" height="12" rx="2" />
+      </symbol>
+      <symbol id="icon-check" viewBox="0 0 24 24">
+        <path d="m20 6-11 11-5-5" />
+      </symbol>
+      <symbol id="icon-x" viewBox="0 0 24 24">
+        <path d="M18 6 6 18M6 6l12 12" />
+      </symbol>
+      <symbol id="icon-link" viewBox="0 0 24 24">
+        <path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" />
+        <path d="M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1" />
+      </symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24">
+        <path d="M20 7h-5V2" />
+        <path d="M20 7a9 9 0 1 0 1 8" />
+      </symbol>
+      <symbol id="icon-folder" viewBox="0 0 24 24">
+        <path d="M3 5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+      </symbol>
+      <symbol id="icon-command" viewBox="0 0 24 24">
+        <path d="M18 9a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3Z" />
+      </symbol>
+      <symbol id="icon-terminal" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="m7 9 3 3-3 3M13 15h4" />
+      </symbol>
+      <symbol id="icon-key" viewBox="0 0 24 24">
+        <circle cx="8" cy="15" r="4" />
+        <path d="m11 12 9-9M17 6l3 3M14 9l3 3" />
+      </symbol>
+      <symbol id="icon-server" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="6" rx="2" />
+        <rect x="3" y="14" width="18" height="6" rx="2" />
+        <path d="M7 7h.01M7 17h.01" />
+      </symbol>
+      <symbol id="icon-alert" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 8v5M12 16h.01" />
+      </symbol>
+      <symbol id="icon-lock" viewBox="0 0 24 24">
+        <rect x="4" y="10" width="16" height="11" rx="2" />
+        <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+      </symbol>
+      <symbol id="icon-external" viewBox="0 0 24 24">
+        <path d="M15 3h6v6M10 14 21 3" />
+        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      </symbol>
+      <symbol id="icon-moon" viewBox="0 0 24 24">
+        <path d="M20.5 14.3A9 9 0 0 1 9.7 3.5 9 9 0 1 0 20.5 14.3Z" />
+      </symbol>
+      <symbol id="icon-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+      </symbol>
+      <symbol id="icon-menu" viewBox="0 0 24 24">
+        <path d="M4 7h16M4 12h16M4 17h16" />
+      </symbol>
+    </svg>
+
+    <div class="app-shell" id="appShell">
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="titlebar-start">
+          <div class="window-controls" aria-hidden="true">
+            <span class="window-dot window-dot-close"></span>
+            <span class="window-dot window-dot-minimize"></span>
+            <span class="window-dot window-dot-maximize"></span>
+          </div>
+          <button class="icon-button mobile-only" type="button" data-action="toggle-explorer" aria-label="打开内容导航" title="打开内容导航" aria-controls="resourceExplorer" aria-expanded="false">
+            <svg class="icon"><use href="#icon-menu"></use></svg>
+          </button>
+          <button class="project-switcher" type="button" data-action="new-project" aria-haspopup="dialog" aria-label="新建项目" title="新建项目">
+            <span class="project-mark">未</span>
+            <span class="project-switcher-copy">
+              <strong>未命名短剧</strong>
+              <span>短剧 · 新项目</span>
+            </span>
+            <svg class="icon icon-small"><use href="#icon-plus"></use></svg>
+          </button>
+        </div>
+
+        <button class="command-trigger" type="button" data-action="open-command" aria-haspopup="dialog" aria-label="搜索内容或运行命令">
+          <svg class="icon"><use href="#icon-search"></use></svg>
+          <span>搜索内容或运行命令</span>
+          <kbd>⌘ K</kbd>
+        </button>
+
+        <div class="titlebar-actions">
+          <div class="save-indicator" id="globalSaveIndicator" role="status">
+            <span class="status-dot status-dot-success"></span>
+            <span>已保存</span>
+          </div>
+          <button class="connection-chip" id="activeConnectionChip" type="button" data-view-target="connections">
+            <span class="status-dot status-dot-muted"></span>
+            <span>Ollama · 待检测</span>
+          </button>
+          <button class="icon-button" type="button" data-action="toggle-theme" aria-label="切换深色模式" title="切换深色模式">
+            <svg class="icon theme-icon-light"><use href="#icon-moon"></use></svg>
+            <svg class="icon theme-icon-dark"><use href="#icon-sun"></use></svg>
+          </button>
+          <button class="icon-button" type="button" data-action="toggle-assistant" aria-label="收起 AI 助手" title="收起 AI 助手" aria-controls="assistantPanel" aria-expanded="true">
+            <svg class="icon"><use href="#icon-panel-right"></use></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="app-body">
+        <nav class="activity-rail" aria-label="主导航">
+          <div class="brand-mark" aria-label="AI 创作工作台">
+            <svg class="icon"><use href="#icon-logo"></use></svg>
+          </div>
+          <div class="rail-group">
+            <button class="rail-button is-active" type="button" data-view-target="workspace" aria-label="创作工作区" aria-current="page" data-tooltip="创作工作区">
+              <svg class="icon"><use href="#icon-pen"></use></svg>
+            </button>
+            <button class="rail-button" type="button" data-action="select-doc" data-doc-id="idea" aria-label="灵感库" data-tooltip="灵感库">
+              <svg class="icon"><use href="#icon-lightbulb"></use></svg>
+            </button>
+            <button class="rail-button" type="button" data-view-target="knowledge" aria-label="知识库" data-tooltip="知识库">
+              <svg class="icon"><use href="#icon-database"></use></svg>
+            </button>
+            <button class="rail-button" type="button" data-view-target="connections" aria-label="连接中心" data-tooltip="连接中心">
+              <svg class="icon"><use href="#icon-plug"></use></svg>
+            </button>
+          </div>
+          <div class="rail-spacer"></div>
+          <button class="rail-button" type="button" data-view-target="connections" aria-label="设置" data-tooltip="设置">
+            <svg class="icon"><use href="#icon-settings"></use></svg>
+          </button>
+          <div class="profile-avatar" aria-label="本地用户">舟</div>
+        </nav>
+
+        <aside class="resource-explorer" id="resourceExplorer" aria-label="项目内容">
+          <div class="explorer-header">
+            <div>
+              <span class="eyebrow">项目内容</span>
+              <div class="explorer-project-title">未命名短剧</div>
+            </div>
+            <div class="explorer-header-actions">
+              <button class="icon-button icon-button-compact" type="button" data-action="new-content" aria-label="新建内容" title="新建内容">
+                <svg class="icon"><use href="#icon-plus"></use></svg>
+              </button>
+              <button class="icon-button icon-button-compact mobile-only" type="button" data-action="toggle-explorer" aria-label="关闭内容导航" title="关闭内容导航">
+                <svg class="icon"><use href="#icon-x"></use></svg>
+              </button>
+            </div>
+          </div>
+
+          <label class="explorer-search">
+            <svg class="icon icon-small"><use href="#icon-search"></use></svg>
+            <span class="sr-only">筛选项目内容</span>
+            <input id="treeSearch" type="search" placeholder="筛选内容" autocomplete="off" />
+            <kbd>⌘P</kbd>
+          </label>
+
+          <div class="tree-scroll" id="projectTree"></div>
+
+          <div class="explorer-footer">
+            <div class="progress-copy">
+              <span>本周创作</span>
+              <strong>0 / 5 场</strong>
+            </div>
+            <div class="progress-track" aria-label="本周创作进度 0%"><span style="width: 0%"></span></div>
+          </div>
+        </aside>
+
+        <main class="main-surface" id="workspaceMain" tabindex="-1">
+          <section class="view-panel workspace-view" id="workspaceView" data-view="workspace">
+            <header class="document-header">
+              <div class="document-heading">
+                <div class="breadcrumb" aria-label="当前位置">
+                  <span id="projectBreadcrumb">未命名短剧</span>
+                  <svg class="icon icon-tiny"><use href="#icon-chevron-right"></use></svg>
+                  <span id="documentBreadcrumb">前期创作</span>
+                </div>
+                <div class="document-title-row">
+                  <h1 id="documentTitle">核心灵感</h1>
+                  <span class="draft-badge" id="documentBadge">待完善</span>
+                </div>
+              </div>
+              <div class="document-actions">
+                <button class="toolbar-button" type="button" data-action="undo" title="撤销">
+                  <svg class="icon"><use href="#icon-undo"></use></svg>
+                  <span class="sr-only">撤销</span>
+                </button>
+                <button class="toolbar-button" type="button" data-action="redo" title="重做">
+                  <svg class="icon"><use href="#icon-redo"></use></svg>
+                  <span class="sr-only">重做</span>
+                </button>
+                <button class="toolbar-button toolbar-button-text" type="button" data-action="show-history">
+                  <svg class="icon"><use href="#icon-history"></use></svg>
+                  <span>v—</span>
+                </button>
+                <button class="secondary-button compact-button stage-advance-button" id="stageAdvanceButton" type="button" data-action="advance-stage">
+                  <span>下一步</span>
+                  <svg class="icon"><use href="#icon-chevron-right"></use></svg>
+                </button>
+                <button class="primary-button desktop-ai-button" type="button" data-action="focus-assistant" aria-label="打开 AI 协作助手">
+                  <svg class="icon"><use href="#icon-sparkles"></use></svg>
+                  <span>AI 协作</span>
+                </button>
+              </div>
+            </header>
+
+            <div class="document-tabs" role="tablist" aria-label="文档视图">
+              <button class="document-tab is-active" type="button" role="tab" aria-selected="true" data-tab="script">灵感卡</button>
+              <button class="document-tab" type="button" role="tab" aria-selected="false" data-tab="outline">创作简报</button>
+              <button class="document-tab" type="button" role="tab" aria-selected="false" data-tab="references">关联资料 <span class="tab-count">0</span></button>
+              <button class="document-tab" type="button" role="tab" aria-selected="false" data-tab="history">历史版本</button>
+              <span class="tab-spacer"></span>
+              <button class="tab-action" type="button" data-action="toggle-focus-mode" aria-label="切换专注模式" aria-pressed="false">
+                <svg class="icon"><use href="#icon-panel-left"></use></svg>
+                <span>专注模式</span>
+              </button>
+            </div>
+
+            <div class="editor-scroll">
+              <div class="history-toolbar" id="historyToolbar" hidden>
+                <div>
+                  <label for="historyVersionSelect">查看版本</label>
+                  <select id="historyVersionSelect" aria-label="选择历史版本"></select>
+                  <span id="historyVersionMeta">尚无快照</span>
+                </div>
+                <button class="secondary-button compact-button" type="button" data-action="restore-version">恢复为新版本</button>
+              </div>
+              <div class="scene-intent" id="sceneIntent">
+                <div class="scene-intent-mark"><svg class="icon"><use href="#icon-logo"></use></svg></div>
+                <div>
+                  <span class="eyebrow">创作目标</span>
+                  <p>先记录一个能持续生长的故事装置，再讨论人物与情节。</p>
+                </div>
+                <div class="scene-meta">
+                  <span>短剧</span><span>待聚焦</span><span>前期创作</span>
+                </div>
+              </div>
+
+              <article class="editor-paper">
+                <div class="editor-paper-header">
+                  <div>
+                    <span class="scene-kicker" id="sceneKicker">Idea · 01</span>
+                    <h2 id="sceneTitle">未命名短剧 · 第一个故事火花</h2>
+                  </div>
+                  <button class="icon-button icon-button-compact" type="button" data-action="edit-document" aria-label="编辑当前内容信息" title="编辑当前内容信息">
+                    <svg class="icon"><use href="#icon-more"></use></svg>
+                  </button>
+                </div>
+                <label class="editor-label" for="scriptEditor">正文</label>
+                <textarea id="scriptEditor" spellcheck="true" aria-describedby="editorStats"></textarea>
+                <div class="editor-footer" id="editorStats">
+                  <div class="editor-stats-left">
+                    <span id="characterCount">0 字</span>
+                    <span>预计 1′30″</span>
+                  </div>
+                  <div class="editor-stats-right">
+                    <span class="status-dot status-dot-success"></span>
+                    <span id="editorSaveState">已保存到本地</span>
+                  </div>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section class="view-panel knowledge-view" id="knowledgeView" data-view="knowledge" hidden>
+            <header class="page-header">
+              <div>
+                <span class="eyebrow">创作上下文</span>
+                <h1>知识库</h1>
+                <p>连接你的设定、资料和 Obsidian。原文只读，索引可随时重建。</p>
+              </div>
+              <button class="primary-button" type="button" data-action="add-knowledge-source">
+                <svg class="icon"><use href="#icon-plus"></use></svg>
+                <span>添加来源</span>
+              </button>
+            </header>
+
+            <div class="knowledge-summary-grid">
+              <article class="summary-card summary-card-featured">
+                <span class="summary-label">索引状态</span>
+                <strong id="knowledgeChunkCount">0</strong>
+                <span>个可检索片段</span>
+                <div class="summary-trend" id="knowledgeIndexStatus"><span class="status-dot status-dot-muted"></span><span>等待添加来源</span></div>
+              </article>
+              <article class="summary-card">
+                <span class="summary-label">已连接来源</span>
+                <strong id="knowledgeSourceCount">0</strong>
+                <span id="knowledgeSourceSummary">还没有绑定外部来源</span>
+              </article>
+              <article class="summary-card">
+                <span class="summary-label">本项目引用</span>
+                <strong id="knowledgeSelectedCount">0</strong>
+                <span id="knowledgeSelectionSummary">会随下一次 AI 请求发送</span>
+              </article>
+            </div>
+
+            <section class="knowledge-query-panel" aria-labelledby="knowledgeQueryTitle">
+              <div class="knowledge-query-copy">
+                <span class="eyebrow">本地向量检索</span>
+                <h2 id="knowledgeQueryTitle">查找能支撑当前创作的资料</h2>
+                <p>在已授权的 Markdown 与文本片段中检索；勾选结果后，才会加入下一次 AI 请求。</p>
+              </div>
+              <form class="knowledge-query-form" id="knowledgeQueryForm" role="search">
+                <label for="knowledgeQuery" class="sr-only">检索知识片段</label>
+                <input id="knowledgeQuery" type="search" placeholder="例如：主角的核心动机是什么？" autocomplete="off" />
+                <button class="primary-button" type="submit"><svg class="icon"><use href="#icon-search"></use></svg>检索</button>
+              </form>
+              <div class="knowledge-results" id="knowledgeResults" aria-live="polite"></div>
+            </section>
+
+            <div class="section-toolbar">
+              <div>
+                <h2>知识来源</h2>
+                <p>只有绑定到当前项目的来源会被 AI 检索。</p>
+              </div>
+              <div class="section-toolbar-actions">
+                <label class="table-search">
+                  <svg class="icon"><use href="#icon-search"></use></svg>
+                  <span class="sr-only">搜索知识来源</span>
+                  <input id="knowledgeSearch" type="search" placeholder="搜索来源" />
+                </label>
+                <button class="secondary-button" type="button" data-action="sync-knowledge">
+                  <svg class="icon"><use href="#icon-refresh"></use></svg>
+                  <span id="syncButtonLabel">重建项目索引</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="source-list" id="knowledgeSourceList"></div>
+
+            <article class="retrieval-preview">
+              <div class="retrieval-heading">
+                <div>
+                  <span class="eyebrow">检索预览</span>
+                  <h2>AI 实际会看到什么</h2>
+                </div>
+                <span class="privacy-badge"><svg class="icon"><use href="#icon-lock"></use></svg>仅当前项目</span>
+              </div>
+              <blockquote id="retrievalPreviewBlockquote">当前没有可检索片段。添加知识来源并检索后，这里会展示实际发送给 AI 的上下文。</blockquote>
+              <div class="citation-line" id="retrievalCitation"><span>—</span> 尚未选择知识片段</div>
+            </article>
+          </section>
+
+          <section class="view-panel connections-view" id="connectionsView" data-view="connections" hidden>
+            <header class="page-header">
+              <div>
+                <span class="eyebrow">执行端管理</span>
+                <h1>连接中心</h1>
+                <p>API、CLI 和本地模型各自独立。连接故障不会影响本地写作。</p>
+              </div>
+              <button class="primary-button" type="button" data-action="configure-provider">
+                <svg class="icon"><use href="#icon-plus"></use></svg>
+                <span>添加连接</span>
+              </button>
+            </header>
+
+            <div class="connection-overview" id="connectionOverview" role="status">
+              <div><span class="status-dot status-dot-warning"></span><strong>0 个执行端可用</strong><span>当前使用 Ollama</span></div>
+              <button type="button" class="text-button" data-action="test-all-connections">全部检测</button>
+            </div>
+
+            <section class="connection-section" aria-labelledby="apiConnectionsTitle">
+              <div class="connection-section-heading">
+                <div><span class="section-icon"><svg class="icon"><use href="#icon-key"></use></svg></span><div><h2 id="apiConnectionsTitle">模型 API</h2><p>密钥仅保留在当前应用会话，不进入项目文件或本地存储。</p></div></div>
+              </div>
+              <div class="connection-list" id="apiConnectionList"></div>
+            </section>
+
+            <section class="connection-section" aria-labelledby="cliConnectionsTitle">
+              <div class="connection-section-heading">
+                <div><span class="section-icon"><svg class="icon"><use href="#icon-terminal"></use></svg></span><div><h2 id="cliConnectionsTitle">本机 CLI</h2><p id="cliRuntimeSummary">通过本地运行桥检测受支持的 CLI；只对可关闭工具权限的驱动开放创作执行。</p></div></div>
+                <button class="text-button" type="button" data-action="detect-cli">重新检测</button>
+              </div>
+              <div class="connection-list" id="cliConnectionList"></div>
+            </section>
+
+            <section class="connection-section" aria-labelledby="localConnectionsTitle">
+              <div class="connection-section-heading">
+                <div><span class="section-icon"><svg class="icon"><use href="#icon-server"></use></svg></span><div><h2 id="localConnectionsTitle">本地模型</h2><p>可选能力，适合不希望内容离开设备的任务。</p></div></div>
+              </div>
+              <div class="connection-list" id="localConnectionList"></div>
+            </section>
+
+            <div class="security-note">
+              <svg class="icon"><use href="#icon-lock"></use></svg>
+              <div><strong>本地优先的安全边界</strong><p>当前版本不会持久化密钥。CLI 只接受白名单驱动与固定参数，不接受自定义 Shell；选中的知识片段会发送给当前执行端。</p></div>
+            </div>
+          </section>
+        </main>
+
+        <aside class="assistant-panel" id="assistantPanel" aria-label="AI 助手">
+          <header class="assistant-header">
+            <div>
+              <div class="assistant-title-row">
+                <span class="assistant-icon"><svg class="icon"><use href="#icon-sparkles"></use></svg></span>
+                <h2>AI 助手</h2>
+              </div>
+              <label class="model-selector" for="executorSelect">
+                <span class="status-dot status-dot-muted"></span>
+                <select id="executorSelect" aria-label="选择 AI 执行端"></select>
+                <svg class="icon icon-small"><use href="#icon-chevron-down"></use></svg>
+              </label>
+            </div>
+            <button class="icon-button icon-button-compact" type="button" data-action="toggle-assistant" aria-label="关闭 AI 助手" title="关闭 AI 助手">
+              <svg class="icon"><use href="#icon-x"></use></svg>
+            </button>
+          </header>
+
+          <div class="assistant-context">
+            <div class="context-heading">
+              <span>本次上下文</span>
+              <button class="text-button" type="button" data-view-target="knowledge">管理</button>
+            </div>
+            <div class="context-chips">
+              <button type="button" class="context-chip" aria-pressed="true"><svg class="icon"><use href="#icon-file"></use></svg>本集大纲<svg class="icon chip-check"><use href="#icon-check"></use></svg></button>
+              <button type="button" class="context-chip" aria-pressed="true"><svg class="icon"><use href="#icon-users"></use></svg>人物设定<svg class="icon chip-check"><use href="#icon-check"></use></svg></button>
+              <button type="button" class="context-chip context-chip-accent" id="knowledgeContextChip" aria-pressed="true"><svg class="icon"><use href="#icon-link"></use></svg>知识 0</button>
+            </div>
+          </div>
+
+          <div class="assistant-scroll" id="assistantConversation">
+            <section class="assistant-welcome" id="assistantWelcome">
+              <span class="eyebrow" id="assistantEyebrow">针对当前场景</span>
+              <h3 id="assistantPromptTitle">接下来想怎么写？</h3>
+              <p id="assistantPromptDescription">AI 会参考当前剧本和已选知识，只生成候选稿，不会直接改动正文。</p>
+              <div class="quick-actions">
+                <button type="button" class="quick-action" data-prompt="强化当前场景的悬念，增加危险感并设计一个更强的结尾钩子。"><span>强化悬念</span><small>增加危险感与结尾钩子</small><svg class="icon"><use href="#icon-chevron-right"></use></svg></button>
+                <button type="button" class="quick-action" data-prompt="续写当前场景，保持现有语气和节奏，不提前揭示关键真相。"><span>续写场景</span><small>延续当前语气和节奏</small><svg class="icon"><use href="#icon-chevron-right"></use></svg></button>
+                <button type="button" class="quick-action" data-prompt="检查当前场景是否与人物设定、世界观和前文冲突。"><span>检查连续性</span><small>核对人物与既有设定</small><svg class="icon"><use href="#icon-chevron-right"></use></svg></button>
+                <button type="button" class="quick-action" data-prompt="将当前场景的人物对白改得更自然，减少解释性台词。"><span>打磨对白</span><small>减少说明，保留潜台词</small><svg class="icon"><use href="#icon-chevron-right"></use></svg></button>
+              </div>
+            </section>
+
+            <div class="conversation-thread" id="conversationThread" hidden>
+              <div class="user-message" id="userMessage"></div>
+              <article class="candidate-card" id="candidateCard">
+                <div class="candidate-header">
+                  <div><span class="candidate-label"><svg class="icon"><use href="#icon-sparkles"></use></svg>候选内容</span><span class="candidate-warning">尚未写入正文</span></div>
+                  <button class="icon-button icon-button-compact" type="button" data-action="discard-candidate" aria-label="丢弃候选内容" title="丢弃候选内容"><svg class="icon"><use href="#icon-x"></use></svg></button>
+                </div>
+                <div class="generation-state" id="generationState">
+                  <span class="generating-mark"></span>
+                  <span>正在梳理场景节奏</span>
+                </div>
+                <div class="candidate-content" id="candidateContent"></div>
+                <div class="generation-error" id="generationError" role="status" hidden></div>
+                <div class="candidate-citations" id="candidateCitations" hidden>
+                  <span>参考 0 条知识</span>
+                  <button type="button" data-view-target="knowledge">查看来源</button>
+                </div>
+                <div class="candidate-actions" id="candidateActions" hidden>
+                  <button class="secondary-button" type="button" data-action="retry-generation"><svg class="icon"><use href="#icon-refresh"></use></svg>重新生成</button>
+                  <button class="secondary-button" type="button" data-action="apply-candidate" data-apply-mode="insert"><svg class="icon"><use href="#icon-check"></use></svg>插入光标</button>
+                  <button class="secondary-button" type="button" data-action="apply-candidate" data-apply-mode="replace"><svg class="icon"><use href="#icon-refresh"></use></svg>替换正文</button>
+                  <button class="primary-button" type="button" data-action="apply-candidate" data-apply-mode="append"><svg class="icon"><use href="#icon-check"></use></svg><span>追加并建版本</span></button>
+                </div>
+              </article>
+            </div>
+          </div>
+
+          <div class="prompt-area">
+            <label class="prompt-box" for="promptInput">
+              <span class="sr-only">告诉 AI 你想如何处理当前内容</span>
+              <textarea id="promptInput" rows="3" placeholder="描述你想怎么改，或输入下一步情节…"></textarea>
+              <div class="prompt-toolbar">
+                <button class="prompt-tool" type="button" data-view-target="knowledge" aria-label="选择知识上下文" title="选择知识上下文">
+                  <svg class="icon"><use href="#icon-link"></use></svg><span id="promptKnowledgeCount">0</span>
+                </button>
+                <span class="prompt-hint">⌘↵ 执行</span>
+                <button class="send-button" id="sendButton" type="button" data-action="send-prompt" aria-label="执行 AI 请求" title="执行 AI 请求">
+                  <svg class="icon send-icon"><use href="#icon-send"></use></svg>
+                  <svg class="icon stop-icon"><use href="#icon-stop"></use></svg>
+                </button>
+              </div>
+            </label>
+            <p class="ai-disclaimer" id="assistantDisclaimer">AI 可能出错。采纳前请检查人物和剧情连续性。</p>
+          </div>
+        </aside>
+
+        <button class="panel-scrim" id="panelScrim" type="button" data-action="close-drawers" aria-label="关闭侧栏"></button>
+      </div>
+
+      <footer class="statusbar">
+        <div class="statusbar-group">
+          <button type="button" id="apiStatusButton" data-view-target="connections"><span class="status-dot status-dot-muted"></span><span>API 未配置</span></button>
+          <button type="button" id="cliStatusButton" data-view-target="connections"><span class="status-dot status-dot-muted"></span><span>CLI 待检测</span></button>
+          <button type="button" id="knowledgeStatusButton" data-view-target="knowledge"><span class="status-dot status-dot-muted"></span><span>知识库未连接</span></button>
+        </div>
+        <div class="statusbar-group statusbar-end">
+          <span id="currentMode">剧本模式</span>
+          <span>UTF-8</span>
+          <button type="button" data-action="open-shortcuts">快捷键</button>
+        </div>
+      </footer>
+    </div>
+
+    <dialog class="app-dialog command-dialog" id="commandDialog" aria-labelledby="commandTitle">
+      <div class="command-search-row">
+        <svg class="icon"><use href="#icon-search"></use></svg>
+        <label class="sr-only" for="commandInput" id="commandTitle">搜索内容或运行命令</label>
+        <input id="commandInput" type="search" role="combobox" aria-controls="commandResults" aria-expanded="false" aria-autocomplete="list" placeholder="搜索内容或运行命令" autocomplete="off" />
+        <kbd>Esc</kbd>
+      </div>
+      <div class="command-results" id="commandResults" role="listbox" aria-label="命令结果">
+        <span class="command-group-label">快速前往</span>
+        <button type="button" class="command-item" id="command-workspace" role="option" data-command-view="workspace"><span class="command-icon"><svg class="icon"><use href="#icon-pen"></use></svg></span><span><strong>创作工作区</strong><small>继续编辑当前分场</small></span><kbd>↵</kbd></button>
+        <button type="button" class="command-item" id="command-knowledge" role="option" data-command-view="knowledge"><span class="command-icon"><svg class="icon"><use href="#icon-database"></use></svg></span><span><strong>知识库</strong><small>管理 Obsidian 和本地资料</small></span></button>
+        <button type="button" class="command-item" id="command-connections" role="option" data-command-view="connections"><span class="command-icon"><svg class="icon"><use href="#icon-plug"></use></svg></span><span><strong>连接中心</strong><small>API、CLI 与本地模型</small></span></button>
+        <span class="command-group-label">当前项目</span>
+        <button type="button" class="command-item" id="command-outline" role="option" data-command-doc="outline"><span class="command-icon"><svg class="icon"><use href="#icon-layers"></use></svg></span><span><strong>全剧大纲</strong><small>前期创作</small></span></button>
+        <button type="button" class="command-item" id="command-episode" role="option" data-command-doc="episode-1"><span class="command-icon"><svg class="icon"><use href="#icon-file"></use></svg></span><span><strong>第 1 集 · 待命名</strong><small>第一幕 · 待规划</small></span></button>
+      </div>
+      <div class="command-footer"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 打开</span></div>
+    </dialog>
+
+    <dialog class="app-dialog form-dialog" id="newProjectDialog" aria-labelledby="newProjectTitle">
+      <form method="dialog" id="newProjectForm">
+        <div class="dialog-header">
+          <div><span class="eyebrow">开始创作</span><h2 id="newProjectTitle">新建创作项目</h2></div>
+          <button class="icon-button icon-button-compact" type="button" data-action="close-dialog" aria-label="关闭"><svg class="icon"><use href="#icon-x"></use></svg></button>
+        </div>
+        <div class="form-field">
+          <label for="projectName">项目名称</label>
+          <input id="projectName" name="projectName" required value="未命名故事" autocomplete="off" />
+          <small>将作为当前本机项目名称。</small>
+        </div>
+        <fieldset class="content-type-field">
+          <legend>内容类型</legend>
+          <label><input type="radio" name="contentType" value="短剧" checked /><span><svg class="icon"><use href="#icon-file"></use></svg><strong>短剧</strong><small>分集与分场剧本</small></span></label>
+          <label><input type="radio" name="contentType" value="漫剧" /><span><svg class="icon"><use href="#icon-layers"></use></svg><strong>漫剧</strong><small>分镜文字与对白</small></span></label>
+          <label><input type="radio" name="contentType" value="通用故事" /><span><svg class="icon"><use href="#icon-book"></use></svg><strong>通用故事</strong><small>灵感、大纲与正文</small></span></label>
+        </fieldset>
+        <div class="dialog-warning" role="note"><svg class="icon"><use href="#icon-alert"></use></svg><span>当前版本一次保留一个项目；继续会替换当前本机项目数据。后续版本将支持多项目列表。</span></div>
+        <label class="replace-confirm"><input id="replaceProjectConfirm" type="checkbox" required /><span>我了解当前项目内容将被替换</span></label>
+        <div class="dialog-actions">
+          <button class="secondary-button" type="button" data-action="close-dialog">取消</button>
+          <button class="primary-button" type="submit">替换并开始</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog form-dialog" id="connectionDialog" aria-labelledby="connectionDialogTitle">
+      <form method="dialog" id="connectionForm">
+        <div class="dialog-header">
+          <div><span class="eyebrow">模型 API</span><h2 id="connectionDialogTitle">配置 OpenAI 兼容连接</h2></div>
+          <button class="icon-button icon-button-compact" type="button" data-action="close-dialog" aria-label="关闭"><svg class="icon"><use href="#icon-x"></use></svg></button>
+        </div>
+        <input id="connectionId" name="connectionId" type="hidden" />
+        <div class="form-field"><label for="connectionKind">连接类型</label><select id="connectionKind" name="connectionKind"><option value="openai-compatible">OpenAI 兼容 API</option><option value="ollama">Ollama 本地服务</option></select></div>
+        <div class="form-field"><label for="connectionName">连接名称</label><input id="connectionName" name="connectionName" value="我的模型" autocomplete="off" required /></div>
+        <div class="form-field"><label for="baseUrl">API 地址</label><input id="baseUrl" type="url" value="https://api.example.com/v1" autocomplete="url" /></div>
+        <div class="form-field" id="apiKeyField"><label for="apiKey">API Key</label><input id="apiKey" type="password" placeholder="仅本次应用会话使用" autocomplete="new-password" /><small>不会写入 localStorage 或项目文件；刷新后需要重新输入。</small></div>
+        <div class="form-field"><label for="modelName">默认模型</label><input id="modelName" name="modelName" value="gpt-4.1-mini" autocomplete="off" required /></div>
+        <div class="dialog-inline-status" id="connectionTestStatus" role="status"><svg class="icon"><use href="#icon-lock"></use></svg><span>尚未测试连接</span></div>
+        <div class="dialog-actions dialog-actions-split">
+          <button class="secondary-button" type="button" data-action="modal-test-connection">测试连接</button>
+          <div><button class="text-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">保存连接</button></div>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog form-dialog" id="newContentDialog" aria-labelledby="newContentTitle">
+      <form method="dialog" id="newContentForm">
+        <div class="dialog-header">
+          <div><span class="eyebrow">项目结构</span><h2 id="newContentTitle">新建分集或分场</h2></div>
+          <button class="icon-button icon-button-compact" type="button" data-action="close-dialog" aria-label="关闭"><svg class="icon"><use href="#icon-x"></use></svg></button>
+        </div>
+        <div class="form-field"><label for="newContentType">内容类型</label><select id="newContentType" name="contentType"><option value="episode">分集</option><option value="scene">分场</option></select></div>
+        <div class="form-field" id="newContentParentField"><label for="newContentParent">所属分集</label><select id="newContentParent" name="parentId"></select></div>
+        <div class="form-field"><label for="newContentName">标题</label><input id="newContentName" name="title" autocomplete="off" required placeholder="输入分集或分场标题" /></div>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">创建并打开</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog form-dialog" id="documentDialog" aria-labelledby="documentDialogTitle">
+      <form method="dialog" id="documentForm">
+        <div class="dialog-header">
+          <div><span class="eyebrow">内容信息</span><h2 id="documentDialogTitle">编辑当前内容</h2></div>
+          <button class="icon-button icon-button-compact" type="button" data-action="close-dialog" aria-label="关闭"><svg class="icon"><use href="#icon-x"></use></svg></button>
+        </div>
+        <div class="form-field"><label for="documentName">标题</label><input id="documentName" name="title" required autocomplete="off" /></div>
+        <div class="form-field"><label for="documentIntent">创作目标</label><textarea id="documentIntent" name="intent" rows="3"></textarea></div>
+        <div class="form-field"><label for="documentKicker">场次 / 标识</label><input id="documentKicker" name="kicker" autocomplete="off" /></div>
+        <div class="form-field"><label for="documentMeta">标签</label><input id="documentMeta" name="meta" autocomplete="off" placeholder="用逗号分隔，例如：室内，夜，主角" /></div>
+        <div class="document-order-actions" id="documentOrderActions">
+          <button class="secondary-button" type="button" data-action="move-document-up">上移</button>
+          <button class="secondary-button" type="button" data-action="move-document-down">下移</button>
+          <button class="danger-button" type="button" data-action="delete-document">删除</button>
+        </div>
+        <div class="dialog-warning" id="deleteDocumentConfirm" hidden><svg class="icon"><use href="#icon-alert"></use></svg><span></span></div>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-action="duplicate-document">创建副本</button><div><button class="text-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">保存修改</button></div></div>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog form-dialog" id="knowledgeDialog" aria-labelledby="knowledgeDialogTitle">
+      <form method="dialog" id="knowledgeForm">
+        <div class="dialog-header">
+          <div><span class="eyebrow">只读接入</span><h2 id="knowledgeDialogTitle">添加知识来源</h2></div>
+          <button class="icon-button icon-button-compact" type="button" data-action="close-dialog" aria-label="关闭"><svg class="icon"><use href="#icon-x"></use></svg></button>
+        </div>
+        <fieldset class="source-type-options">
+          <legend>来源类型</legend>
+          <label><input type="radio" name="sourceType" value="obsidian" checked /><span><svg class="icon"><use href="#icon-database"></use></svg><strong>Obsidian Vault</strong><small>只读导入 Markdown 与纯文本</small></span></label>
+          <label><input type="radio" name="sourceType" value="folder" /><span><svg class="icon"><use href="#icon-folder"></use></svg><strong>普通文件夹</strong><small>Markdown 与纯文本资料</small></span></label>
+        </fieldset>
+        <div class="form-field"><label for="sourcePath">目录位置</label><div class="input-with-button"><input id="sourcePath" value="尚未选择目录" readonly /><button type="button" class="secondary-button" data-action="choose-folder">选择目录</button></div><small>应用只读取你本次明确选择的 Markdown 与纯文本文件；单次最多 80 个文件、单文件 1 MiB、总计 4 MiB。</small></div>
+        <input id="knowledgeFilePicker" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" multiple webkitdirectory hidden />
+        <div class="privacy-callout"><svg class="icon"><use href="#icon-lock"></use></svg><p><strong>默认只读</strong><br />AI 仅在你明确勾选知识上下文时使用这些内容。</p></div>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">添加并建立索引</button></div>
+      </form>
+    </dialog>
+
+    <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
+    <div class="sr-only" id="a11yAnnouncements" aria-live="polite"></div>
+
+    <script src="./src/app.js" type="module"></script>
+  </body>
+</html>
