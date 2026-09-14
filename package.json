@@ -1,6 +1,6 @@
 {
   "name": "ai-creator-workbench",
-  "version": "0.1.0",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "build:web": "node scripts/build-frontend.mjs",
     "desktop:dev": "node scripts/run-tauri.mjs dev",
     "desktop:build:mac": "node scripts/run-tauri.mjs build --target aarch64-apple-darwin --bundles app,dmg",
-    "check": "node --check src/app.js && node --check scripts/dev-server.mjs && node --check scripts/build-frontend.mjs && node --check scripts/run-tauri.mjs"
+    "check": "node --check src/app.js && node --check src/project-store.js && node --check src/semantic-search.js && node --check src/inspirations.js && node --check src/knowledge-index.js && node --check scripts/dev-server.mjs && node --check scripts/build-frontend.mjs && node --check scripts/run-tauri.mjs"
   },
   "engines": {
     "node": ">=18"

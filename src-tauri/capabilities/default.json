@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default permissions for the main workbench window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:allow-destroy", "core:window:allow-start-dragging"]
 }

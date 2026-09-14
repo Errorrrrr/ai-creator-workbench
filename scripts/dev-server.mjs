@@ -1,10 +1,11 @@
-import { createReadStream, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { execFile, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { ANTIGRAVITY_ARGS, antigravityInput, parseAntigravityOutput } from './antigravity-protocol.mjs'
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(scriptDirectory, '..')
@@ -13,21 +14,24 @@ const execFileAsync = promisify(execFile)
 const cliRuntimeRoot = join(tmpdir(), 'ai-creator-workbench-runtime')
 mkdirSync(cliRuntimeRoot, { recursive: true, mode: 0o700 })
 let cliTaskRunning = false
+const CLAUDE_LOGIN_ARGS = ['--print', '--output-format', 'text', '--permission-mode', 'dontAsk', '--tools', '', '--no-session-persistence', '--disable-slash-commands', '--no-chrome', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--settings', '{"disableAllHooks":true}']
 
 const cliDrivers = [
+  { id: 'antigravity', name: 'Antigravity CLI', command: 'agy', versionArgs: ['--help'], generateArgs: ANTIGRAVITY_ARGS },
   {
     id: 'codex',
     name: 'Codex CLI',
     command: 'codex',
-    versionArgs: ['--version']
+    versionArgs: ['exec', '--help'],
+    generateArgs: ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--color', 'never', '-c', 'approval_policy="never"']
   },
   {
     id: 'claude',
     name: 'Claude Code',
     command: 'claude',
-    versionArgs: ['--version'],
+    versionArgs: ['--help'],
     generateArgs: ['--print', '--bare', '--output-format', 'text', '--permission-mode', 'dontAsk', '--tools', '', '--no-session-persistence', '--disable-slash-commands', '--no-chrome'],
-    requiresEnvironmentCredential: true
+    requiresEnvironmentCredential: false
   },
   { id: 'gemini', name: 'Gemini CLI', command: 'gemini', versionArgs: ['--version'] }
 ]
@@ -113,7 +117,11 @@ async function inspectCli(driver) {
       maxBuffer: 64 * 1024,
       windowsHide: true
     })
-    const version = `${stdout || ''}\n${stderr || ''}`.trim().split(/\r?\n/)[0].slice(0, 160)
+    const help = `${stdout || ''}\n${stderr || ''}`
+    const requiredFlags = driver.id === 'codex' ? ['--sandbox', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--output-last-message'] : driver.id === 'claude' ? ['--bare', '--tools', '--setting-sources', '--strict-mcp-config', '--no-session-persistence', '--disable-slash-commands'] : []
+    if (!requiredFlags.every(flag => help.includes(flag))) throw new Error('CLI 必需参数不受支持')
+    if (driver.id === 'antigravity' && !['--input-format', '--output-format', '--sandbox', '--mode', '--disable-slash-commands', '--print-timeout'].every(flag => help.includes(flag))) throw new Error('agy headless flags unavailable')
+    const version = ['antigravity', 'codex', 'claude'].includes(driver.id) ? '非交互调用参数已检测' : help.trim().split(/\r?\n/)[0].slice(0, 160)
     const compatibility = await inspectExecutableCompatibility(executablePath)
     return {
       id: driver.id,
@@ -189,6 +197,11 @@ function buildCliEnvironment(driverId, isolatedHome) {
   const authNames = driverId === 'claude'
     ? ['ANTHROPIC_API_KEY']
     : ['OPENAI_API_KEY']
+  if (['antigravity', 'codex', 'claude-login'].includes(driverId)) {
+    if (!process.env.HOME) throw new Error('无法定位 CLI 用户目录')
+    const extra = driverId === 'codex' ? ['CODEX_HOME'] : driverId === 'claude-login' ? ['CLAUDE_CONFIG_DIR'] : []
+    return { ...Object.fromEntries([...commonNames, ...extra, 'HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'].filter(name => typeof process.env[name] === 'string').map(name => [name, process.env[name]])), ...(driverId === 'claude-login' ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}) }
+  }
   return {
     ...Object.fromEntries([...commonNames, ...authNames]
     .filter((name) => typeof process.env[name] === 'string')
@@ -214,6 +227,7 @@ function runCliProcess(executablePath, args, input, { driverId, cwd, signal, tim
       cwd,
       env: { ...buildCliEnvironment(driverId, cwd), NO_COLOR: '1', TERM: 'dumb' },
       shell: false,
+      detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     })
@@ -225,6 +239,10 @@ function runCliProcess(executablePath, args, input, { driverId, cwd, signal, tim
 
     const stop = () => {
       if (settled) return
+      if (process.platform !== 'win32' && child.pid) {
+        try { process.kill(-child.pid, 'SIGKILL') } catch { /* Already exited. */ }
+        return
+      }
       child.kill('SIGTERM')
       const forceTimer = setTimeout(() => {
         if (!settled) child.kill('SIGKILL')
@@ -257,6 +275,9 @@ function runCliProcess(executablePath, args, input, { driverId, cwd, signal, tim
     })
     child.on('close', (code, terminationSignal) => {
       if (settled) return
+      if (process.platform !== 'win32' && child.pid) {
+        try { process.kill(-child.pid, 'SIGKILL') } catch { /* No remaining descendants. */ }
+      }
       settled = true
       clearTimeout(timeout)
       signal?.removeEventListener('abort', onAbort)
@@ -270,7 +291,7 @@ function runCliProcess(executablePath, args, input, { driverId, cwd, signal, tim
         rejectProcess(Object.assign(new Error('CLI 输出超过限制'), { statusCode: 413 }))
       } else if (code !== 0) {
         rejectProcess(Object.assign(new Error(sanitizeCliError(diagnostics)), { statusCode: 502 }))
-      } else if (!output) {
+      } else if (!output && driverId !== 'codex') {
         rejectProcess(Object.assign(new Error('CLI 未返回内容'), { statusCode: 502 }))
       } else {
         resolveProcess(output)
@@ -309,6 +330,7 @@ async function handleCliGenerateRequest(request, response) {
   let runDirectory = null
   try {
     const payload = await readJsonBody(request)
+    if (['antigravity', 'codex', 'claude'].includes(payload.driverId) && payload.allowUserProfile !== true) throw Object.assign(new Error('请先确认本次 CLI 调用的登录态与上下文使用'), { statusCode: 403 })
     const driver = cliDrivers.find((item) => item.id === payload.driverId && item.generateArgs)
     if (!driver) throw Object.assign(new Error('该 CLI 未在受控驱动列表中'), { statusCode: 400 })
     if (getCliExecutionStatus(driver) !== 'available') {
@@ -318,18 +340,26 @@ async function handleCliGenerateRequest(request, response) {
     if (!executablePath) throw Object.assign(new Error(`${driver.name} 未安装或不在 PATH 中`), { statusCode: 404 })
     const prompt = createCliPrompt(payload.messages)
     runDirectory = mkdtempSync(join(cliRuntimeRoot, 'run-'))
+    const claudeLogin = driver.id === 'claude' && !process.env.ANTHROPIC_API_KEY
+    const answerPath = join(runDirectory, 'answer.txt')
+    const args = driver.id === 'codex' ? [...driver.generateArgs, '--output-last-message', answerPath] : claudeLogin ? CLAUDE_LOGIN_ARGS : driver.generateArgs
     const controller = new AbortController()
     const closeHandler = () => {
       if (!response.writableEnded) controller.abort()
     }
     response.on('close', closeHandler)
-    const output = await runCliProcess(executablePath, driver.generateArgs, prompt, {
+    let output = await runCliProcess(executablePath, args, driver.id === 'antigravity' ? antigravityInput(prompt) : prompt, {
       cwd: runDirectory,
-      driverId: driver.id,
+      driverId: claudeLogin ? 'claude-login' : driver.id,
       signal: controller.signal
     })
     response.off('close', closeHandler)
-    sendJson(response, 200, { output, driverId: driver.id })
+    if (driver.id === 'codex') {
+      if (!existsSync(answerPath) || statSync(answerPath).size > 1024 * 1024) throw new Error('Codex 未返回有效的最终答复')
+      output = readFileSync(answerPath, 'utf8').trim()
+      if (!output) throw new Error('Codex 未返回内容')
+    }
+    sendJson(response, 200, { output: driver.id === 'antigravity' ? parseAntigravityOutput(output) : output, driverId: driver.id })
   } catch (error) {
     if (!response.headersSent && !response.destroyed) {
       sendJson(response, Number(error?.statusCode) || 500, {

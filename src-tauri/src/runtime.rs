@@ -24,7 +24,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
 const CLI_DETECTION_TIMEOUT: Duration = Duration::from_secs(3);
 const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
-const MAX_VERSION_OUTPUT_BYTES: usize = 8 * 1024;
+const MAX_VERSION_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 96 * 1024;
 const MAX_STDOUT_BYTES: usize = 1024 * 1024;
@@ -116,21 +116,75 @@ const CLAUDE_GENERATE_ARGS: &[&str] = &[
     "--no-chrome",
 ];
 
-fn cli_drivers() -> [CliDriverDefinition; 3] {
+const CODEX_GENERATE_ARGS: &[&str] = &[
+    "exec",
+    "--sandbox",
+    "read-only",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--color",
+    "never",
+    "-c",
+    "approval_policy=\"never\"",
+];
+const CLAUDE_LOGIN_ARGS: &[&str] = &[
+    "--print",
+    "--output-format",
+    "text",
+    "--permission-mode",
+    "dontAsk",
+    "--tools",
+    "",
+    "--no-session-persistence",
+    "--disable-slash-commands",
+    "--no-chrome",
+    "--setting-sources",
+    "",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--settings",
+    "{\"disableAllHooks\":true}",
+];
+
+const ANTIGRAVITY_GENERATE_ARGS: &[&str] = &[
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--mode",
+    "plan",
+    "--sandbox",
+    "--disable-slash-commands",
+    "--print-timeout",
+    "110s",
+];
+
+fn cli_drivers() -> [CliDriverDefinition; 4] {
     [
+        CliDriverDefinition {
+            id: "antigravity",
+            name: "Antigravity CLI",
+            command: "agy",
+            version_args: &["--help"],
+            generate_args: ANTIGRAVITY_GENERATE_ARGS,
+            credential_name: None,
+        },
         CliDriverDefinition {
             id: "codex",
             name: "Codex CLI",
             command: "codex",
-            version_args: &["--version"],
-            generate_args: &[],
+            version_args: &["exec", "--help"],
+            generate_args: CODEX_GENERATE_ARGS,
             credential_name: None,
         },
         CliDriverDefinition {
             id: "claude",
             name: "Claude Code",
             command: "claude",
-            version_args: &["--version"],
+            version_args: &["--help"],
             generate_args: CLAUDE_GENERATE_ARGS,
             credential_name: Some("ANTHROPIC_API_KEY"),
         },
@@ -214,12 +268,56 @@ pub(crate) struct GenerationRequest {
     model: String,
     api_key: Option<String>,
     driver_id: Option<String>,
+    #[serde(default)]
+    allow_user_profile: bool,
     messages: Vec<MessageInput>,
 }
 
 #[derive(Serialize)]
 pub(crate) struct GenerationResult {
     output: String,
+}
+
+#[tauri::command]
+pub(crate) async fn embed_text(
+    base_url: String,
+    model: String,
+    texts: Vec<String>,
+) -> Result<Vec<Vec<f64>>, String> {
+    if model.trim().is_empty()
+        || model.len() > 200
+        || texts.is_empty()
+        || texts.len() > 8
+        || texts.iter().any(|text| text.len() > 16000)
+    {
+        return Err("Embedding 请求参数超出限制".into());
+    }
+    let url = validate_base_url("ollama", &base_url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "无法建立请求")?;
+    let response = client
+        .post(endpoint_url(&url, "api/embed")?)
+        .json(&json!({"model": model, "input": texts}))
+        .send()
+        .await
+        .map_err(|_| "无法连接本机 Embedding 模型，请检查 Ollama 服务")?;
+    if !response.status().is_success() {
+        return Err(provider_status_error(response.status()));
+    }
+    let payload = response_json(response, &CancellationToken::new()).await?;
+    let vectors: Vec<Vec<f64>> =
+        serde_json::from_value(payload["embeddings"].clone()).map_err(|_| "Embedding 响应无效")?;
+    if vectors.len() != texts.len()
+        || vectors
+            .iter()
+            .any(|v| v.is_empty() || v.len() > 8192 || v.iter().any(|x| !x.is_finite()))
+    {
+        return Err("Embedding 向量无效".into());
+    }
+    Ok(vectors)
 }
 
 fn trusted_executable_directories() -> Vec<PathBuf> {
@@ -292,9 +390,10 @@ fn execution_status(driver: &CliDriverDefinition) -> &'static str {
     if driver.generate_args.is_empty() {
         return "disabled";
     }
-    if driver
-        .credential_name
-        .is_some_and(|name| std::env::var_os(name).is_none())
+    if driver.id != "claude"
+        && driver
+            .credential_name
+            .is_some_and(|name| std::env::var_os(name).is_none())
     {
         return "credential_required";
     }
@@ -404,16 +503,55 @@ async fn inspect_cli(driver: &CliDriverDefinition) -> CliDriverStatus {
         String::from_utf8_lossy(&stdout),
         String::from_utf8_lossy(&stderr)
     );
+    let required_flags: &[&str] = match driver.id {
+        "codex" => &[
+            "--sandbox",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--output-last-message",
+        ],
+        "claude" => &[
+            "--bare",
+            "--tools",
+            "--setting-sources",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+            "--disable-slash-commands",
+        ],
+        _ => &[],
+    };
+    if !required_flags.iter().all(|flag| combined.contains(flag)) {
+        return error_status();
+    }
+    if driver.id == "antigravity"
+        && ![
+            "--input-format",
+            "--output-format",
+            "--sandbox",
+            "--mode",
+            "--disable-slash-commands",
+            "--print-timeout",
+        ]
+        .iter()
+        .all(|flag| combined.contains(flag))
+    {
+        return error_status();
+    }
     CliDriverStatus {
         id: driver.id.into(),
         name: driver.name.into(),
         status: "ready".into(),
         executable_path: Some(display_executable_path(&path)),
-        version: combined
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(|line| line.chars().take(160).collect()),
+        version: if matches!(driver.id, "antigravity" | "codex" | "claude") {
+            Some("非交互调用参数已检测".into())
+        } else {
+            combined
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| line.chars().take(160).collect())
+        },
         can_generate: execution_status == "available",
         execution_status: execution_status.into(),
         binary_architecture,
@@ -833,24 +971,50 @@ async fn generate_cli(
 
 async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Result<String, String> {
     let driver_id = request.driver_id.as_deref().ok_or("缺少 CLI 驱动")?;
+    if matches!(driver_id, "antigravity" | "codex" | "claude") && !request.allow_user_profile {
+        return Err("请先确认本次 CLI 调用的登录态与上下文使用".into());
+    }
     let drivers = cli_drivers();
     let driver = drivers
         .iter()
         .find(|driver| driver.id == driver_id && !driver.generate_args.is_empty())
         .ok_or("该 CLI 未在受控驱动列表中")?;
-    if execution_status(driver) != "available" {
+    if execution_status(driver) != "available"
+        && request
+            .api_key
+            .as_ref()
+            .is_none_or(|key| key.trim().is_empty())
+    {
         return Err("CLI 安全模式需要通过环境变量显式提供模型凭据".into());
     }
     let executable_path = find_executable(driver.command)
         .ok_or_else(|| format!("{} 未安装或不在受信目录中", driver.name))?;
     let prompt = create_cli_prompt(&request.messages)?;
+    let prompt = if driver_id == "antigravity" {
+        format!(
+            "{}\n",
+            json!({"event":"user", "message":{"content":prompt}})
+        )
+    } else {
+        prompt
+    };
     let run_directory = tempfile::Builder::new()
         .prefix("ai-creator-workbench-")
         .tempdir()
         .map_err(|_| "无法创建 CLI 隔离目录")?;
     let mut command = Command::new(executable_path);
+    let claude_login = driver_id == "claude"
+        && request
+            .api_key
+            .as_ref()
+            .is_none_or(|key| key.trim().is_empty())
+        && std::env::var_os("ANTHROPIC_API_KEY").is_none();
     command
-        .args(driver.generate_args)
+        .args(if claude_login {
+            CLAUDE_LOGIN_ARGS
+        } else {
+            driver.generate_args
+        })
         .current_dir(run_directory.path())
         .env_clear()
         .env("HOME", run_directory.path())
@@ -867,13 +1031,63 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
     let trusted_path = std::env::join_paths(trusted_executable_directories())
         .map_err(|_| "无法建立 CLI 受信 PATH")?;
     command.env("PATH", trusted_path);
+    if driver_id == "codex" {
+        command
+            .arg("--output-last-message")
+            .arg(run_directory.path().join("answer.txt"));
+        if let Some(value) = std::env::var_os("CODEX_HOME") {
+            command.env("CODEX_HOME", value);
+        }
+    }
+    if claude_login {
+        command.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+        if let Some(value) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+            command.env("CLAUDE_CONFIG_DIR", value);
+        }
+    }
+    if driver_id == "antigravity" || driver_id == "codex" || claude_login {
+        let user_home = std::env::var_os("HOME").ok_or("无法定位 CLI 用户目录")?;
+        command.env("HOME", &user_home);
+        command
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_CACHE_HOME");
+        for name in [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "USER",
+            "LOGNAME",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+    }
     for name in ["LANG", "LC_ALL", "LC_CTYPE"] {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }
     }
     if let Some(name) = driver.credential_name {
-        if let Some(value) = std::env::var_os(name) {
+        if let Some(value) = request
+            .api_key
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            if value.len() > 8192 {
+                return Err("CLI 密钥长度超出限制".into());
+            }
+            command.env(name, value);
+        } else if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }
     }
@@ -949,10 +1163,48 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
         return Err(sanitize_cli_error(&String::from_utf8_lossy(&stderr)).into());
     }
     let output = String::from_utf8_lossy(&stdout).trim().to_owned();
+    if driver_id == "codex" {
+        let answer_path = run_directory.path().join("answer.txt");
+        let metadata = std::fs::metadata(&answer_path).map_err(|_| "Codex 未返回最终答复")?;
+        if metadata.len() > MAX_STDOUT_BYTES as u64 {
+            return Err("Codex 答复超过限制".into());
+        }
+        let answer = std::fs::read_to_string(answer_path).map_err(|_| "无法读取 Codex 答复")?;
+        if answer.trim().is_empty() {
+            return Err("Codex 未返回内容".into());
+        }
+        return Ok(answer.trim().to_owned());
+    }
+    if driver_id == "antigravity" {
+        return parse_antigravity_output(&output);
+    }
     if output.is_empty() {
         return Err("CLI 未返回内容".into());
     }
     Ok(output)
+}
+
+fn parse_antigravity_output(output: &str) -> Result<String, String> {
+    let mut result = None;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let event: Value =
+            serde_json::from_str(line).map_err(|_| "Antigravity 返回了无效的流数据")?;
+        if event["event"] == "result" {
+            if result.is_some() {
+                return Err("Antigravity 返回了多个结果，已停止采纳".into());
+            }
+            result = Some(event["result"].clone());
+        }
+    }
+    let result = result.ok_or("Antigravity 未返回完整结果")?;
+    if result["status"] != "SUCCESS" {
+        return Err(sanitize_cli_error(result["error"].as_str().unwrap_or("")).into());
+    }
+    let text = result["response"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("Antigravity 未返回内容")?;
+    Ok(text.trim().to_owned())
 }
 
 #[tauri::command]

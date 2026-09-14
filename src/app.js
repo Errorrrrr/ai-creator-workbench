@@ -4,6 +4,19 @@ import {
   searchKnowledgeIndex,
   serializeKnowledgeIndex
 } from './knowledge-index.js'
+import { initializeProjects, getActiveProject, listProjects, saveProject, createProject, activateProject, renameProject, projectBackup, parseBackup, downloadDocument } from './project-store.js'
+import { buildSemanticIndex, semanticSearch } from './semantic-search.js'
+import { initializeInspirations } from './inspirations.js'
+
+let projectBoot
+try {
+  projectBoot = await initializeProjects()
+} catch (error) {
+  document.body.textContent = `无法打开项目库：${error.message || error}。原数据未被覆盖，请检查磁盘空间或重新打开应用。`
+  throw error
+}
+let activeProjectId = projectBoot.id
+let projectTransition = false
 
 const desktopInvoke = window.__TAURI__?.core?.invoke
 const isDesktopRuntime = typeof desktopInvoke === 'function'
@@ -25,20 +38,11 @@ const WORKSPACE_SCHEMA_VERSION = 2
 const WORKSPACE_STORAGE_KEY = 'ai-creator-workbench'
 const CORE_DOCUMENT_IDS = ['idea', 'brief', 'world', 'characters', 'outline']
 const KNOWLEDGE_INDEX_STORAGE_KEY = 'ai-creator-workbench:knowledge-index'
-const MAX_KNOWLEDGE_CHUNKS = 160
+const MAX_KNOWLEDGE_CHUNKS = 2000
 const MAX_SELECTED_KNOWLEDGE_CHUNKS = 6
 
 const tabFallbacks = {
-  outline: `本集目标
-【待填写】
-
-关键转折
-1. 【待填写】
-2. 【待填写】
-3. 【待填写】
-
-结尾钩子
-【待填写】`,
+  outline: '',
   references: `已引用设定
 
 暂无引用。连接知识库后，可将人物、世界观与历史素材作为只读上下文加入生成任务。
@@ -53,7 +57,7 @@ const tabFallbacks = {
 }
 
 const defaultProject = {
-  name: '未命名短剧',
+  name: '',
   type: '短剧',
   stage: '短剧 · 新项目',
   template: 'blank'
@@ -74,6 +78,16 @@ const defaultConnections = [
 ]
 
 const sessionSecrets = new Map()
+
+async function connectionSecret(connection) {
+  if (sessionSecrets.has(connection.id)) return sessionSecrets.get(connection.id)
+  if (isDesktopRuntime && connection.rememberSecret) {
+    const secret = await invokeDesktop('credential_load', { id: connection.id, endpoint: connection.baseUrl })
+    if (secret) sessionSecrets.set(connection.id, secret)
+    return secret || ''
+  }
+  return ''
+}
 const connectionTestTasks = new Map()
 let connectionTestSequence = 0
 let connectionBatchTesting = false
@@ -82,8 +96,8 @@ let connectionDraftTestController = null
 
 function createBlankStructure() {
   return {
-    acts: [{ id: 'act-1', title: '第一幕 · 待规划', collapsed: false, episodeIds: ['episode-1'] }],
-    episodes: { 'episode-1': { sceneIds: ['scene-1'] } }
+    acts: [],
+    episodes: {}
   }
 }
 
@@ -100,7 +114,7 @@ function createGenericDocument(documentId, title = '未命名内容') {
     meta: ['待完善'],
     mode: isScene ? '剧本模式' : isEpisode ? '分集模式' : '创作模式',
     labels: isScene ? ['剧本', '本场大纲', '设定引用', '历史版本'] : ['正文', '大纲', '设定引用', '历史版本'],
-    content: isScene ? '【待创作】\n\n场景目标：' : '【待完善】'
+    content: ''
   }
 }
 
@@ -147,6 +161,7 @@ function normalizeConnections(value) {
       status: 'unknown',
       capabilities: Array.isArray(connection.capabilities) ? connection.capabilities.filter((item) => typeof item === 'string').slice(0, 6) : [],
       isActive: Boolean(connection.isActive),
+      rememberSecret: Boolean(connection.rememberSecret),
       error: null
     }
   }).filter(Boolean)
@@ -223,22 +238,16 @@ function normalizeStoredVersions(versions) {
   return normalized
 }
 
-const storedWorkspace = readStoredWorkspace()
+const storedWorkspace = projectBoot.workspace
 const initialProject = normalizeStoredProject(storedWorkspace.project)
-const isLegacyWorkspace = storedWorkspace.schemaVersion !== WORKSPACE_SCHEMA_VERSION
 const storedDocumentMap = storedWorkspace.documents && typeof storedWorkspace.documents === 'object' && !Array.isArray(storedWorkspace.documents)
   ? storedWorkspace.documents
   : {}
 const starterDocuments = createStarterDocuments(initialProject.name, initialProject.type)
-let initialDocuments
-if (!isLegacyWorkspace && Object.keys(storedDocumentMap).length) {
-  initialDocuments = Object.fromEntries(CORE_DOCUMENT_IDS.map((documentId) => [documentId, structuredClone(starterDocuments[documentId])]))
-} else {
-  initialDocuments = starterDocuments
-}
+const initialDocuments = {}
 
 for (const [documentId, storedDocument] of Object.entries(storedDocumentMap)) {
-  const baseDocument = initialDocuments[documentId] || createGenericDocument(documentId)
+  const baseDocument = starterDocuments[documentId] || createGenericDocument(documentId)
   initialDocuments[documentId] = mergeStoredDocument(baseDocument, storedDocument)
 }
 
@@ -266,7 +275,7 @@ for (const documentId of Object.keys(initialVersions)) {
 }
 let initialKnowledgeIndex
 try {
-  initialKnowledgeIndex = deserializeKnowledgeIndex(localStorage.getItem(KNOWLEDGE_INDEX_STORAGE_KEY))
+  initialKnowledgeIndex = deserializeKnowledgeIndex(JSON.stringify(projectBoot.index))
 } catch {
   initialKnowledgeIndex = deserializeKnowledgeIndex(null)
 }
@@ -281,7 +290,7 @@ const state = {
   currentDocId: (() => {
     const requestedId = storedWorkspace.currentDocId
     if (requestedId && initialDocuments[requestedId]) return requestedId
-    return 'idea'
+    return Object.keys(initialDocuments)[0] || null
   })(),
   currentView: 'workspace',
   project: initialProject,
@@ -292,6 +301,7 @@ const state = {
   knowledge: {
     sources: storedSources || [],
     index: initialKnowledgeIndex,
+    semantic: storedWorkspace.knowledge?.semantic || null,
     results: [],
     selectedChunkIds: Array.isArray(storedWorkspace.knowledge?.selectedChunkIds)
       ? storedWorkspace.knowledge.selectedChunkIds.filter((id) => typeof id === 'string').slice(0, MAX_SELECTED_KNOWLEDGE_CHUNKS)
@@ -439,57 +449,46 @@ function getEditHistory(documentId = state.currentDocId, tabName = state.activeT
   return state.editHistories.get(key)
 }
 
-function persistWorkspace() {
-  let previousWorkspace
-  let previousIndex
-  try {
-    previousWorkspace = localStorage.getItem(WORKSPACE_STORAGE_KEY)
-    previousIndex = localStorage.getItem(KNOWLEDGE_INDEX_STORAGE_KEY)
-  } catch {
-    state.storageFailed = true
-    setSaveStatus('error')
-    return false
+function workspaceSnapshot() {
+  return {
+    schemaVersion: WORKSPACE_SCHEMA_VERSION,
+    currentDocId: state.currentDocId,
+    activeTab: state.activeTab,
+    project: state.project,
+    documents: state.documents,
+    structure: state.structure,
+    tabContents: state.tabContents,
+    versions: state.versions,
+    versionCounters: state.versionCounters,
+    connections: state.connections.map(connection => ({ ...connection, status: 'unknown', error: null })),
+    knowledge: { sources: state.knowledge.sources, selectedChunkIds: state.knowledge.selectedChunkIds, semantic: state.knowledge.semantic },
+    theme: document.documentElement.dataset.theme
   }
+}
+
+let saveSequence = 0
+let pendingSaves = 0
+let unsavedEdits = false
+let editRevision = 0
+async function persistWorkspace() {
+  const sequence = ++saveSequence
+  const revision = editRevision
+  pendingSaves += 1
+  setSaveStatus('saving')
   try {
-    const workspacePayload = JSON.stringify({
-      schemaVersion: WORKSPACE_SCHEMA_VERSION,
-      currentDocId: state.currentDocId,
-      activeTab: state.activeTab,
-      project: state.project,
-      documents: state.documents,
-      structure: state.structure,
-      tabContents: state.tabContents,
-      versions: state.versions,
-      versionCounters: state.versionCounters,
-      connections: state.connections.map((connection) => ({
-        ...connection,
-        status: 'unknown',
-        error: null
-      })),
-      knowledge: {
-        sources: state.knowledge.sources,
-        selectedChunkIds: state.knowledge.selectedChunkIds
-      },
-      theme: document.documentElement.dataset.theme
-    })
-    const knowledgePayload = serializeKnowledgeIndex(state.knowledge.index)
-    localStorage.setItem(KNOWLEDGE_INDEX_STORAGE_KEY, knowledgePayload)
-    localStorage.setItem(WORKSPACE_STORAGE_KEY, workspacePayload)
-    state.storageFailed = false
-    return true
-  } catch {
-    try {
-      if (previousIndex === null) localStorage.removeItem(KNOWLEDGE_INDEX_STORAGE_KEY)
-      else localStorage.setItem(KNOWLEDGE_INDEX_STORAGE_KEY, previousIndex)
-      if (previousWorkspace === null) localStorage.removeItem(WORKSPACE_STORAGE_KEY)
-      else localStorage.setItem(WORKSPACE_STORAGE_KEY, previousWorkspace)
-    } catch {
-      // The UI still surfaces the failure if the browser also rejects rollback.
+    await saveProject(activeProjectId, workspaceSnapshot(), state.knowledge.index)
+    if (sequence === saveSequence && revision === editRevision) {
+      state.storageFailed = false
+      unsavedEdits = false
+      setSaveStatus('saved')
     }
+    return true
+  } catch (error) {
     state.storageFailed = true
     setSaveStatus('error')
+    showToast(readableError(error, '保存失败，请先导出备份'))
     return false
-  }
+  } finally { pendingSaves -= 1 }
 }
 
 function getEpisodeIds() {
@@ -676,9 +675,12 @@ function updateStageAdvanceButton() {
 }
 
 function renderProjectIdentity() {
-  document.querySelector('.project-switcher-copy strong').textContent = state.project.name
-  document.querySelector('.project-switcher-copy span').textContent = state.project.stage
-  document.querySelector('.explorer-project-title').textContent = state.project.name
+  const hasProject = Boolean(state.project.name || Object.keys(state.documents).length)
+  elements.appShell.classList.toggle('no-project', !hasProject)
+  document.querySelector('#emptyWorkspace').hidden = hasProject
+  document.querySelector('.project-switcher-copy strong').textContent = state.project.name || '新建项目'
+  document.querySelector('.project-switcher-copy span').textContent = hasProject ? state.project.stage : '开始你的创作'
+  document.querySelector('.explorer-project-title').textContent = state.project.name || '暂无项目'
   document.querySelector('.project-mark').textContent = state.project.name.slice(0, 1)
   document.querySelector('#projectBreadcrumb').textContent = state.project.name
   renderProjectTree()
@@ -694,8 +696,8 @@ function renderProjectIdentity() {
   }
 
   const sceneIds = getEpisodeIds().flatMap((episodeId) => state.structure.episodes[episodeId]?.sceneIds || [])
-  const completedScenes = sceneIds.filter((sceneId) => !state.documents[sceneId]?.content.startsWith('【待创作】')).length
-  const target = Math.max(5, sceneIds.length)
+  const completedScenes = sceneIds.filter((sceneId) => state.documents[sceneId]?.content.trim() && !state.documents[sceneId].content.startsWith('【待创作】')).length
+  const target = sceneIds.length
   const progress = target ? Math.round((completedScenes / target) * 100) : 0
   document.querySelector('.progress-copy strong').textContent = `${completedScenes} / ${target} 场`
   document.querySelector('.progress-track span').style.width = `${Math.min(100, progress)}%`
@@ -785,7 +787,7 @@ function renderHistoryControls() {
   return selected
 }
 
-function restoreSelectedVersion() {
+async function restoreSelectedVersion() {
   const entry = getSelectedHistoryVersion()
   if (!entry) {
     showToast('当前文档还没有可恢复的快照')
@@ -808,54 +810,20 @@ function restoreSelectedVersion() {
     tabName: targetTab,
     knowledgeChunks: entry.knowledgeChunks || []
   })
-  const saved = persistWorkspace()
+  const saved = await persistWorkspace()
   updateDocumentView({ keepFocus: true })
   showToast(saved ? `已将 v${entry.number} 恢复为新版本 v${versionNumber}` : '内容已恢复，但本地保存失败')
 }
 
 function createStarterDocuments(projectName, contentType) {
-  const documents = Object.fromEntries(
-    [...CORE_DOCUMENT_IDS, 'episode-1', 'scene-1'].map((documentId) => [documentId, createGenericDocument(documentId)])
-  )
-  const starterCopy = {
-    idea: ['核心灵感', `${projectName} · 第一个故事火花`, `先记录一个能持续生长的故事装置，再讨论人物与情节。`, `创作命题\n${projectName} 想讲一个怎样的故事？\n\n主角是谁\n写下主角最想得到的东西，以及最害怕面对的真相。\n\n故事引擎\n什么冲突可以在每一集或每一章持续发生？`],
-    brief: ['创作简报', `${projectName} · 创作方向`, '明确受众、类型、节奏和表达边界。', `内容类型\n${contentType}\n\n目标受众\n【待填写】\n\n核心体验\n【待填写】\n\n表达边界\n【待填写】`],
-    world: ['世界观设定', '第一条世界规则', '建立所有剧情必须遵守的事实与限制。', `基础背景\n【待填写】\n\n规则与代价\n【待填写】\n\n不可违背的设定\n【待填写】`],
-    characters: ['人物小传', '第一位核心人物', '从人物欲望、恐惧与变化开始塑造角色。', `人物身份\n【待填写】\n\n外在目标\n【待填写】\n\n内在缺口\n【待填写】\n\n人物变化\n【待填写】`],
-    outline: ['全剧大纲', `${projectName} · 故事结构`, '把核心冲突拆成可持续推进的阶段。', `开端\n【待填写】\n\n发展\n【待填写】\n\n高潮与结局\n【待填写】`]
+  const titles = {
+    idea: '核心灵感', brief: '创作简报', world: '世界观设定',
+    characters: '人物小传', outline: '全剧大纲'
   }
-
-  for (const [documentId, [title, sceneTitle, intent, content]] of Object.entries(starterCopy)) {
-    Object.assign(documents[documentId], { title, sceneTitle, intent, content, badge: '待完善' })
-  }
-
-  Object.assign(documents.idea, { kicker: 'Idea · 01', meta: [contentType, '待聚焦', '前期创作'] })
-  Object.assign(documents.brief, { kicker: 'Creative brief · draft', meta: [contentType, '受众待定', '节奏待定'] })
-  Object.assign(documents.world, { kicker: 'Canon · draft', meta: ['0 条正式设定', '规则待定', '前期创作'] })
-  Object.assign(documents.characters, { kicker: 'Character · 01', meta: ['身份待定', '核心人物', '弧光待定'] })
-  Object.assign(documents.outline, { kicker: 'Series outline · draft', meta: ['结构待定', '集数待定', '结局待定'] })
-
-  Object.assign(documents['episode-1'], {
-    title: '第 1 集 · 待命名',
-    breadcrumb: '第 1 集',
-    badge: '待创作',
-    kicker: '1-1 · 场景待定 · 时间待定',
-    sceneTitle: '从场景目标开始',
-    intent: '先写下本集要发生的关键变化，再让 AI 提供候选稿。',
-    meta: ['场景待定', '时间待定', '人物待定'],
-    content: '【待创作】\n\n本集目标：\n\n开场钩子：\n\n关键转折：\n\n结尾悬念：'
-  })
-  Object.assign(documents['scene-1'], {
-    title: '第 1 场 · 待命名',
-    breadcrumb: '第 1 集 · 场 1',
-    badge: '待创作',
-    kicker: '1-1 · 场景待定 · 时间待定',
-    sceneTitle: '第一场戏',
-    intent: '明确地点、人物和这场戏结束时必须发生的变化。',
-    meta: ['场景待定', '时间待定', '人物待定'],
-    content: '【待创作】\n\n场景目标：'
-  })
-  return documents
+  return Object.fromEntries(CORE_DOCUMENT_IDS.map((documentId) => [
+    documentId,
+    { ...createGenericDocument(documentId, titles[documentId]), meta: [contentType], content: '' }
+  ]))
 }
 
 function updateDocumentView({ keepFocus = false } = {}) {
@@ -905,7 +873,7 @@ function updateDocumentView({ keepFocus = false } = {}) {
   updateEditorMetrics()
   updateAssistantProfile()
   updateStageAdvanceButton()
-  setSaveStatus(state.storageFailed ? 'error' : 'saved')
+  setSaveStatus(state.storageFailed ? 'error' : pendingSaves ? 'saving' : unsavedEdits ? 'dirty' : 'saved')
   if (keepFocus) {
     if (isReadOnly) {
       window.requestAnimationFrame(() => {
@@ -945,42 +913,36 @@ function setSaveStatus(status) {
 }
 
 function scheduleSave() {
-  setSaveStatus('dirty')
-  if (!persistWorkspace()) return
+  editRevision += 1
+  unsavedEdits = true
   window.clearTimeout(state.saveTimer)
-  state.saveTimer = window.setTimeout(() => {
-    setSaveStatus('saving')
-    window.setTimeout(() => {
-      setCurrentContent(elements.scriptEditor.value)
-      if (persistWorkspace()) setSaveStatus('saved')
-    }, 260)
-  }, 620)
+  setSaveStatus('dirty')
+  state.saveTimer = window.setTimeout(() => { persistWorkspace() }, 300)
 }
 
-function saveImmediately({ announce = true } = {}) {
+async function saveImmediately({ announce = true } = {}) {
   window.clearTimeout(state.saveTimer)
   if (state.activeTab !== 'history') setCurrentContent(elements.scriptEditor.value)
-  const saved = persistWorkspace()
-  setSaveStatus(saved ? 'saved' : 'error')
+  const saved = await persistWorkspace()
   if (announce) showToast(saved ? '当前内容已保存到本地' : '本地保存失败，请复制内容后重试')
   return saved
 }
 
-function selectDocument(documentId) {
+async function selectDocument(documentId) {
   if (!state.documents[documentId]) return
-  saveImmediately({ announce: false })
+  if (!await saveImmediately({ announce: false })) return
   abandonCandidateOnContextChange(documentId, 'script')
   state.currentDocId = documentId
   state.activeTab = 'script'
   switchView('workspace')
   updateDocumentView({ keepFocus: true })
-  persistWorkspace()
+  await persistWorkspace()
   closeDrawers()
 }
 
-function switchTab(tabName) {
-  if (!tabFallbacks[tabName] && tabName !== 'script') return
-  saveImmediately({ announce: false })
+async function switchTab(tabName) {
+  if (!Object.hasOwn(tabFallbacks, tabName) && tabName !== 'script') return
+  if (!await saveImmediately({ announce: false })) return
   abandonCandidateOnContextChange(state.currentDocId, tabName)
   state.activeTab = tabName
   updateDocumentView({ keepFocus: true })
@@ -991,6 +953,7 @@ function switchView(viewName) {
   if (!view) return
   if (viewName === 'knowledge') renderKnowledge()
   if (viewName === 'connections') renderConnections()
+  if (viewName === 'inspirations') inspirationUI.render()
   state.currentView = viewName
   document.querySelectorAll('.view-panel').forEach((panel) => {
     panel.hidden = panel !== view
@@ -1032,7 +995,7 @@ function toggleAssistant(forceOpen) {
 
 function syncAssistantAccessibility() {
   const usesDrawer = window.matchMedia('(max-width: 1099px)').matches
-  const isOpen = state.currentView === 'workspace' && (usesDrawer
+  const isOpen = !elements.appShell.classList.contains('no-project') && state.currentView === 'workspace' && (usesDrawer
     ? elements.appShell.classList.contains('assistant-open')
     : !elements.appShell.classList.contains('assistant-collapsed'))
   const topbarToggle = document.querySelector('.titlebar [data-action="toggle-assistant"]')
@@ -1353,14 +1316,60 @@ async function consumeOllamaStream(response, generationId) {
   }
 }
 
-async function generateWithConnection(connection, prompt, generationId) {
+let cliSessionConsent = null
+
+function confirmCliGeneration(connection, boundary, signal) {
+  const consentKey = JSON.stringify([connection.id, connection.driverId, boundary])
+  if (signal.aborted) return Promise.resolve(false)
+  if (cliSessionConsent === consentKey) return Promise.resolve(true)
+  const dialog = document.querySelector('#cliConsentDialog')
+  const remember = document.querySelector('#cliConsentRemember')
+  remember.checked = false
+  document.querySelector('#cliConsentSummary').textContent = `本次将使用 ${connection.name} 的账号，发送提示词及选中的项目与知识上下文，可能消耗账号额度。`
+  document.querySelector('#cliConsentBoundary').textContent = boundary
+  dialog.returnValue = ''
+  return new Promise((resolve) => {
+    const onAbort = () => dialog.close('cancel')
+    const onClose = () => {
+      signal.removeEventListener('abort', onAbort)
+      const confirmed = !signal.aborted && dialog.returnValue === 'confirm'
+      if (confirmed && remember.checked) cliSessionConsent = consentKey
+      resolve(confirmed)
+    }
+    if (signal.aborted) { resolve(false); return }
+    dialog.addEventListener('close', onClose, { once: true })
+    signal.addEventListener('abort', onAbort, { once: true })
+    dialogReturnFocus = document.activeElement
+    dialog.showModal()
+  })
+}
+
+async function generateWithConnection(connection, prompt, generationId, submittedDraft = null) {
   const controller = new AbortController()
   state.generationAbortController = controller
   try {
+    const allowUserProfile = connection.kind === 'cli' && ['antigravity', 'codex', 'claude'].includes(connection.driverId)
+    const cliBoundary = connection.driverId === 'antigravity'
+      ? 'agy 会读取自身用户配置（包括权限、插件和 hooks），并可能保存会话；它不是无工具模式。使用 plan 模式和终端 sandbox。'
+      : connection.driverId === 'codex'
+        ? 'Codex 使用已有登录态、只读执行模式和临时工作目录，不读取用户 config.toml 或 execpolicy rules，不保留本次会话。只读不等于禁止读取本机信息；不复用自定义模型供应商配置。'
+        : 'Claude 优先使用已配置 API Key；否则尝试已有 CLI 登录态。禁用内置工具、外部 MCP、技能和普通 hooks；不保留会话。组织托管策略仍可能生效，CLI 可能读取自身用户上下文。'
+    if (allowUserProfile && !await confirmCliGeneration(connection, cliBoundary, controller.signal)) {
+      if (generationId === state.activeGenerationId && state.isGenerating) {
+        finishGeneration({ stopped: true, silent: true, generationId })
+        showToast('已取消本次生成，未调用 CLI')
+      }
+      return
+    }
+    if (controller.signal.aborted || generationId !== state.activeGenerationId) return
+    if (submittedDraft !== null && elements.promptInput.value === submittedDraft) {
+      elements.promptInput.value = ''
+      elements.promptInput.dispatchEvent(new Event('input', { bubbles: true }))
+    }
     const messages = buildGenerationMessages(prompt)
     let response
     if (isDesktopRuntime) {
-      const secret = connection.kind === 'openai-compatible' ? sessionSecrets.get(connection.id) : null
+      const secret = ['openai-compatible', 'cli'].includes(connection.kind) ? await connectionSecret(connection) : null
       if (connection.kind === 'openai-compatible' && !secret) {
         throw new Error('API Key 只保留在当前会话，请先到连接中心重新输入并测试')
       }
@@ -1372,6 +1381,7 @@ async function generateWithConnection(connection, prompt, generationId) {
           model: connection.model || '',
           apiKey: secret || null,
           driverId: connection.kind === 'cli' ? connection.driverId : null,
+          allowUserProfile,
           messages
         }
       })
@@ -1380,7 +1390,7 @@ async function generateWithConnection(connection, prompt, generationId) {
       response = await fetch('/api/runtime/cli/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ driverId: connection.driverId, messages }),
+        body: JSON.stringify({ driverId: connection.driverId, messages, allowUserProfile }),
         signal: controller.signal
       })
       const payload = await response.json().catch(() => ({}))
@@ -1423,7 +1433,7 @@ async function generateWithConnection(connection, prompt, generationId) {
     connection.status = /login|登录|授权|密钥/i.test(message) ? 'auth_failed' : 'error'
     connection.error = message
     renderConnections()
-    persistWorkspace()
+    await persistWorkspace()
     failGeneration(connection.error, generationId)
   } finally {
     if (generationId === state.activeGenerationId) state.generationAbortController = null
@@ -1443,7 +1453,7 @@ function failGeneration(message, generationId = state.activeGenerationId) {
   const hasPartial = Boolean(state.generationText.trim())
   if (!hasPartial) elements.candidateContent.textContent = '未生成可用的候选内容。'
   elements.generationError.hidden = false
-  elements.generationError.textContent = `${message}。提示词已保留${hasPartial ? '，上方部分结果仍可审阅或采纳' : '，修复连接后可重新生成'}。`
+  elements.generationError.textContent = `${message}。原消息已保留在对话区，可点击“重新生成”重试${hasPartial ? '，上方部分结果仍可审阅或采纳' : ''}。`
   elements.candidateActions.hidden = false
   elements.candidateActions.querySelectorAll('[data-action="apply-candidate"]').forEach((button) => { button.disabled = !hasPartial })
   updateCandidateCitations([])
@@ -1451,7 +1461,8 @@ function failGeneration(message, generationId = state.activeGenerationId) {
   showToast(message)
 }
 
-function startGeneration(prompt) {
+function startGeneration(prompt, { clearComposer = true } = {}) {
+  if (!getCurrentDocument()) return openDialog(elements.newProjectDialog)
   if (state.isGenerating) {
     stopGeneration()
     return
@@ -1505,7 +1516,7 @@ function startGeneration(prompt) {
   elements.sendButton.setAttribute('aria-label', '停止 AI 生成')
   elements.sendButton.setAttribute('title', '停止 AI 生成')
 
-  generateWithConnection(connection, cleanPrompt, generationId)
+  generateWithConnection(connection, cleanPrompt, generationId, clearComposer && elements.promptInput.value.trim() === cleanPrompt ? elements.promptInput.value : null)
 }
 
 function finishGeneration({ stopped = false, silent = false, generationId = state.activeGenerationId } = {}) {
@@ -1573,7 +1584,7 @@ function acceptCandidate() {
   applyCandidate('append')
 }
 
-function applyCandidate(mode = 'append') {
+async function applyCandidate(mode = 'append') {
   const candidate = elements.candidateContent.textContent.trim()
   const context = state.generationContext
   if (!candidate || !context) return
@@ -1611,7 +1622,7 @@ function applyCandidate(mode = 'append') {
     tabName: context.tabName,
     knowledgeChunks: context.knowledgeChunks || []
   })
-  const saved = persistWorkspace()
+  const saved = await persistWorkspace()
   if (!saved) {
     history.undo.splice(0, history.undo.length, ...previousUndo)
     history.redo.splice(0, history.redo.length, ...previousRedo)
@@ -1637,7 +1648,7 @@ function applyCandidate(mode = 'append') {
   const actionCopy = mode === 'replace' ? '已替换正文' : mode === 'insert' ? '已插入当前光标' : '已追加到正文'
   showToast(`${actionCopy}并创建版本 v${versionNumber}`, {
     actionLabel: '撤销',
-    onAction: () => {
+    onAction: async () => {
       if (getContentAt(context.documentId, context.tabName) !== acceptedText) {
         showToast('该版本已继续修改，为避免覆盖内容请使用历史版本')
         return
@@ -1650,14 +1661,14 @@ function applyCandidate(mode = 'append') {
         elements.scriptEditor.value = previousText
         updateEditorMetrics()
       }
-      persistWorkspace()
+      await persistWorkspace()
       showToast(`已撤销“${context.title}”中的追加；v${versionNumber} 快照仍可追溯`)
     }
   })
   elements.scriptEditor.focus()
 }
 
-function undoCustom() {
+async function undoCustom() {
   if (state.activeTab === 'history') return
   const history = getEditHistory()
   const transaction = history.undo.at(-1)
@@ -1671,12 +1682,12 @@ function undoCustom() {
   history.redo.push(transaction)
   elements.scriptEditor.value = transaction.before
   setCurrentContent(transaction.before)
-  persistWorkspace()
+  await persistWorkspace()
   updateEditorMetrics()
   showToast('已撤销上一步修改')
 }
 
-function redoCustom() {
+async function redoCustom() {
   if (state.activeTab === 'history') return
   const history = getEditHistory()
   const transaction = history.redo.at(-1)
@@ -1690,7 +1701,7 @@ function redoCustom() {
   history.undo.push(transaction)
   elements.scriptEditor.value = transaction.after
   setCurrentContent(transaction.after)
-  persistWorkspace()
+  await persistWorkspace()
   updateEditorMetrics()
   showToast('已重做上一步修改')
 }
@@ -1729,6 +1740,10 @@ function showToast(message, options = {}) {
 let dialogReturnFocus = null
 
 function openDialog(dialog) {
+  if (dialog === elements.newProjectDialog) {
+    document.querySelector('#projectName').value = ''
+    dialog.querySelector('[type="submit"]').textContent = '创建项目'
+  }
   if (!dialog || dialog.open) return
   dialogReturnFocus = document.activeElement
   dialog.showModal()
@@ -1830,6 +1845,15 @@ function renderKnowledgeSources() {
     const detail = document.createElement('p')
     detail.textContent = source.detail
     copy.append(titleRow, detail)
+    if (source.kind !== 'internal') {
+      const refresh = document.createElement('button')
+      refresh.type = 'button'
+      refresh.className = 'text-button'
+      refresh.textContent = '重新选择目录并同步'
+      refresh.dataset.action = 'refresh-knowledge-source'
+      refresh.dataset.sourceId = source.id
+      copy.append(refresh)
+    }
     const metrics = document.createElement('div')
     metrics.className = 'source-metrics'
     const chunks = state.knowledge.index.chunks.filter((chunk) => chunk.sourceId === source.id).length
@@ -2000,9 +2024,40 @@ function renderKnowledge() {
   syncCurrentDocumentReferences()
 }
 
-function searchKnowledge(query) {
+let knowledgeSearchSequence = 0
+let semanticBuildSequence = 0
+async function rebuildSemanticIndex(button) {
+  if (!activeProjectId || !state.knowledge.index.chunks.length) return showToast('请先在项目中导入知识资料')
+  const projectId = activeProjectId
+  const sequence = ++semanticBuildSequence
+  const snapshot = structuredClone(state.knowledge.index)
+  const model = document.querySelector('#embeddingModel').value.trim()
+  button.disabled = true
+  try {
+    const semantic = await buildSemanticIndex(snapshot, model, state.knowledge.semantic, (done, total) => { button.textContent = `${done} / ${total}` })
+    if (projectId !== activeProjectId || sequence !== semanticBuildSequence) return
+    if (JSON.stringify(snapshot.chunks) !== JSON.stringify(state.knowledge.index.chunks)) return showToast('资料已更新，请重新建立语义索引')
+    state.knowledge.semantic = semantic
+    if (await persistWorkspace()) showToast(`已建立 ${snapshot.chunks.length} 个语义向量`)
+  } catch (error) { showToast(readableError(error, '语义索引建立失败')) }
+  finally { button.disabled = false; button.textContent = '建立 / 更新语义索引' }
+}
+
+async function searchKnowledge(query) {
+  const sequence = ++knowledgeSearchSequence
+  const projectId = activeProjectId
   state.knowledge.query = query.trim()
   state.knowledge.results = searchKnowledgeIndex(state.knowledge.index, state.knowledge.query, { limit: 6 })
+  if (state.knowledge.query && state.knowledge.semantic?.model) {
+    try {
+      const results = await semanticSearch(state.knowledge.index, state.knowledge.query, state.knowledge.semantic)
+      if (sequence !== knowledgeSearchSequence || projectId !== activeProjectId) return
+      state.knowledge.results = results
+    } catch (error) {
+      if (sequence !== knowledgeSearchSequence || projectId !== activeProjectId) return
+      showToast(`语义检索不可用，已使用文本检索：${readableError(error)}`)
+    }
+  }
   renderKnowledgeResults()
   if (state.knowledge.query) {
     elements.a11yAnnouncements.textContent = `找到 ${state.knowledge.results.length} 条相关知识`
@@ -2010,12 +2065,14 @@ function searchKnowledge(query) {
 }
 
 async function indexPendingKnowledgeFiles() {
+  const projectId = activeProjectId
+  if (!projectId) throw new Error('请先创建项目')
   const files = state.knowledge.pendingFiles.filter((file) => /\.(md|markdown|txt)$/i.test(file.name)).slice(0, 80)
   if (!files.length) throw new Error('请选择包含 Markdown 或 TXT 的目录')
   const sourceType = document.querySelector('input[name="sourceType"]:checked')?.value || 'folder'
   const firstRelativePath = files[0].webkitRelativePath || files[0].name
   const sourceName = firstRelativePath.split('/')[0] || '本地资料'
-  const sourceId = `source-${Date.now().toString(36)}`
+  const sourceId = elements.knowledgeDialog.dataset.refreshSourceId || `source-${Date.now().toString(36)}`
   const documents = []
   let totalBytes = 0
 
@@ -2025,7 +2082,7 @@ async function indexPendingKnowledgeFiles() {
     const content = await file.text()
     if (!content.trim()) continue
     documents.push({
-      id: `${sourceId}:${documents.length + 1}`,
+      id: `${sourceId}:${file.webkitRelativePath || file.name}`,
       sourceId,
       name: file.name.replace(/\.(md|markdown|txt)$/i, ''),
       path: file.webkitRelativePath || file.name,
@@ -2034,6 +2091,7 @@ async function indexPendingKnowledgeFiles() {
     })
   }
   if (!documents.length) throw new Error('没有可建立索引的文本文件')
+  if (projectId !== activeProjectId) throw new Error('项目已切换，本次导入已取消')
 
   const previousKnowledge = {
     index: state.knowledge.index,
@@ -2047,6 +2105,7 @@ async function indexPendingKnowledgeFiles() {
     ...nextIndex,
     chunks: merged.chunks
   }
+  state.knowledge.sources = state.knowledge.sources.filter(source => source.id !== sourceId)
   state.knowledge.sources.push({
     id: sourceId,
     kind: sourceType,
@@ -2058,7 +2117,7 @@ async function indexPendingKnowledgeFiles() {
     updatedAt: new Date().toISOString()
   })
   reconcileKnowledgeSelections()
-  if (!persistWorkspace()) {
+  if (!await persistWorkspace()) {
     state.knowledge.index = previousKnowledge.index
     state.knowledge.sources = previousKnowledge.sources
     state.knowledge.selectedChunkIds = previousKnowledge.selectedChunkIds
@@ -2075,7 +2134,7 @@ async function indexPendingKnowledgeFiles() {
   }
 }
 
-function syncKnowledge({ announce = true } = {}) {
+async function syncKnowledge({ announce = true } = {}) {
   const internalSource = state.knowledge.sources.find((source) => source.kind === 'internal')
   const starterDocuments = createStarterDocuments(state.project.name, state.project.type)
   const internalDocuments = [
@@ -2103,7 +2162,7 @@ function syncKnowledge({ announce = true } = {}) {
   } else {
     state.knowledge.sources.push({ id: 'source-project', kind: 'internal', name: '项目设定', detail: '当前人物、世界观和全剧大纲', fileCount: 3, chunkCount: rebuilt.chunks.length, status: 'ready', updatedAt: new Date().toISOString() })
   }
-  persistWorkspace()
+  await persistWorkspace()
   renderKnowledge()
   if (announce) {
     showToast('项目设定索引已重建；外部目录需重新选择后更新')
@@ -2182,7 +2241,7 @@ function createConnectionCard(connection) {
     useButton.className = 'secondary-button compact-button'
     useButton.dataset.action = 'activate-connection'
     useButton.dataset.connectionId = connection.id
-    useButton.textContent = '设为执行端'
+    useButton.textContent = '设为当前 AI'
     actions.append(useButton)
   }
   const testButton = document.createElement('button')
@@ -2246,7 +2305,7 @@ function renderRuntimeDrivers() {
       capabilities.className = 'connection-capabilities'
       ;[
         canGenerate ? '可执行创作' : requiresCredential ? '安全执行待授权' : '安装检测',
-        canGenerate ? '裸模式 · 无工具' : requiresCredential ? '需显式凭据' : '不开放执行',
+        canGenerate ? driver.id === 'antigravity' ? '用户登录态 · Plan' : driver.id === 'codex' ? '用户登录态 · 只读' : 'API Key / CLI 登录态' : requiresCredential ? '需显式凭据' : '不开放执行',
         isTranslated ? 'Intel 兼容模式' : null
       ].filter(Boolean).forEach((label) => {
         const capability = document.createElement('span')
@@ -2260,20 +2319,30 @@ function renderRuntimeDrivers() {
       const status = document.createElement('span')
       status.textContent = isVerified
         ? '可用'
+        : !isReady
+          ? driver.status === 'not_found' ? '未安装' : '检测失败 / 版本不兼容'
         : isTranslated
           ? '已安装 · 实验'
           : requiresCredential
             ? '已安装 · 待授权'
             : isReady
               ? '已安装'
-              : '未发现'
+              : driver.status === 'not_found' ? '未安装' : '检测失败 / 版本不兼容'
       const version = document.createElement('small')
       version.textContent = [driver.version, driver.binaryArchitecture].filter(Boolean).join(' · ') || '不影响本地写作'
       health.append(dot, status, version)
       const note = document.createElement('span')
       note.className = 'cli-readonly-note'
-      note.textContent = isReady && driver.executionStatus === 'disabled'
-        ? '权限隔离不足，仅检测'
+      note.textContent = !isReady
+        ? driver.status === 'not_found' ? '安装 CLI 后点击重新检测' : '请检查 CLI 版本与运行状态后重新检测；并非账号未授权'
+        : driver.id === 'antigravity' && isReady
+        ? '先在终端运行 agy 登录；使用默认模型。每次调用需确认用户配置与额度，不是无工具模式。'
+        : driver.id === 'codex' && isReady
+          ? '先运行 codex login。使用默认供应商与模型；已安装不代表登录或额度已验证。'
+        : driver.id === 'claude' && isReady
+          ? '配置 API Key 或先运行 claude auth login。未配 Key 时尝试已有登录态；Intel 兼容模式不是禁用原因。'
+        : isReady && driver.executionStatus === 'disabled'
+        ? '工作台暂未支持调用'
         : isReady && requiresCredential
           ? `${isTranslated ? 'Intel 兼容模式；' : ''}启动时提供环境变量凭据后可安全执行`
         : isTranslated
@@ -2291,7 +2360,7 @@ function renderRuntimeDrivers() {
         useButton.className = 'secondary-button compact-button'
         useButton.dataset.action = 'activate-connection'
         useButton.dataset.connectionId = connection.id
-        useButton.textContent = '设为执行端'
+        useButton.textContent = '设为当前 AI'
         actions.append(useButton)
       } else if (connection?.isActive) {
         const badge = document.createElement('span')
@@ -2353,7 +2422,7 @@ function renderConnections() {
   const runtimeSummary = document.querySelector('#cliRuntimeSummary')
   if (runtimeSummary) {
     runtimeSummary.textContent = state.runtime.status === 'ready'
-      ? `${['darwin', 'macos'].includes(state.runtime.platform) ? 'macOS' : state.runtime.platform || '本机'} · ${state.runtime.architecture || '未知架构'} · 受控驱动使用裸模式、隔离 HOME 和显式凭据，不执行任意 Shell。`
+      ? `${['darwin', 'macos'].includes(state.runtime.platform) ? 'macOS' : state.runtime.platform || '本机'} · ${state.runtime.architecture || '未知架构'} · 选择当前 AI 后，在创作区发起生成。安装检测不代表登录或额度已验证。`
       : '正在通过本地运行桥检测受支持的 CLI。'
   }
 }
@@ -2384,7 +2453,7 @@ async function testProviderConnection(connection, secretOverride = '', { allowSt
   const timeout = window.setTimeout(() => controller.abort(), 8000)
   try {
     const secret = connection.kind === 'openai-compatible'
-      ? secretOverride || (allowStoredSecret ? sessionSecrets.get(connection.id) : '')
+      ? secretOverride || (allowStoredSecret ? await connectionSecret(connection) : '')
       : ''
     if (connection.kind === 'openai-compatible' && !secret) {
       connection.status = 'auth_missing'
@@ -2469,7 +2538,7 @@ async function testProviderConnection(connection, secretOverride = '', { allowSt
     if (isCurrentTest()) {
       connectionTestTasks.delete(connection.id)
       renderConnections()
-      persistWorkspace()
+      await persistWorkspace()
     }
   }
 }
@@ -2498,7 +2567,7 @@ function syncCliConnections(drivers) {
         baseUrl: '',
         model: driver.version || '',
         status: 'unknown',
-        capabilities: ['受控 CLI', '无工具模式'],
+        capabilities: ['受控 CLI', driver.id === 'antigravity' ? '用户配置 · Plan' : driver.id === 'codex' ? '只读执行' : 'API Key / CLI 登录态'],
         binaryArchitecture: driver.binaryArchitecture || null,
         compatibility: driver.compatibility || 'unknown',
         isActive: false,
@@ -2546,6 +2615,14 @@ async function detectRuntime() {
       runtime = await runtimeResponse.json()
       if (ollamaResponse.ok) ollamaPayload = await ollamaResponse.json()
     }
+    if (isDesktopRuntime) {
+      const claudeConnection = state.connections.find(item => item.id === 'cli-claude') || { id: 'cli-claude', baseUrl: '', rememberSecret: false }
+      const secret = await connectionSecret(claudeConnection)
+      if (secret) {
+        const driver = runtime.drivers?.find(item => item.id === 'claude' && item.status === 'ready')
+        if (driver) { driver.canGenerate = true; driver.executionStatus = 'available' }
+      }
+    }
     state.runtime = {
       platform: runtime.platform || null,
       architecture: runtime.architecture || null,
@@ -2567,13 +2644,14 @@ async function detectRuntime() {
     syncCliConnections([])
   }
   renderConnections()
-  persistWorkspace()
+  await persistWorkspace()
 }
 
-function setActiveConnection(connectionId) {
+async function setActiveConnection(connectionId) {
   if (!state.connections.some((connection) => connection.id === connectionId)) return
+  if (getActiveConnection()?.id !== connectionId) cliSessionConsent = null
   state.connections.forEach((connection) => { connection.isActive = connection.id === connectionId })
-  persistWorkspace()
+  await persistWorkspace()
   renderConnections()
   showToast(`已切换到 ${getActiveConnection().name}`)
 }
@@ -2593,6 +2671,8 @@ function openConnectionDialog(connectionId = null) {
   document.querySelector('#baseUrl').value = connection?.baseUrl || 'https://api.openai.com/v1'
   document.querySelector('#modelName').value = connection?.model || 'gpt-4.1-mini'
   document.querySelector('#apiKey').value = ''
+  document.querySelector('#rememberApiKey').checked = Boolean(connection?.rememberSecret)
+  document.querySelector('#rememberApiKeyOption').hidden = !isDesktopRuntime
   document.querySelector('#apiKeyField').hidden = connection?.kind === 'ollama'
   document.querySelector('#connectionForm').dataset.testStatus = ''
   document.querySelector('#connectionForm').dataset.lastLatency = ''
@@ -2633,6 +2713,7 @@ async function testConnectionDraft(button) {
   const draft = getConnectionDraft()
   const secret = document.querySelector('#apiKey').value
   const existing = state.connections.find((connection) => connection.id === draft.id)
+  draft.rememberSecret = Boolean(existing?.rememberSecret)
   const endpointChanged = hasConnectionEndpointChanged(draft, existing)
   button.disabled = true
   elements.connectionTestStatus.innerHTML = ''
@@ -2706,6 +2787,7 @@ function syncNewContentType() {
 }
 
 function openNewContentDialog({ type = 'episode', parentId = null, actId = null } = {}) {
+  if (!state.project.name && !Object.keys(state.documents).length) return openDialog(elements.newProjectDialog)
   const form = document.querySelector('#newContentForm')
   const resolvedParent = parentId || getParentEpisodeId(state.currentDocId) || getEpisodeIds()[0] || null
   form.dataset.actId = actId || state.structure.acts.find((act) => act.episodeIds.includes(resolvedParent))?.id || state.structure.acts[0]?.id || ''
@@ -2718,12 +2800,15 @@ function openNewContentDialog({ type = 'episode', parentId = null, actId = null 
   openDialog(elements.newContentDialog)
 }
 
-function createStructuredDocument({ type, title, parentId = null, actId = null, select = true } = {}) {
+async function createStructuredDocument({ type, title, parentId = null, actId = null, select = true } = {}) {
   if (type === 'scene' && !state.structure.episodes[parentId]) return null
   const documentId = makeUniqueId(type)
   const documentData = createGenericDocument(documentId, title)
 
   if (type === 'episode') {
+    if (!state.structure.acts.length) {
+      state.structure.acts.push({ id: 'act-1', title: '第一幕', collapsed: false, episodeIds: [] })
+    }
     const targetAct = state.structure.acts.find((act) => act.id === actId) || state.structure.acts[0]
     if (!targetAct) return null
     const episodeNumber = getEpisodeIds().length + 1
@@ -2733,7 +2818,7 @@ function createStructuredDocument({ type, title, parentId = null, actId = null, 
       sceneTitle: title,
       intent: '明确本集目标、核心冲突和结尾钩子，再拆分为可拍摄的分场。',
       meta: ['0 场', '时长待定', '结构待完善'],
-      content: '本集目标\n【待填写】\n\n开场钩子\n【待填写】\n\n关键转折\n【待填写】\n\n结尾悬念\n【待填写】'
+      content: ''
     })
     state.documents[documentId] = documentData
     state.structure.episodes[documentId] = { sceneIds: [] }
@@ -2756,7 +2841,7 @@ function createStructuredDocument({ type, title, parentId = null, actId = null, 
   state.versions[documentId] = []
   state.versionCounters[documentId] = 0
   renderProjectIdentity()
-  persistWorkspace()
+  await persistWorkspace()
   if (select) selectDocument(documentId)
   return documentId
 }
@@ -2797,7 +2882,7 @@ function openDocumentDialog() {
   openDialog(elements.documentDialog)
 }
 
-function moveCurrentDocument(direction) {
+async function moveCurrentDocument(direction) {
   const position = getDocumentPosition(state.currentDocId)
   if (!position) return
   const currentIndex = position.kind === 'episode' ? position.episodeIndex : position.sceneIndex
@@ -2811,11 +2896,11 @@ function moveCurrentDocument(direction) {
   refreshStructureMetadata()
   renderProjectIdentity()
   updateDocumentView()
-  persistWorkspace()
+  await persistWorkspace()
   showToast(direction < 0 ? '已上移' : '已下移')
 }
 
-function duplicateCurrentDocument() {
+async function duplicateCurrentDocument() {
   const position = getDocumentPosition(state.currentDocId)
   if (!position) return
   const originalId = state.currentDocId
@@ -2835,12 +2920,12 @@ function duplicateCurrentDocument() {
   elements.documentDialog.close()
   refreshStructureMetadata()
   renderProjectIdentity()
-  persistWorkspace()
+  await persistWorkspace()
   selectDocument(duplicateId)
   showToast(`已创建“${state.documents[duplicateId].title}”`)
 }
 
-function deleteCurrentDocument(button) {
+async function deleteCurrentDocument(button) {
   const position = getDocumentPosition(state.currentDocId)
   if (!position) {
     showToast('前期创作文档不能删除')
@@ -2888,12 +2973,12 @@ function deleteCurrentDocument(button) {
   refreshStructureMetadata()
   renderProjectIdentity()
   updateDocumentView()
-  persistWorkspace()
+  await persistWorkspace()
   showToast(`已删除“${removedTitle}”`, {
     actionLabel: '撤销',
     duration: 7000,
-    onAction: () => {
-      saveImmediately({ announce: false })
+    onAction: async () => {
+      if (!await saveImmediately({ announce: false })) return
       if (removedIds.some((documentId) => state.documents[documentId])) {
         showToast('已有同标识的新内容，无法自动恢复；请从历史版本取回')
         return
@@ -2921,13 +3006,13 @@ function deleteCurrentDocument(button) {
       refreshStructureMetadata()
       renderProjectIdentity()
       updateDocumentView()
-      persistWorkspace()
+      await persistWorkspace()
       showToast('已恢复删除的内容')
     }
   })
 }
 
-function advanceStage() {
+async function advanceStage() {
   const nextDocument = { idea: 'brief', brief: 'world', world: 'characters', characters: 'outline' }[state.currentDocId]
   if (nextDocument) {
     selectDocument(nextDocument)
@@ -2938,7 +3023,7 @@ function advanceStage() {
     if (getEpisodeIds().length < 3) {
       const missingCount = 3 - getEpisodeIds().length
       for (let index = 0; index < missingCount; index += 1) {
-        createStructuredDocument({
+        await createStructuredDocument({
           type: 'episode',
           title: `第 ${getEpisodeIds().length + 1} 集 · 待命名`,
           actId: state.structure.acts[0]?.id,
@@ -2958,13 +3043,13 @@ function advanceStage() {
   if (kind === 'scene') openNewContentDialog({ type: 'scene', parentId: getParentEpisodeId(state.currentDocId) })
 }
 
-function handleAction(button, action) {
+async function handleAction(button, action) {
   switch (action) {
     case 'toggle-theme': {
       const nextTheme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'
       document.documentElement.dataset.theme = nextTheme
       syncThemeControl()
-      persistWorkspace()
+      await persistWorkspace()
       break
     }
     case 'toggle-assistant': {
@@ -2977,8 +3062,26 @@ function handleAction(button, action) {
     case 'focus-assistant': focusAssistant(); break
     case 'open-command': openCommandPalette(); break
     case 'new-project': {
-      document.querySelector('#replaceProjectConfirm').checked = false
+      document.querySelector('#projectLibraryDialog').close()
       openDialog(elements.newProjectDialog)
+      break
+    }
+    case 'project-library': await openProjectLibrary(); break
+    case 'switch-project': await switchProject(button.dataset.projectId); break
+    case 'backup-project': await exportProject('json'); break
+    case 'export-project': await exportProject('md'); break
+    case 'restore-project': document.querySelector('#projectBackupFile').click(); break
+    case 'build-semantic-index': await rebuildSemanticIndex(button); break
+    case 'clear-semantic-index': {
+      semanticBuildSequence += 1
+      state.knowledge.semantic = null
+      await persistWorkspace()
+      showToast('已关闭语义检索，仍可使用文本检索')
+      break
+    }
+    case 'rename-project': {
+      document.querySelector('#renameProjectName').value = state.project.name
+      openDialog(document.querySelector('#renameProjectDialog'))
       break
     }
     case 'new-content': openNewContentDialog({
@@ -2992,7 +3095,7 @@ function handleAction(button, action) {
       if (!act) break
       act.collapsed = !act.collapsed
       renderProjectTree()
-      persistWorkspace()
+      await persistWorkspace()
       break
     }
     case 'toggle-focus-mode': {
@@ -3008,7 +3111,7 @@ function handleAction(button, action) {
     case 'redo': redoCustom(); break
     case 'send-prompt': startGeneration(elements.promptInput.value); break
     case 'discard-candidate': discardCandidate(); break
-    case 'retry-generation': startGeneration(state.lastPrompt); break
+    case 'retry-generation': startGeneration(state.lastPrompt, { clearComposer: false }); break
     case 'accept-candidate': acceptCandidate(); break
     case 'apply-candidate': applyCandidate(button.dataset.applyMode); break
     case 'advance-stage': advanceStage(); break
@@ -3019,9 +3122,18 @@ function handleAction(button, action) {
     case 'delete-document': deleteCurrentDocument(button); break
     case 'sync-knowledge': syncKnowledge(); break
     case 'add-knowledge-source': {
+      elements.knowledgeDialog.dataset.refreshSourceId = ''
       state.knowledge.pendingFiles = []
       elements.knowledgeFilePicker.value = ''
       document.querySelector('#sourcePath').value = '尚未选择目录'
+      openDialog(elements.knowledgeDialog)
+      break
+    }
+    case 'refresh-knowledge-source': {
+      elements.knowledgeDialog.dataset.refreshSourceId = button.dataset.sourceId
+      state.knowledge.pendingFiles = []
+      elements.knowledgeFilePicker.value = ''
+      document.querySelector('#sourcePath').value = '重新选择原目录，同步新增、修改和删除的文件'
       openDialog(elements.knowledgeDialog)
       break
     }
@@ -3032,7 +3144,7 @@ function handleAction(button, action) {
         ? state.knowledge.selectedChunkIds.filter((id) => id !== chunkId)
         : [...state.knowledge.selectedChunkIds, chunkId].slice(-MAX_SELECTED_KNOWLEDGE_CHUNKS)
       syncCurrentDocumentReferences()
-      persistWorkspace()
+      await persistWorkspace()
       renderKnowledge()
       showToast(selected ? '已移出本次 AI 上下文' : '已加入本次 AI 上下文')
       break
@@ -3045,7 +3157,7 @@ function handleAction(button, action) {
       state.knowledge.index.chunks = state.knowledge.index.chunks.filter((chunk) => chunk.sourceId !== source.id)
       const removedIds = new Set(removedChunks.map((chunk) => chunk.id))
       state.knowledge.selectedChunkIds = state.knowledge.selectedChunkIds.filter((id) => !removedIds.has(id))
-      persistWorkspace()
+      await persistWorkspace()
       renderKnowledge()
       showToast(`已移除“${source.name}”索引；原始文件没有变化`)
       break
@@ -3057,6 +3169,7 @@ function handleAction(button, action) {
     case 'test-connection': testConnection(button); break
     case 'test-all-connections': testAllConnections(button); break
     case 'detect-cli': detectRuntime(); break
+    case 'configure-claude': openDialog(document.querySelector('#claudeCredentialDialog')); break
     case 'activate-connection': setActiveConnection(button.dataset.connectionId); break
     case 'open-terminal': showToast('已检测本机 CLI；执行能力将在受控桌面 Runner 中启用'); break
     case 'learn-local-model': openConnectionDialog('ollama-local'); break
@@ -3198,6 +3311,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (commandKey && event.key.toLowerCase() === 's') {
     event.preventDefault()
+    if (state.currentView === 'inspirations') { void inspirationUI.save(); return }
     saveImmediately()
   }
   if (event.key === 'Escape') {
@@ -3215,48 +3329,167 @@ document.addEventListener('keydown', (event) => {
   }
 })
 
-document.querySelector('#newProjectForm').addEventListener('submit', (event) => {
-  event.preventDefault()
-  const formData = new FormData(event.currentTarget)
-  const projectName = String(formData.get('projectName') || '').trim()
-  const contentType = String(formData.get('contentType') || '短剧')
-  if (!projectName) {
-    document.querySelector('#projectName').focus()
-    return
-  }
+function loadProjectSnapshot(snapshot) {
+  elements.toastStack.replaceChildren()
+  document.querySelector('#embeddingModel').value = snapshot.workspace.knowledge?.semantic?.model || ''
   discardCandidate({ silent: true })
-  state.project = { name: projectName, type: contentType, stage: `${contentType} · 新项目`, template: 'blank' }
-  state.documents = createStarterDocuments(projectName, contentType)
-  state.structure = createBlankStructure()
-  state.tabContents = Object.fromEntries(
-    Object.keys(state.documents).map((documentId) => [documentId, structuredClone(tabFallbacks)])
-  )
-  state.versions = {}
-  state.versionCounters = Object.fromEntries(Object.keys(state.documents).map((documentId) => [documentId, 0]))
+  window.clearTimeout(state.saveTimer)
+  activeProjectId = snapshot.id
+  const workspace = snapshot.workspace
+  state.project = normalizeStoredProject(workspace.project)
+  const starters = createStarterDocuments(state.project.name, state.project.type)
+  state.documents = Object.fromEntries(Object.entries(workspace.documents || {}).map(([id, doc]) => [id, mergeStoredDocument(starters[id] || createGenericDocument(id), doc)]))
+  state.structure = normalizeStructure(workspace.structure, state.documents)
+  state.tabContents = Object.fromEntries(Object.keys(state.documents).map(id => [id, { ...structuredClone(tabFallbacks), ...workspace.tabContents?.[id] }]))
+  state.versions = normalizeStoredVersions(workspace.versions)
+  state.versionCounters = workspace.versionCounters || {}
+  state.selectedVersionByDocument = {}
   state.editHistories.clear()
-  state.knowledge.sources = []
-  state.knowledge.index = createKnowledgeIndex([])
+  state.knowledge.index = deserializeKnowledgeIndex(JSON.stringify(snapshot.index))
+  state.knowledge.semantic = workspace.knowledge?.semantic || null
+  state.knowledge.sources = Array.isArray(workspace.knowledge?.sources) ? workspace.knowledge.sources : []
+  state.knowledge.selectedChunkIds = workspace.knowledge?.selectedChunkIds || []
   state.knowledge.results = []
   state.knowledge.query = ''
-  state.knowledge.selectedChunkIds = []
   state.knowledge.pendingFiles = []
-  state.currentDocId = 'idea'
-  state.activeTab = 'script'
-  syncKnowledge({ announce: false })
+  reconcileKnowledgeSelections()
+  state.currentDocId = state.documents[workspace.currentDocId] ? workspace.currentDocId : Object.keys(state.documents)[0] || null
+  state.activeTab = ['script', 'outline', 'references', 'history'].includes(workspace.activeTab) ? workspace.activeTab : 'script'
+  for (const id of Object.keys(state.versions)) {
+    if (state.tabContents[id]) state.tabContents[id].history = formatVersionHistory(id)
+  }
+  elements.promptInput.value = ''
   renderProjectIdentity()
   renderKnowledge()
-  elements.newProjectDialog.close()
   switchView('workspace')
-  updateDocumentView({ keepFocus: true })
-  const saved = persistWorkspace()
-  showToast(saved
-    ? `已创建“${projectName}”，可以从核心灵感开始`
-    : `已建立“${projectName}”的临时工作区，但本地保存失败`)
+  updateDocumentView()
+}
+
+async function openProjectLibrary() {
+  const list = document.querySelector('#projectList')
+  list.replaceChildren()
+  const projects = listProjects()
+  document.querySelector('#projectCount').textContent = `${projects.length} 个项目`
+  for (const project of projects) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'project-list-item'
+    button.dataset.action = 'switch-project'
+    button.dataset.projectId = project.id
+    const current = project.id === activeProjectId
+    button.classList.toggle('is-current', current)
+    if (current) button.setAttribute('aria-current', 'true')
+    const details = document.createElement('span')
+    details.className = 'project-list-details'
+    const name = document.createElement('strong')
+    name.textContent = project.name
+    const meta = document.createElement('span')
+    meta.className = 'project-list-meta'
+    const updated = new Date(project.updatedAt)
+    meta.textContent = `${project.type} · ${Number.isNaN(updated.getTime()) ? '已保存' : updated.toLocaleDateString('zh-CN')} 更新`
+    details.append(name, meta)
+    const badge = document.createElement('span')
+    badge.className = 'project-list-status'
+    badge.textContent = current ? '当前项目' : '打开项目 →'
+    button.append(details, badge)
+    list.append(button)
+  }
+  if (!list.children.length) {
+    const empty = document.createElement('div')
+    empty.className = 'project-list-empty'
+    const title = document.createElement('strong')
+    title.textContent = '你的下一个故事，从这里开始'
+    const hint = document.createElement('p')
+    hint.textContent = '新建一个空白项目，或恢复已有备份。'
+    empty.append(title, hint)
+    list.append(empty)
+  }
+  document.querySelectorAll('[data-action="backup-project"], [data-action="export-project"], [data-action="rename-project"]').forEach(button => { button.disabled = !activeProjectId })
+  openDialog(document.querySelector('#projectLibraryDialog'))
+}
+
+async function switchProject(id) {
+  if (projectTransition || id === activeProjectId) return
+  projectTransition = true
+  try {
+    if (!await saveImmediately({ announce: false })) return
+    await activateProject(id)
+    loadProjectSnapshot(getActiveProject())
+    document.querySelector('#projectLibraryDialog').close()
+    showToast('已切换项目')
+  } catch (error) {
+    showToast(readableError(error))
+  } finally { projectTransition = false }
+}
+
+async function exportProject(format) {
+  if (!activeProjectId) return
+  if (state.activeTab !== 'history') setCurrentContent(elements.scriptEditor.value)
+  const workspace = workspaceSnapshot()
+  const content = format === 'json' ? projectBackup(workspace, state.knowledge.index)
+    : [`# ${state.project.name}`, ...Object.entries(state.documents).map(([id, doc]) => `## ${doc.title}\n\n${doc.content}\n\n${state.tabContents[id]?.outline ? '### 大纲\n\n' + state.tabContents[id].outline : ''}`)].join('\n\n')
+  try {
+    const path = await downloadDocument(`${state.project.name}.${format}`, content)
+    showToast(`已导出到：${path}`)
+  } catch (error) { showToast(readableError(error, '导出失败')) }
+}
+
+document.querySelector('#newProjectForm').addEventListener('submit', async (event) => {
+  event.preventDefault()
+  if (projectTransition) return
+  const projectName = String(new FormData(event.currentTarget).get('projectName') || '').trim()
+  const contentType = String(new FormData(event.currentTarget).get('contentType') || '短剧')
+  if (!projectName || projectName.length > 100) return showToast('项目名称须为 1–100 个字符')
+  projectTransition = true
+  try {
+    if (!await saveImmediately({ announce: false })) return
+    await createProject({
+      schemaVersion: WORKSPACE_SCHEMA_VERSION,
+      project: { name: projectName, type: contentType, stage: `${contentType} · 新项目`, template: 'blank' },
+      documents: createStarterDocuments(projectName, contentType),
+      structure: createBlankStructure(), currentDocId: 'idea', activeTab: 'script',
+      tabContents: {}, versions: {}, versionCounters: {}, knowledge: { sources: [], selectedChunkIds: [] }
+    }, createKnowledgeIndex([]))
+    loadProjectSnapshot(getActiveProject())
+    elements.newProjectDialog.close()
+    showToast(`已创建“${projectName}”，已有项目已保留`)
+  } catch (error) { showToast(readableError(error, '创建失败')) }
+  finally { projectTransition = false }
+})
+
+document.querySelector('#renameProjectForm').addEventListener('submit', async event => {
+  event.preventDefault()
+  const name = document.querySelector('#renameProjectName').value.trim()
+  try {
+    if (!await saveImmediately({ announce: false })) return
+    await renameProject(activeProjectId, name)
+    state.project.name = name
+    renderProjectIdentity()
+    document.querySelector('#renameProjectDialog').close()
+    await openProjectLibrary()
+  } catch (error) { showToast(readableError(error)) }
+})
+
+document.querySelector('#projectBackupFile').addEventListener('change', async event => {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file || projectTransition) return
+  projectTransition = true
+  try {
+    if (file.size > 64 * 1024 * 1024) throw new Error('备份超过 64 MiB')
+    const data = parseBackup(await file.text())
+    if (!await saveImmediately({ announce: false })) return
+    await createProject(data.workspace, data.index)
+    loadProjectSnapshot(getActiveProject())
+    document.querySelector('#projectLibraryDialog').close()
+    showToast('备份已恢复为独立项目，原项目未被覆盖')
+  } catch (error) { showToast(readableError(error, '恢复失败')) }
+  finally { projectTransition = false }
 })
 
 document.querySelector('#newContentType').addEventListener('change', syncNewContentType)
 
-document.querySelector('#newContentForm').addEventListener('submit', (event) => {
+document.querySelector('#newContentForm').addEventListener('submit', async (event) => {
   event.preventDefault()
   const formData = new FormData(event.currentTarget)
   const type = String(formData.get('contentType') || 'episode')
@@ -3270,7 +3503,7 @@ document.querySelector('#newContentForm').addEventListener('submit', (event) => 
     showToast('请选择一个有效分集')
     return
   }
-  const documentId = createStructuredDocument({ type, title, parentId, actId: event.currentTarget.dataset.actId })
+  const documentId = await createStructuredDocument({ type, title, parentId, actId: event.currentTarget.dataset.actId })
   if (!documentId) {
     showToast('创建失败，请检查所属分集')
     return
@@ -3279,7 +3512,7 @@ document.querySelector('#newContentForm').addEventListener('submit', (event) => 
   showToast(`已创建“${title}”`)
 })
 
-document.querySelector('#documentForm').addEventListener('submit', (event) => {
+document.querySelector('#documentForm').addEventListener('submit', async (event) => {
   event.preventDefault()
   const formData = new FormData(event.currentTarget)
   const documentData = getCurrentDocument()
@@ -3298,7 +3531,7 @@ document.querySelector('#documentForm').addEventListener('submit', (event) => {
   elements.documentDialog.close()
   renderProjectIdentity()
   updateDocumentView()
-  persistWorkspace()
+  await persistWorkspace()
   showToast('内容信息已更新')
 })
 
@@ -3335,7 +3568,7 @@ elements.connectionDialog.addEventListener('close', invalidateConnectionDraftTes
 
 document.querySelector('#executorSelect').addEventListener('change', (event) => setActiveConnection(event.target.value))
 
-document.querySelector('#connectionForm').addEventListener('submit', (event) => {
+document.querySelector('#connectionForm').addEventListener('submit', async (event) => {
   event.preventDefault()
   const draft = getConnectionDraft()
   const existingIndex = state.connections.findIndex((connection) => connection.id === draft.id)
@@ -3345,16 +3578,51 @@ document.querySelector('#connectionForm').addEventListener('submit', (event) => 
   draft.isActive = existing?.isActive || !state.connections.some((connection) => connection.isActive)
   draft.status = event.currentTarget.dataset.testStatus || (!isDirty && existing?.status === 'ready' ? 'ready' : 'unknown')
   draft.lastLatency = Number(event.currentTarget.dataset.lastLatency) || (!isDirty ? existing?.lastLatency : null) || null
+  const secret = document.querySelector('#apiKey').value
+  draft.rememberSecret = isDesktopRuntime && draft.kind === 'openai-compatible' && document.querySelector('#rememberApiKey').checked
+  try {
+    if (isDesktopRuntime && draft.kind === 'openai-compatible') {
+      if (draft.rememberSecret) {
+        const value = secret || (!endpointChanged && existing ? await connectionSecret(existing) : '')
+        if (!value) throw new Error('请填写需要保存的 API Key')
+        await invokeDesktop('credential_save', { id: draft.id, endpoint: draft.baseUrl, secret: value })
+      } else if (existing?.rememberSecret) {
+        await invokeDesktop('credential_save', { id: existing.id, endpoint: existing.baseUrl, secret: '' })
+      }
+    }
+  } catch (error) { showToast(readableError(error)); return }
   if (existingIndex >= 0) state.connections.splice(existingIndex, 1, draft)
   else state.connections.push(draft)
-  const secret = document.querySelector('#apiKey').value
   if (endpointChanged) sessionSecrets.delete(draft.id)
   if (draft.kind === 'openai-compatible' && secret) sessionSecrets.set(draft.id, secret)
   document.querySelector('#apiKey').value = ''
   elements.connectionDialog.close()
-  persistWorkspace()
+  await persistWorkspace()
   renderConnections()
-  showToast(secret ? '连接元数据已保存；密钥仅保留在本次会话' : '连接元数据已保存，使用前请测试连接')
+  showToast(draft.rememberSecret ? '连接已保存，密钥保存在 macOS 钥匙串' : '连接已保存；密钥仅用于当前会话')
+})
+
+document.querySelector('#claudeCredentialForm').addEventListener('submit', async event => {
+  event.preventDefault()
+  const input = document.querySelector('#claudeApiKey')
+  const secret = input.value.trim()
+  if (!isDesktopRuntime || !secret) return
+  const rememberSecret = document.querySelector('#rememberClaudeKey').checked
+  try {
+    let connection = state.connections.find(item => item.id === 'cli-claude')
+    if (rememberSecret || connection?.rememberSecret) await invokeDesktop('credential_save', { id: 'cli-claude', endpoint: '', secret: rememberSecret ? secret : '' })
+    if (!connection) {
+      connection = { id: 'cli-claude', kind: 'cli', driverId: 'claude', name: 'Claude Code', baseUrl: '', model: '', status: 'unknown', capabilities: ['受控 CLI'], isActive: false }
+      state.connections.push(connection)
+    }
+    connection.rememberSecret = rememberSecret
+    sessionSecrets.set(connection.id, secret)
+    input.value = ''
+    if (!await persistWorkspace()) return
+    document.querySelector('#claudeCredentialDialog').close()
+    await detectRuntime()
+    showToast('凭据已保存；请选择已检测到的 Claude CLI 执行创作')
+  } catch (error) { showToast(readableError(error)) }
 })
 
 document.querySelector('#knowledgeForm').addEventListener('submit', async (event) => {
@@ -3380,10 +3648,13 @@ document.querySelector('#knowledgeForm').addEventListener('submit', async (event
 
 document.querySelectorAll('dialog').forEach((dialog) => {
   dialog.addEventListener('click', (event) => {
-    if (event.target === dialog) dialog.close()
+    if (event.target !== dialog) return
+    const bounds = dialog.getBoundingClientRect()
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close()
   })
   dialog.addEventListener('close', () => {
     if (dialog === elements.connectionDialog) document.querySelector('#apiKey').value = ''
+    if (dialog.id === 'claudeCredentialDialog') document.querySelector('#claudeApiKey').value = ''
     if (dialog === elements.commandDialog) {
       elements.commandInput.setAttribute('aria-expanded', 'false')
       elements.commandInput.removeAttribute('aria-activedescendant')
@@ -3402,11 +3673,50 @@ window.addEventListener('resize', () => {
 })
 
 document.documentElement.dataset.theme = storedWorkspace.theme === 'dark' ? 'dark' : 'light'
+window.addEventListener('beforeunload', event => {
+  if (unsavedEdits || pendingSaves || state.storageFailed || inspirationUI.dirty()) {
+    event.preventDefault()
+    if (inspirationUI.dirty()) {
+      switchView('inspirations')
+      showToast('灵感有未保存修改或正在保存，请保存完成后再关闭窗口')
+      return
+    }
+    event.returnValue = ''
+  }
+})
+if (isDesktopRuntime && window.__TAURI__.window?.getCurrentWindow) {
+  const appWindow = window.__TAURI__.window.getCurrentWindow()
+  appWindow.onCloseRequested(async event => {
+    event.preventDefault()
+    if (await saveImmediately({ announce: false })) await appWindow.destroy()
+  }).catch(error => showToast(readableError(error, '关闭前保存监听失败，请手动保存')))
+}
 document.querySelectorAll('svg.icon').forEach((icon) => icon.setAttribute('aria-hidden', 'true'))
 syncThemeControl()
+document.querySelector('#claudeCredentialButton').hidden = !isDesktopRuntime
+document.querySelector('#embeddingModel').value = state.knowledge.semantic?.model || ''
 renderProjectIdentity()
 renderKnowledge()
 renderConnections()
 updateDocumentView()
 syncAssistantAccessibility()
 detectRuntime()
+
+const inspirationUI = initializeInspirations({
+  appendToProject: async item => {
+    if (!activeProjectId || !state.documents.idea) throw new Error('请先创建或打开一个项目；灵感已独立保存，不会丢失。')
+    if (!await saveImmediately({ announce: false })) throw new Error('项目保存失败，尚未追加，请重试。')
+    const original = state.documents.idea.content
+    state.documents.idea.content = [original, `${item.title}\n\n${item.content}`].filter(Boolean).join('\n\n')
+    if (!await persistWorkspace()) {
+      state.documents.idea.content = original
+      throw new Error('追加保存失败，请重试。')
+    }
+    abandonCandidateOnContextChange('idea', 'script')
+    state.currentDocId = 'idea'
+    state.activeTab = 'script'
+    updateDocumentView()
+    switchView('workspace')
+    showToast('灵感已追加到核心灵感，原文保留')
+  }
+})

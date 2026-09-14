@@ -166,7 +166,7 @@
     </svg>
 
     <div class="app-shell" id="appShell">
-      <header class="titlebar" data-tauri-drag-region>
+      <header class="titlebar" data-tauri-drag-region="deep">
         <div class="titlebar-start">
           <div class="window-controls" aria-hidden="true">
             <span class="window-dot window-dot-close"></span>
@@ -176,10 +176,10 @@
           <button class="icon-button mobile-only" type="button" data-action="toggle-explorer" aria-label="打开内容导航" title="打开内容导航" aria-controls="resourceExplorer" aria-expanded="false">
             <svg class="icon"><use href="#icon-menu"></use></svg>
           </button>
-          <button class="project-switcher" type="button" data-action="new-project" aria-haspopup="dialog" aria-label="新建项目" title="新建项目">
+          <button class="project-switcher" type="button" data-action="project-library" aria-haspopup="dialog" aria-label="项目管理" title="项目管理">
             <span class="project-mark">未</span>
             <span class="project-switcher-copy">
-              <strong>未命名短剧</strong>
+              <strong>新建项目</strong>
               <span>短剧 · 新项目</span>
             </span>
             <svg class="icon icon-small"><use href="#icon-plus"></use></svg>
@@ -220,7 +220,7 @@
             <button class="rail-button is-active" type="button" data-view-target="workspace" aria-label="创作工作区" aria-current="page" data-tooltip="创作工作区">
               <svg class="icon"><use href="#icon-pen"></use></svg>
             </button>
-            <button class="rail-button" type="button" data-action="select-doc" data-doc-id="idea" aria-label="灵感库" data-tooltip="灵感库">
+            <button class="rail-button" type="button" data-view-target="inspirations" aria-label="灵感库" data-tooltip="灵感库">
               <svg class="icon"><use href="#icon-lightbulb"></use></svg>
             </button>
             <button class="rail-button" type="button" data-view-target="knowledge" aria-label="知识库" data-tooltip="知识库">
@@ -241,7 +241,7 @@
           <div class="explorer-header">
             <div>
               <span class="eyebrow">项目内容</span>
-              <div class="explorer-project-title">未命名短剧</div>
+              <div class="explorer-project-title">暂无项目</div>
             </div>
             <div class="explorer-header-actions">
               <button class="icon-button icon-button-compact" type="button" data-action="new-content" aria-label="新建内容" title="新建内容">
@@ -273,10 +273,15 @@
 
         <main class="main-surface" id="workspaceMain" tabindex="-1">
           <section class="view-panel workspace-view" id="workspaceView" data-view="workspace">
+            <div id="emptyWorkspace" class="empty-workspace" hidden>
+              <h1>开始你的第一个创作项目</h1>
+              <p>从一个灵感开始，逐步完成你的故事。</p>
+              <button class="primary-button" type="button" data-action="new-project">新建项目</button>
+            </div>
             <header class="document-header">
               <div class="document-heading">
                 <div class="breadcrumb" aria-label="当前位置">
-                  <span id="projectBreadcrumb">未命名短剧</span>
+                  <span id="projectBreadcrumb"></span>
                   <svg class="icon icon-tiny"><use href="#icon-chevron-right"></use></svg>
                   <span id="documentBreadcrumb">前期创作</span>
                 </div>
@@ -345,7 +350,7 @@
                 <div class="editor-paper-header">
                   <div>
                     <span class="scene-kicker" id="sceneKicker">Idea · 01</span>
-                    <h2 id="sceneTitle">未命名短剧 · 第一个故事火花</h2>
+                    <h2 id="sceneTitle"></h2>
                   </div>
                   <button class="icon-button icon-button-compact" type="button" data-action="edit-document" aria-label="编辑当前内容信息" title="编辑当前内容信息">
                     <svg class="icon"><use href="#icon-more"></use></svg>
@@ -356,7 +361,6 @@
                 <div class="editor-footer" id="editorStats">
                   <div class="editor-stats-left">
                     <span id="characterCount">0 字</span>
-                    <span>预计 1′30″</span>
                   </div>
                   <div class="editor-stats-right">
                     <span class="status-dot status-dot-success"></span>
@@ -364,6 +368,20 @@
                   </div>
                 </div>
               </article>
+            </div>
+          </section>
+
+          <section class="view-panel inspirations-view" data-view="inspirations" hidden>
+            <header class="page-header"><div><span class="eyebrow">捕捉故事的起点</span><h1>灵感库</h1><p>独立记录人物、画面与故事火花，无需先创建项目。</p></div><button class="primary-button" id="newInspiration" type="button">新增灵感</button></header>
+            <div class="inspiration-layout">
+              <aside class="inspiration-sidebar"><label for="inspirationSearch">搜索灵感</label><input id="inspirationSearch" type="search" placeholder="搜索标题或正文" /><div id="inspirationList" class="inspiration-list"></div></aside>
+              <form id="inspirationForm" class="inspiration-editor">
+                <h2 id="inspirationHeading">记录一个新灵感</h2>
+                <div class="form-field"><label for="inspirationTitle">标题</label><input id="inspirationTitle" required maxlength="100" placeholder="给这个火花起个名字" /></div>
+                <div class="form-field"><label for="inspirationContent">灵感正文</label><textarea id="inspirationContent" required maxlength="100000" rows="12" placeholder="一个人物困境、一段对白，或一个还没想清楚的画面…"></textarea></div>
+                <p id="inspirationStatus" role="status">尚未保存。灵感独立于项目保存。</p>
+                <div class="inspiration-actions"><button class="primary-button" type="submit">保存灵感</button><button class="secondary-button" id="useInspiration" type="button">追加到当前项目</button><button class="secondary-button" id="exportInspirations" type="button">导出灵感库</button></div>
+              </form>
             </div>
           </section>
 
@@ -410,6 +428,15 @@
                 <input id="knowledgeQuery" type="search" placeholder="例如：主角的核心动机是什么？" autocomplete="off" />
                 <button class="primary-button" type="submit"><svg class="icon"><use href="#icon-search"></use></svg>检索</button>
               </form>
+              <div class="form-field">
+                <label for="embeddingModel">本机语义检索模型（Ollama）</label>
+                <input id="embeddingModel" placeholder="填写已安装的 Embedding 模型名称" maxlength="200" />
+                <small>仅向本机 Ollama 发送已导入的知识片段；未启用时使用文本检索。</small>
+                <div class="project-actions dialog-actions">
+                  <button class="secondary-button" type="button" data-action="build-semantic-index">建立 / 更新语义索引</button>
+                  <button class="text-button" type="button" data-action="clear-semantic-index">关闭语义检索</button>
+                </div>
+              </div>
               <div class="knowledge-results" id="knowledgeResults" aria-live="polite"></div>
             </section>
 
@@ -466,7 +493,7 @@
 
             <section class="connection-section" aria-labelledby="apiConnectionsTitle">
               <div class="connection-section-heading">
-                <div><span class="section-icon"><svg class="icon"><use href="#icon-key"></use></svg></span><div><h2 id="apiConnectionsTitle">模型 API</h2><p>密钥仅保留在当前应用会话，不进入项目文件或本地存储。</p></div></div>
+                <div><span class="section-icon"><svg class="icon"><use href="#icon-key"></use></svg></span><div><h2 id="apiConnectionsTitle">模型 API</h2><p>密钥默认仅用于当前会话，可选 macOS 钥匙串保存，不进入项目文件。</p></div></div>
               </div>
               <div class="connection-list" id="apiConnectionList"></div>
             </section>
@@ -477,6 +504,7 @@
                 <button class="text-button" type="button" data-action="detect-cli">重新检测</button>
               </div>
               <div class="connection-list" id="cliConnectionList"></div>
+              <button id="claudeCredentialButton" class="secondary-button" type="button" data-action="configure-claude" hidden>配置 Claude CLI 凭据</button>
             </section>
 
             <section class="connection-section" aria-labelledby="localConnectionsTitle">
@@ -488,7 +516,7 @@
 
             <div class="security-note">
               <svg class="icon"><use href="#icon-lock"></use></svg>
-              <div><strong>本地优先的安全边界</strong><p>当前版本不会持久化密钥。CLI 只接受白名单驱动与固定参数，不接受自定义 Shell；选中的知识片段会发送给当前执行端。</p></div>
+              <div><strong>本地优先的安全边界</strong><p>密钥默认仅用于当前会话；macOS 桌面版可选择保存到系统钥匙串。CLI 只接受白名单驱动与固定参数，不接受自定义 Shell；选中的知识片段会发送给当前执行端。</p></div>
             </div>
           </section>
         </main>
@@ -618,6 +646,37 @@
       <div class="command-footer"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 打开</span></div>
     </dialog>
 
+    <dialog class="app-dialog project-library-dialog" id="projectLibraryDialog" aria-labelledby="projectLibraryTitle">
+      <div class="dialog-header"><div><span class="eyebrow">创作空间</span><h2 id="projectLibraryTitle">我的项目</h2><p class="dialog-description">选择一个项目继续创作，或开启新的故事。</p></div><button type="button" class="icon-button" data-action="close-dialog" aria-label="关闭我的项目"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
+      <div class="project-library-toolbar"><span id="projectCount"></span><div><button class="secondary-button" type="button" data-action="restore-project">恢复备份</button><button class="primary-button" type="button" data-action="new-project">新建项目</button></div></div>
+      <div id="projectList" class="project-list"></div>
+      <div class="project-library-footer"><p class="project-actions-label">当前项目操作</p>
+      <div class="dialog-actions project-actions">
+        <button class="secondary-button" type="button" data-action="rename-project">重命名</button>
+        <button class="secondary-button" type="button" data-action="backup-project">备份当前项目</button>
+        <button class="secondary-button" type="button" data-action="export-project">导出 Markdown</button>
+      </div>
+      <p class="dialog-description">项目独立保存。备份包含正文、版本和知识片段，不包含 API 密钥。</p></div>
+    </dialog>
+    <dialog class="app-dialog cli-consent-dialog" id="cliConsentDialog" aria-labelledby="cliConsentTitle" aria-describedby="cliConsentSummary cliConsentBoundary">
+      <form method="dialog">
+        <div class="dialog-header"><div><span class="eyebrow">执行前确认</span><h2 id="cliConsentTitle">确认 CLI 生成</h2></div><button class="icon-button" type="submit" value="cancel" aria-label="取消生成"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
+        <p id="cliConsentSummary" class="cli-consent-summary"></p>
+        <div class="cli-consent-boundary"><strong>执行范围与权限</strong><p id="cliConsentBoundary"></p></div>
+        <label class="cli-consent-remember"><input id="cliConsentRemember" type="checkbox" />本次会话使用此执行端不再询问</label>
+        <p class="dialog-description">不勾选则仅授权本次请求。切换执行端或重启应用后需重新确认。生成结果先进入候选区，不会自动覆盖正文。</p>
+        <div class="dialog-actions"><button class="secondary-button" type="submit" value="cancel" autofocus>取消</button><button class="primary-button" type="submit" value="confirm">确认生成</button></div>
+      </form>
+    </dialog>
+    <input type="file" id="projectBackupFile" accept=".json,application/json" hidden />
+    <dialog class="app-dialog form-dialog" id="renameProjectDialog" aria-labelledby="renameProjectTitle">
+      <form id="renameProjectForm">
+        <h2 id="renameProjectTitle">重命名项目</h2>
+        <div class="form-field"><label for="renameProjectName">项目名称</label><input id="renameProjectName" required maxlength="100" /></div>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">保存名称</button></div>
+      </form>
+    </dialog>
+
     <dialog class="app-dialog form-dialog" id="newProjectDialog" aria-labelledby="newProjectTitle">
       <form method="dialog" id="newProjectForm">
         <div class="dialog-header">
@@ -626,7 +685,7 @@
         </div>
         <div class="form-field">
           <label for="projectName">项目名称</label>
-          <input id="projectName" name="projectName" required value="未命名故事" autocomplete="off" />
+          <input id="projectName" name="projectName" required placeholder="输入项目名称" autocomplete="off" />
           <small>将作为当前本机项目名称。</small>
         </div>
         <fieldset class="content-type-field">
@@ -635,11 +694,10 @@
           <label><input type="radio" name="contentType" value="漫剧" /><span><svg class="icon"><use href="#icon-layers"></use></svg><strong>漫剧</strong><small>分镜文字与对白</small></span></label>
           <label><input type="radio" name="contentType" value="通用故事" /><span><svg class="icon"><use href="#icon-book"></use></svg><strong>通用故事</strong><small>灵感、大纲与正文</small></span></label>
         </fieldset>
-        <div class="dialog-warning" role="note"><svg class="icon"><use href="#icon-alert"></use></svg><span>当前版本一次保留一个项目；继续会替换当前本机项目数据。后续版本将支持多项目列表。</span></div>
-        <label class="replace-confirm"><input id="replaceProjectConfirm" type="checkbox" required /><span>我了解当前项目内容将被替换</span></label>
+        <p>新项目独立保存，不会替换已有项目。</p>
         <div class="dialog-actions">
           <button class="secondary-button" type="button" data-action="close-dialog">取消</button>
-          <button class="primary-button" type="submit">替换并开始</button>
+          <button class="primary-button" type="submit">创建项目</button>
         </div>
       </form>
     </dialog>
@@ -651,16 +709,27 @@
           <button class="icon-button icon-button-compact" type="button" data-action="close-dialog" aria-label="关闭"><svg class="icon"><use href="#icon-x"></use></svg></button>
         </div>
         <input id="connectionId" name="connectionId" type="hidden" />
+        <label id="rememberApiKeyOption" hidden><input id="rememberApiKey" type="checkbox" />记住密钥（macOS 钥匙串）</label>
         <div class="form-field"><label for="connectionKind">连接类型</label><select id="connectionKind" name="connectionKind"><option value="openai-compatible">OpenAI 兼容 API</option><option value="ollama">Ollama 本地服务</option></select></div>
         <div class="form-field"><label for="connectionName">连接名称</label><input id="connectionName" name="connectionName" value="我的模型" autocomplete="off" required /></div>
         <div class="form-field"><label for="baseUrl">API 地址</label><input id="baseUrl" type="url" value="https://api.example.com/v1" autocomplete="url" /></div>
-        <div class="form-field" id="apiKeyField"><label for="apiKey">API Key</label><input id="apiKey" type="password" placeholder="仅本次应用会话使用" autocomplete="new-password" /><small>不会写入 localStorage 或项目文件；刷新后需要重新输入。</small></div>
+        <div class="form-field" id="apiKeyField"><label for="apiKey">API Key</label><input id="apiKey" type="password" placeholder="输入密钥，留空保留现有密钥" autocomplete="new-password" /><small>密钥不进入项目备份。桌面端可选择保存到系统钥匙串。</small></div>
         <div class="form-field"><label for="modelName">默认模型</label><input id="modelName" name="modelName" value="gpt-4.1-mini" autocomplete="off" required /></div>
         <div class="dialog-inline-status" id="connectionTestStatus" role="status"><svg class="icon"><use href="#icon-lock"></use></svg><span>尚未测试连接</span></div>
         <div class="dialog-actions dialog-actions-split">
           <button class="secondary-button" type="button" data-action="modal-test-connection">测试连接</button>
           <div><button class="text-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">保存连接</button></div>
         </div>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog form-dialog" id="claudeCredentialDialog" aria-labelledby="claudeCredentialTitle">
+      <form id="claudeCredentialForm">
+        <h2 id="claudeCredentialTitle">Claude CLI 凭据</h2>
+        <p>使用 Anthropic API Key 执行无工具创作，不读取本机 Claude 登录与插件配置。请求会使用你的 API 用量。</p>
+        <div class="form-field"><label for="claudeApiKey">Anthropic API Key</label><input id="claudeApiKey" type="password" required autocomplete="new-password" /></div>
+        <label><input id="rememberClaudeKey" type="checkbox" />保存到 macOS 钥匙串</label>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">保存并检测</button></div>
       </form>
     </dialog>
 
