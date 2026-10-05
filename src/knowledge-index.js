@@ -164,12 +164,12 @@ function sanitizeChunk(value) {
   if (typeof value.updatedAt !== 'string') return null
   if (!Number.isInteger(value.start) || value.start < 0) return null
   if (!Number.isInteger(value.end) || value.end < value.start) return null
-  if (!isVectorLike(value.vector) || value.vector.length !== VECTOR_DIMENSION) return null
+  // Backups omit deterministic vectors; rebuild them from their authoritative text.
+  if (value.vector !== undefined && (!isVectorLike(value.vector) || value.vector.length !== VECTOR_DIMENSION)) return null
 
-  const vector = Array.from(value.vector)
+  const vector = value.vector === undefined ? createTextVector(value.content) : Array.from(value.vector)
   if (vector.some(item => !Number.isFinite(item))) return null
-  const normalizedVector = normalizeVector(vector)
-  if (!normalizedVector) return null
+  const normalizedVector = normalizeVector(vector) || Array(VECTOR_DIMENSION).fill(0)
 
   return {
     id: value.id,
@@ -237,7 +237,7 @@ export function chunkDocument(document) {
     : (Number.isFinite(document.updatedAt) ? String(document.updatedAt) : '')
 
   return splitContent(content).map(chunk => ({
-    id: `${documentId}:${stableHash(`${documentId}\u0000${updatedAt}\u0000${chunk.start}\u0000${chunk.end}\u0000${chunk.content}`).toString(16).padStart(8, '0')}`,
+    id: `${documentId}:${stableHash(`${documentId}\u0000${chunk.start}\u0000${chunk.end}\u0000${chunk.content}`).toString(16).padStart(8, '0')}`,
     sourceId,
     name,
     path,

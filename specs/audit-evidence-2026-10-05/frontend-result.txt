@@ -1,0 +1,45 @@
+{
+  "method": "真实函数源码 + 隔离对象/延迟保存替身；无 UI、原生窗口、数据库或模型调用",
+  "reports": [
+    {
+      "scenario": "同一候选在首次保存返回前重复采纳",
+      "content": "原文\n\n候选\n\n候选",
+      "versions": 2,
+      "reproduced": true
+    },
+    {
+      "scenario": "采纳保存期间继续编辑，随后本次保存失败",
+      "content": "原文",
+      "newEditsLost": true,
+      "reproduced": true
+    },
+    {
+      "scenario": "设定引用页执行检查冲突",
+      "hasCurrentScript": false,
+      "hasReferenceNotes": true,
+      "reproduced": true
+    },
+    {
+      "scenario": "第二集上移后导出 Markdown",
+      "treeEpisodeOrder": [
+        "episode-2",
+        "episode-1"
+      ],
+      "exportedHeadings": [
+        "第一集",
+        "第二集",
+        "第一集的分场",
+        "第二集的分场"
+      ],
+      "referencesOmitted": true,
+      "reproduced": true
+    },
+    {
+      "scenario": "tablist 按方向键，异步保存结束后",
+      "selectedTab": "outline",
+      "focusedControl": "scriptEditor",
+      "focusLeftTablist": true,
+      "reproduced": true
+    }
+  ]
+}

@@ -1,233 +1,71 @@
-# Design System Master File
+# AI 创作工作台 · 设计系统
 
-> **LOGIC:** When building a specific page, first check `design-system/pages/[page-name].md`.
-> If that file exists, its rules **override** this Master file.
-> If not, strictly follow the rules below.
+更新日期：2026-10-05。适用于现有桌面工作台与浏览器工作台；实现真源为 `src/styles.css`。页面补充约束见 `pages/workspace.md`。
 
----
+## 设计原则
 
-**Project:** AI Creator Workbench
-**Generated:** 2026-09-03 13:55:53
-**Category:** Generative Art Platform
-**Design Dials:** Variance 6/10 (Balanced / Modern) | Motion 4/10 (Standard) | Density 7/10 (Standard)
+**以写作为中心。** 页面以暖白纸面承载正文，以墨色呈现主要文字。琥珀只用于当前选择、创作入口、进度与重要提示。导航和工具区保持稳定，正文获得最多可用空间。
 
----
+**用留白表达结构。** 四区工作台遵循固定工具栏、弹性正文区的网格。工具区采用紧凑的垂直节奏，纸面采用更舒展的行距；不同密度承担不同职责，不依赖装饰图区分页面。
 
-## Global Rules
+**建立三级文字层级。** 页面标题使用本地衬线字体，控件使用系统无衬线字体，长文使用中文宋体字体栈。标题、正文、辅助说明通过字号与颜色区分；默认字号不低于 11px。
 
-### Color Palette
+**统一可控参数。** 间距以 4px 为基础，控件圆角 8–10px，内容卡片 12–16px，浮层 18px。颜色、字号与边界保持一致。悬停只改变颜色、边界或阴影，不移动元素。
 
-| Role | Hex | CSS Variable |
-|------|-----|--------------|
-| Primary | `#18181B` | `--color-primary` |
-| On Primary | `#FFFFFF` | `--color-on-primary` |
-| Secondary | `#3F3F46` | `--color-secondary` |
-| On Secondary | `#FFFFFF` | `--color-on-secondary` |
-| Accent/CTA | `#EC4899` | `--color-accent` |
-| On Accent/CTA | `#000000` | `--color-on-accent` |
-| Background | `#FAFAFA` | `--color-background` |
-| Foreground | `#09090B` | `--color-foreground` |
-| Card | `#FFFFFF` | `--color-card` |
-| Card Foreground | `#09090B` | `--color-card-foreground` |
-| Muted | `#E8ECF0` | `--color-muted` |
-| Muted Foreground | `#475569` | `--color-muted-foreground` |
-| Border | `#E4E4E7` | `--color-border` |
-| Destructive | `#DC2626` | `--color-destructive` |
-| On Destructive | `#FFFFFF` | `--color-on-destructive` |
-| Ring | `#18181B` | `--color-ring` |
+**优先长期使用。** 深色模式提供同等的信息层级；键盘焦点清晰，缩小屏幕不会取消必要操作。动效只提供短暂反馈，并服从系统的减少动态效果设置。
 
-**Color Notes:** Canvas neutral + creative pink
+## 颜色
 
-### Typography
+| 用途 | 变量 | 浅色 | 深色 |
+| --- | --- | --- | --- |
+| 主文字 | `--ink` | `#29241e` | `#f2eee7` |
+| 次级文字 | `--ink-soft` | `#494239` | `#d5cec4` |
+| 辅助文字 | `--muted` | `#756d61` | `#aba49b` |
+| 说明文字 | `--muted-strong` | `#60574a` | `#c1b9ae` |
+| 页面画布 | `--canvas` | `#f3f0e9` | `#171614` |
+| 写作纸面 | `--paper` | `#fffefb` | `#201e1b` |
+| 次级表面 | `--surface` | `#f9f7f2` | `#1c1a18` |
+| 卡片 / 弹窗 | `--surface-strong` | `#ffffff` | `#25221f` |
+| 默认边界 | `--line` | `#e2ddd3` | `#3b3732` |
+| 控件边界 | `--line-strong` | `#c9bfaf` | `#554f47` |
+| 琥珀填充 | `--accent` | `#dc952f` | `#e8a348` |
+| 琥珀背景 | `--accent-soft` | `#fbefd9` | `#3e2d19` |
+| 琥珀文字 | `--accent-text` | `#89540f` | `#edb66d` |
+| 导航墨色 | `--nav` | `#28251f` | `#11100f` |
+| 焦点 | `--focus` | `#95601d` | `#edb66d` |
 
-- **Heading Font:** Inter
-- **Body Font:** Playfair Display
-- **Mood:** bold typography, editorial, poster, near-black, vermillion, luxury, type-as-hero, manifesto, high-contrast
-- **Google Fonts:** [Inter + Playfair Display](https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400&family=Playfair+Display:ital@1)
+`--accent` 是填充与装饰线颜色；小字号的琥珀文字使用 `--accent-text`。状态采用成功、警告、错误专用变量，并配合文字说明，不能仅凭颜色传达结果。
 
-**CSS Import:**
-```css
-@import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400&family=Playfair+Display:ital@1&display=swap');
-```
+## 字体与阅读
 
-### Spacing Variables
+- UI：系统字体栈，优先 macOS 系统字体与苹方，不加载网络字体。
+- 长文与主要标题：`Songti SC`、`STSong`、`Noto Serif CJK SC`、Georgia、serif。
+- 数据及编号：系统等宽字体；统计数字使用等宽数字。
+- 页面标题：30–40px；文档标题：24–30px；弹窗标题：26px。
+- 正文编辑：17px、2 倍行高；窄屏为 16px、1.85 倍行高。
+- 表单与主要按钮：13–14px；辅助信息：11–12px。移动设备上的文本输入至少 16px，避免聚焦时页面自动放大。
 
-*Density: 7/10 — Standard*
+## 组件约定
 
-| Token | Value | Usage |
-|-------|-------|-------|
-| `--space-xs` | `4px` / `0.25rem` | Tight gaps |
-| `--space-sm` | `8px` / `0.5rem` | Icon gaps, inline spacing |
-| `--space-md` | `16px` / `1rem` | Standard padding |
-| `--space-lg` | `24px` / `1.5rem` | Section padding |
-| `--space-xl` | `32px` / `2rem` | Large gaps |
-| `--space-2xl` | `48px` / `3rem` | Section margins |
-| `--space-3xl` | `64px` / `4rem` | Hero padding |
+- 主要按钮使用墨色实底，次要按钮使用细边界，危险操作使用错误色与明确文字。
+- 可点击列表必须有悬停与选中状态；当前项目和当前文档同时使用边界、底色或侧边标记。
+- 灵感正文和主编辑器使用纸面卡片；知识来源与连接使用规则列表。
+- AI 内容始终位于候选容器，采纳、追加、放弃保持分离；较长内容和路径允许换行。
+- 表单标签置顶；说明文字靠近字段；输入边界、聚焦反馈和错误提示保持统一。
+- 项目管理、版本管理、恢复备份等浮层采用同一弹窗框架。
+- 无内容、检索无结果、未建立连接都使用简洁说明和可执行入口；不使用假数据填充视觉空白。
+- 背景卡片保持平面；纸面轻阴影帮助区分编辑区域；明显阴影留给弹窗、抽屉和 toast。
 
-### Shadow Depths
+## 可访问性与适配
 
-| Level | Value | Usage |
-|-------|-------|-------|
-| `--shadow-sm` | `0 1px 2px rgba(0,0,0,0.05)` | Subtle lift |
-| `--shadow-md` | `0 4px 6px rgba(0,0,0,0.1)` | Cards, buttons |
-| `--shadow-lg` | `0 10px 15px rgba(0,0,0,0.1)` | Modals, dropdowns |
-| `--shadow-xl` | `0 20px 25px rgba(0,0,0,0.15)` | Hero images, featured cards |
+- 保留 `:focus-visible`，焦点轮廓至少 2px，与背景有明显区别。
+- 使用实际按钮、输入框和语义标题；样式不能替代可访问名称。
+- 小屏主要交互目标至少 44px；仅装饰元素可以更小。
+- 断点为 1279 / 1099 / 899 / 699 / 599px，并覆盖 375、768、1024、1440px 的验收尺寸。
+- 高对比文字和交互可见性同时适用于浅色与深色。
+- `prefers-reduced-motion: reduce` 统一禁用持续动画和过渡位移。
+- 不引入外部字体、UI 框架、远程图片或在线依赖。
 
----
+## 修改方式
 
-## Component Specs
-
-### Buttons
-
-```css
-/* Primary Button */
-.btn-primary {
-  background: #EC4899;
-  color: white;
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-
-.btn-primary:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
-}
-
-/* Secondary Button */
-.btn-secondary {
-  background: transparent;
-  color: #18181B;
-  border: 2px solid #18181B;
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-```
-
-### Cards
-
-```css
-.card {
-  background: #FAFAFA;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: var(--shadow-md);
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-
-.card:hover {
-  box-shadow: var(--shadow-lg);
-  transform: translateY(-2px);
-}
-```
-
-### Inputs
-
-```css
-.input {
-  padding: 12px 16px;
-  border: 1px solid #E2E8F0;
-  border-radius: 8px;
-  font-size: 16px;
-  transition: border-color 200ms ease;
-}
-
-.input:focus {
-  border-color: #18181B;
-  outline: none;
-  box-shadow: 0 0 0 3px #18181B20;
-}
-```
-
-### Modals
-
-```css
-.modal-overlay {
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-}
-
-.modal {
-  background: white;
-  border-radius: 16px;
-  padding: 32px;
-  box-shadow: var(--shadow-xl);
-  max-width: 500px;
-  width: 90%;
-}
-```
-
----
-
-## Style Guidelines
-
-**Style:** Minimalism & Swiss Style
-
-**Keywords:** Clean, simple, spacious, functional, white space, high contrast, geometric, sans-serif, grid-based, essential
-
-**Best For:** Enterprise apps, dashboards, documentation sites, SaaS platforms, professional tools
-
-**Key Effects:** Subtle hover (200-250ms), smooth transitions, sharp shadows if any, clear type hierarchy, fast loading
-
-### Page Pattern
-
-**Pattern Name:** Feature-Rich Showcase
-
-- **Conversion Strategy:** Clear feature hierarchy. One key message per card. Strong CTA repetition.
-- **CTA Placement:** Hero (sticky) + After features + Bottom
-- **Section Order:** Hero (value prop) > Feature grid/cards (4-6) > Use cases or benefits > Social proof or logos > CTA
-
----
-
-## Motion
-
-**Stagger List** (Standard) — Trigger: load or scroll | Duration: 300-450ms | Easing: `back.out(1.4)`
-
-```js
-gsap.from('.grid-item', { opacity: 0, scale: 0.92, y: 16, duration: 0.4, stagger: { each: 0.06, from: 'start', grid: 'auto' }, ease: 'back.out(1.4)' });
-```
-
-**Framework notes:** grid: 'auto' lets GSAP infer rows/columns from a CSS grid layout for a natural wave stagger; Use matchMedia('(prefers-reduced-motion: reduce)') to skip non-essential motion and render the final state immediately
-
-- ✅ Combine with from: 'center' for a bento-grid layout to draw the eye inward first
-- ❌ Don't use back.out on dense data tables; the overshoot reads as sloppy on informational UI
-- ⚡ Group DOM writes; avoid interleaving layout reads (getBoundingClientRect) between staggered tweens
-
----
-
-## Anti-Patterns (Do NOT Use)
-
-- ❌ Heavy chrome
-- ❌ Slow loading
-
-### Additional Forbidden Patterns
-
-- ❌ **Emojis as icons** — Use SVG icons (Heroicons, Lucide, Simple Icons)
-- ❌ **Missing cursor:pointer** — All clickable elements must have cursor:pointer
-- ❌ **Layout-shifting hovers** — Avoid scale transforms that shift layout
-- ❌ **Low contrast text** — Maintain 4.5:1 minimum contrast ratio
-- ❌ **Instant state changes** — Always use transitions (150-300ms)
-- ❌ **Invisible focus states** — Focus states must be visible for a11y
-
----
-
-## Pre-Delivery Checklist
-
-Before delivering any UI code, verify:
-
-- [ ] No emojis used as icons (use SVG instead)
-- [ ] All icons from consistent icon set (Heroicons/Lucide)
-- [ ] `cursor-pointer` on all clickable elements
-- [ ] Hover states with smooth transitions (150-300ms)
-- [ ] Light mode: text contrast 4.5:1 minimum
-- [ ] Focus states visible for keyboard navigation
-- [ ] `prefers-reduced-motion` respected
-- [ ] Responsive: 375px, 768px, 1024px, 1440px
-- [ ] No content hidden behind fixed navbars
-- [ ] No horizontal scroll on mobile
+调整现有组件原始规则，避免在样式表尾部重复覆盖。新组件放到对应分组，响应式变体放到既有断点；新增视觉规则需要同步本文件或页面规范。实际布局应通过浏览器检查，单纯构建成功不能证明视觉验收通过。

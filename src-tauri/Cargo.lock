@@ -19,13 +19,14 @@ dependencies = [
 
 [[package]]
 name = "ai-creator-workbench"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "libc",
  "reqwest 0.12.28",
  "rusqlite",
  "security-framework",
+ "semver",
  "serde",
  "serde_json",
  "tauri",

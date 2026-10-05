@@ -1,0 +1,115 @@
+name: Release macOS
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing SemVer tag to build (for example v0.3.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Validate and build Apple Silicon
+    runs-on: macos-14
+    timeout-minutes: 60
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate the existing tag and all version files
+        id: version
+        run: node scripts/check-release-version.mjs --tag "$RELEASE_TAG" --from-tag --github-output "$GITHUB_OUTPUT"
+      - name: Check out the verified immutable commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.version.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the checked out version
+        run: node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build:web
+      - name: Install the repository-pinned Rust toolchain and Apple Silicon target
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-apple-darwin
+      - name: Run locked Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Build the app and DMG from locked dependencies
+        run: node scripts/run-tauri.mjs build --target aarch64-apple-darwin --bundles app,dmg --ci -- --locked
+      - name: Validate bundles and generate release checksums
+        run: node scripts/release-artifacts.mjs --tag "$RELEASE_TAG"
+      - name: Retain verified release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-${{ github.run_id }}
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publish:
+    name: Publish the complete release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Serialize final publication across versions so an older concurrent build cannot steal Latest.
+    concurrency:
+      group: workbench-release-publication
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ needs.build.outputs.tag }}
+      RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-release-${{ github.run_id }}
+          path: release-artifacts
+      - name: Upload privately, verify, then publish
+        id: release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { pathToFileURL } = require('node:url');
+            const { join } = require('node:path');
+            const moduleUrl = pathToFileURL(join(process.env.GITHUB_WORKSPACE, 'scripts/publish-release.mjs')).href;
+            const { publishRelease } = await import(moduleUrl);
+            const result = await publishRelease({
+              github, context,
+              directory: join(process.env.GITHUB_WORKSPACE, 'release-artifacts'),
+              tag: process.env.RELEASE_TAG,
+              commit: process.env.RELEASE_COMMIT,
+            });
+            core.setOutput('url', result.url);
+            await core.summary.addHeading(`Published ${result.tag}`).addLink('GitHub Release', result.url).addList(result.assets).write();

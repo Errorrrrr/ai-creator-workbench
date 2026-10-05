@@ -1,61 +1,59 @@
-# Workspace Page Overrides
+# 工作台页面规范
 
-> **PROJECT:** AI Creator Workbench
-> **Generated:** 2026-09-03 13:56:31
-> **Page Type:** Desktop creative workspace
+更新日期：2026-10-05。补充并细化上级 `MASTER.md`。
 
-> ⚠️ **IMPORTANT:** Rules in this file **override** the Master file (`design-system/MASTER.md`).
-> Only deviations from the Master are documented here. For all other rules, refer to the Master.
+## 空间分配
 
----
+- 桌面布局：60px 主导航、236px 项目目录、弹性正文、340px AI 助手。
+- 1100–1279px：目录收窄到 224px，助手收窄到 320px。
+- 900–1099px：AI 助手为右侧抽屉；正文继续占用余下空间。
+- 899px 以下：目录也切换为左侧抽屉，导航宽度为 56px；正文占据其余宽度。
+- 知识库、连接中心、灵感库隐藏项目目录与助手，内容最大宽度为 1180px。
+- 专注模式释放目录空间；同时关闭助手时，两侧空间都归还正文。
+- 不依赖仅设置 `visibility: hidden` 释放网格列；中屏仍保留正确的零宽目录轨道，小屏抽屉脱离文档流。
 
-## Page-Specific Rules
+## 写作区
 
-### Layout Overrides
+- 编辑器优先于两侧工具，纸面最大宽度 820px。
+- 文档标题、标签页、创作目标、正文按顺序排列；正文周围保留稳定的间距。
+- 正文采用宋体字体栈，纸面圆角为 12px，边界和阴影轻于浮层。
+- 编辑器聚焦时显示外围焦点，避免文字区域出现多重边框。
+- 当前版本、字数、保存状态贴近正文；长状态说明可以换行。
+- 新增手动快照后，标题与工具栏可以分行；375px 时六个主要编辑操作仍可达，不用隐藏按钮换取空间。
+- 空工作台在可用区域居中，提供清晰的新建入口。
 
-- **Max Width:** none; shell fills the available desktop window
-- **Layout:** activity rail + resource explorer + flexible editor + assistant panel
-- **Reading Width:** editor content stays between 680px and 860px when space allows
+## AI 助手
 
-### Spacing Overrides
+- 模型选择、上下文、候选结果、输入框四区分明。
+- 候选正文为 14px，1.9 倍行高，长词和路径允许换行。
+- 操作按钮采用两列网格，窄屏仍保留文字。
+- 输入框以清晰边界表明可编辑区域；移动设备上输入字号为 16px。
+- `context-preview` 呈现实际请求说明或原文，代码内容使用可换行等宽字体，最高 340px 后内部滚动。
+- `task-progress` 用统一琥珀提示展示当前阶段与进度。
 
-- No overrides — use Master spacing
+## 资料与项目
 
-### Typography Overrides
+- 灵感库在宽屏采用列表与编辑器双栏；699px 以下为单栏，列表设置滚动上限，避免正文入口被无限推后。
+- 项目列表保留当前状态、名称、更新时间及独立操作区。`project-list-row` 配合 `project-row-actions` 支持打开与归档/恢复按钮分开布局。
+- `library-management` 用于筛选与工具操作；`storage-summary` 呈现备份和存储信息。两者均可自然换行。
+- 知识来源列表、检索结果和连接卡片采用一致边界、信息字号及圆角。
+- 手机连接卡片的操作区明确回到自动行，避免继承桌面的跨行位置；来源操作在小屏仍可见。
+- 归档灵感筛选为完整可点击的标签行，复选框与文字保持对齐。
+- 导入报告无内容时隐藏；长文件列表允许换行，并在限定高度内滚动。项目页报告与导入弹窗预览使用同一反馈样式。
 
-- Chinese interface: `Inter`, `PingFang SC`, `Microsoft YaHei`, system sans-serif
-- Chinese long-form editor: `Songti SC`, `STSong`, `Noto Serif CJK SC`, serif
-- Do not fetch Google Fonts at runtime; the desktop app must remain usable offline
+## 启动恢复
 
-### Color Overrides
+- `.startup-recovery` 独立于隐藏的工作台显示，保持纸面配色、清晰标题与状态说明。
+- 桌面上两个恢复操作并排、重新打开单独一行；手机按单栏展示。
+- 错误和导出路径可换行，面板超过窗口高度时内部滚动，避免动作按钮不可达。
 
-- Workspace background: warm paper `#F7F3EC`
-- Navigation ink: `#191816`
-- Creative accent: amber `#D97706`; use dark text on the accent for contrast
-- Pink from Master is reserved for optional brand campaigns, not core workspace controls
+## 验收重点
 
-### Component Overrides
+1. 1440px：正文主导，目录和助手均可用，长文阅读宽度舒适。
+2. 1024px：关闭助手后正文不留空栏；进入知识库或连接中心不保留目录宽度。
+3. 768px：抽屉可开启和关闭；灵感双栏、项目弹窗无横向溢出。
+4. 375px：按钮可以换行；灵感为单栏；项目操作、主题切换、连接操作仍可达。
+5. 浅色与深色分别检查选中、禁用、错误、聚焦和空状态。
+6. 开启减少动态效果后，加载反馈仍能通过文字表达，不依赖旋转动画。
 
-- Cards are flat by default; only floating dialogs and drawers use shadows
-- Hover never moves layout; use color, border and background transitions only
-- Icon controls have accessible names and a minimum 44×44px target
-- AI output always appears in a labeled candidate container before acceptance
-
----
-
-## Page-Specific Components
-
-- Resource tree with explicit selected and expanded states
-- Script editor with save status, word count and version indicator
-- AI context tray, candidate result and prompt composer
-- Separate provider, CLI and knowledge status indicators
-- Command palette and reversible toast feedback
-
----
-
-## Recommendations
-
-- Treat this product as a writing IDE, not a chatbot shell
-- Keep the editor usable when every AI connection is unavailable
-- Collapse the assistant before the resource explorer as the window narrows
-- Use native CSS transitions only and respect `prefers-reduced-motion`
+这些是验收要求，不代表浏览器检查已经执行；测试结果应记录在实际交付报告中。

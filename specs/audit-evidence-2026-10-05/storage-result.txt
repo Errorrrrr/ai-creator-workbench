@@ -1,0 +1,5 @@
+{"case":"相同正文的项目设定再次同步","selectedReferenceSurvives":false,"mockEmbeddingCalls":2}
+{"case":"1500片段+1024维模拟语义向量","databaseMiB":39.03828525543213,"backupMiB":67.30687141418457,"restoreRejected":true}
+{"case":"灵感未保存时执行原始桌面关闭回调","projectSaved":true,"destroyed":true,"inspirationStillDirty":true}
+{"case":"选择81个合格Markdown文件","selected":81,"imported":80,"lastFilePresent":false,"returnedSkippedCount":false}
+All synthetic reproductions completed; repository and personal data unchanged.

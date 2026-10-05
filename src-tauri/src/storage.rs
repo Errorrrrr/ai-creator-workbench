@@ -2,66 +2,174 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::io::Write;
 use tauri::Manager;
 
+const MAX_LIBRARY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES: usize = 448 * 1024 * 1024;
+const MAX_BACKUP_BYTES: usize = 512 * 1024 * 1024;
+const BACKUP_ENVELOPE_RESERVE: usize = 1024;
+
+fn initialize_database(connection: &Connection) -> Result<(), String> {
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| e.to_string())?;
+    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS library (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS archive_snapshots (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);").map_err(|e| e.to_string())
+}
+
 fn database(app: &tauri::AppHandle) -> Result<Connection, String> {
     let directory = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let connection =
         Connection::open(directory.join("workbench.sqlite3")).map_err(|e| e.to_string())?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
-    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS library (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL);").map_err(|e| e.to_string())?;
+    initialize_database(&connection)?;
     Ok(connection)
 }
 
-#[tauri::command]
-pub(crate) fn library_read(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    database(&app)?
-        .query_row("SELECT payload FROM library WHERE id=1", [], |row| {
-            row.get(0)
-        })
+fn read_library(connection: &Connection, previous: bool) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT payload FROM library WHERE id=?1",
+            [if previous { 2 } else { 1 }],
+            |row| row.get(0),
+        )
         .optional()
         .map_err(|e| e.to_string())
 }
 
+fn read_archives(connection: &Connection, previous: bool) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT payload FROM archive_snapshots WHERE id=?1",
+            [if previous { 2 } else { 1 }],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+}
+
+fn current_revision(connection: &Connection) -> Result<i64, String> {
+    connection
+        .query_row("SELECT revision FROM library WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map(|value| value.unwrap_or(0))
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-pub(crate) fn library_write(
+pub(crate) fn library_read(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    read_library(&database(&app)?, false)
+}
+
+#[tauri::command]
+pub(crate) fn library_read_previous(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    read_library(&database(&app)?, true)
+}
+
+#[tauri::command]
+pub(crate) fn library_read_archives(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    read_archives(&database(&app)?, false)
+}
+
+#[tauri::command]
+pub(crate) fn library_read_previous_archives(
     app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    read_archives(&database(&app)?, true)
+}
+
+#[tauri::command]
+pub(crate) fn library_current_revision(app: tauri::AppHandle) -> Result<i64, String> {
+    current_revision(&database(&app)?)
+}
+
+fn validate_sizes(active_bytes: usize, archive_bytes: usize) -> Result<(), String> {
+    if active_bytes > MAX_LIBRARY_BYTES {
+        return Err("活动项目库超过 64 MiB，请归档部分项目后重试".into());
+    }
+    if archive_bytes > MAX_ARCHIVE_BYTES {
+        return Err("归档库超过 448 MiB，请先导出完整备份".into());
+    }
+    if active_bytes
+        .saturating_add(archive_bytes)
+        .saturating_add(BACKUP_ENVELOPE_RESERVE)
+        > MAX_BACKUP_BYTES
+    {
+        return Err("总容量已达到完整备份预算，请先导出完整备份".into());
+    }
+    Ok(())
+}
+
+fn write_library(
+    connection: &mut Connection,
     payload: String,
+    archive_payload: Option<String>,
     expected_revision: i64,
 ) -> Result<(), String> {
-    if payload.len() > 64 * 1024 * 1024 {
-        return Err("项目库超过 64 MiB，请导出并归档部分项目".into());
-    }
+    validate_sizes(
+        payload.len(),
+        archive_payload.as_ref().map_or(2, String::len),
+    )?;
+    let next_revision = expected_revision
+        .checked_add(1)
+        .filter(|value| *value > 0 && *value <= 9_007_199_254_740_991)
+        .ok_or("无效的保存版本")?;
     let value: serde_json::Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
-    if value["revision"].as_i64() != Some(expected_revision + 1) {
-        return Err("无效的保存版本".into());
+    if value["revision"].as_i64() != Some(next_revision)
+        || value["version"].as_i64() != Some(1)
+        || !value["projects"].is_array()
+    {
+        return Err("无效的保存版本或项目库结构".into());
     }
-    let mut connection = database(&app)?;
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    let revision: i64 = transaction
-        .query_row("SELECT revision FROM library WHERE id=1", [], |r| r.get(0))
-        .optional()
-        .map_err(|e| e.to_string())?
-        .unwrap_or(0);
-    if revision != expected_revision {
+    if current_revision(&transaction)? != expected_revision {
         return Err("项目已在另一窗口更新，请备份当前内容后重新打开".into());
     }
+    let archives = archive_payload
+        .unwrap_or(read_archives(&transaction, false)?.unwrap_or_else(|| "[]".into()));
+    validate_sizes(payload.len(), archives.len())?;
+    let archive_value: serde_json::Value =
+        serde_json::from_str(&archives).map_err(|e| e.to_string())?;
+    if !archive_value.is_array() {
+        return Err("归档库格式无效".into());
+    }
+    // Both snapshots are captured in the same transaction, so recovery also restores archive moves.
     transaction
         .execute(
             "INSERT OR REPLACE INTO library SELECT 2, revision, payload FROM library WHERE id=1",
             [],
         )
         .map_err(|e| e.to_string())?;
+    transaction.execute("INSERT OR REPLACE INTO archive_snapshots(id,payload) VALUES (2,COALESCE((SELECT payload FROM archive_snapshots WHERE id=1),'[]'))", []).map_err(|e| e.to_string())?;
     transaction
         .execute(
-            "INSERT OR REPLACE INTO library(id, revision, payload) VALUES (1, ?1, ?2)",
-            params![expected_revision + 1, payload],
+            "INSERT OR REPLACE INTO library(id,revision,payload) VALUES (1,?1,?2)",
+            params![next_revision, payload],
+        )
+        .map_err(|e| e.to_string())?;
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO archive_snapshots(id,payload) VALUES (1,?1)",
+            [archives],
         )
         .map_err(|e| e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn library_write(
+    app: tauri::AppHandle,
+    payload: String,
+    archive_payload: Option<String>,
+    expected_revision: i64,
+) -> Result<(), String> {
+    write_library(
+        &mut database(&app)?,
+        payload,
+        archive_payload,
+        expected_revision,
+    )
 }
 
 #[tauri::command]
@@ -70,8 +178,8 @@ pub(crate) fn export_document(
     name: String,
     content: String,
 ) -> Result<String, String> {
-    if content.len() > 64 * 1024 * 1024 {
-        return Err("导出文件过大".into());
+    if content.len() > MAX_BACKUP_BYTES {
+        return Err("导出文件超过 512 MiB".into());
     }
     let extension = if name.ends_with(".json") {
         "json"
@@ -99,4 +207,116 @@ pub(crate) fn export_document(
         .and_then(|_| file.sync_all())
         .map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn memory_database() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        initialize_database(&connection).unwrap();
+        connection
+    }
+
+    fn payload(revision: i64, projects: serde_json::Value) -> String {
+        json!({"version":1,"revision":revision,"projects":projects}).to_string()
+    }
+
+    #[test]
+    fn archive_move_and_previous_snapshot_are_atomic() {
+        let mut db = memory_database();
+        let first = payload(1, json!([{"id":"a"}]));
+        write_library(&mut db, first.clone(), Some("[]".into()), 0).unwrap();
+        write_library(
+            &mut db,
+            payload(2, json!([])),
+            Some("[{\"id\":\"a\"}]".into()),
+            1,
+        )
+        .unwrap();
+        assert_eq!(read_library(&db, true).unwrap(), Some(first));
+        assert_eq!(read_archives(&db, true).unwrap().unwrap(), "[]");
+        assert_eq!(
+            read_archives(&db, false).unwrap().unwrap(),
+            "[{\"id\":\"a\"}]"
+        );
+        assert_eq!(current_revision(&db).unwrap(), 2);
+    }
+
+    #[test]
+    fn stale_save_changes_neither_current_nor_previous_archive() {
+        let mut db = memory_database();
+        let initial = payload(1, json!([]));
+        write_library(&mut db, initial.clone(), Some("[]".into()), 0).unwrap();
+        assert!(write_library(&mut db, payload(1, json!([])), Some("[123]".into()), 0).is_err());
+        assert_eq!(read_library(&db, false).unwrap(), Some(initial));
+        assert_eq!(read_library(&db, true).unwrap(), None);
+        assert_eq!(read_archives(&db, false).unwrap().unwrap(), "[]");
+    }
+
+    #[test]
+    fn invalid_archive_rolls_back_the_whole_transaction() {
+        let mut db = memory_database();
+        write_library(&mut db, payload(1, json!([])), Some("[]".into()), 0).unwrap();
+        assert!(write_library(&mut db, payload(2, json!([])), Some("{}".into()), 1).is_err());
+        assert_eq!(current_revision(&db).unwrap(), 1);
+        assert_eq!(read_library(&db, true).unwrap(), None);
+    }
+
+    #[test]
+    fn restore_can_itself_be_undone_and_keeps_monotonic_revisions() {
+        let mut db = memory_database();
+        write_library(
+            &mut db,
+            payload(1, json!([{"id":"a"}])),
+            Some("[]".into()),
+            0,
+        )
+        .unwrap();
+        let archived = payload(2, json!([]));
+        write_library(
+            &mut db,
+            archived.clone(),
+            Some("[{\"id\":\"a\"}]".into()),
+            1,
+        )
+        .unwrap();
+        let mut restored: serde_json::Value =
+            serde_json::from_str(&read_library(&db, true).unwrap().unwrap()).unwrap();
+        restored["revision"] = json!(3);
+        let previous_archives = read_archives(&db, true).unwrap();
+        write_library(&mut db, restored.to_string(), previous_archives, 2).unwrap();
+        assert_eq!(read_library(&db, true).unwrap(), Some(archived));
+        assert_eq!(
+            read_archives(&db, true).unwrap().unwrap(),
+            "[{\"id\":\"a\"}]"
+        );
+        assert_eq!(read_archives(&db, false).unwrap().unwrap(), "[]");
+        assert_eq!(current_revision(&db).unwrap(), 3);
+    }
+
+    #[test]
+    fn budgets_reserve_room_for_a_recoverable_backup() {
+        assert!(validate_sizes(MAX_LIBRARY_BYTES, 2).is_ok());
+        assert!(validate_sizes(2, MAX_ARCHIVE_BYTES).is_ok());
+        assert!(validate_sizes(MAX_LIBRARY_BYTES + 1, 2).is_err());
+        assert!(validate_sizes(2, MAX_ARCHIVE_BYTES + 1).is_err());
+        assert!(validate_sizes(MAX_LIBRARY_BYTES, MAX_ARCHIVE_BYTES).is_err());
+        assert!(validate_sizes(
+            MAX_LIBRARY_BYTES - BACKUP_ENVELOPE_RESERVE,
+            MAX_ARCHIVE_BYTES
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn unsupported_or_overflowing_revisions_are_rejected() {
+        let mut db = memory_database();
+        assert!(write_library(&mut db, payload(3, json!([])), None, 0).is_err());
+        assert!(write_library(&mut db, payload(1, json!([])), None, i64::MAX).is_err());
+        assert!(write_library(&mut db, payload(0, json!([])), None, -1).is_err());
+        assert_eq!(current_revision(&db).unwrap(), 0);
+    }
 }

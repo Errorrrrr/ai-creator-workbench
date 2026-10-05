@@ -1,5 +1,23 @@
 import { cosineSimilarity, searchKnowledgeIndex } from './knowledge-index.js'
 
+/** Retain only current, unchanged chunks. Removed sources leave no cached source text. */
+export function pruneSemanticIndex(index, semantic) {
+  if (!semantic || typeof semantic.model !== 'string' || !semantic.model.trim()) return null
+  const vectors = {}
+  for (const chunk of index?.chunks || []) {
+    const item = semantic.vectors?.[chunk.id]
+    if (item?.content === chunk.content && Array.isArray(item.vector) && item.vector.length > 0
+      && item.vector.length <= 8192 && item.vector.every(Number.isFinite)) vectors[chunk.id] = item
+  }
+  return { model: semantic.model, vectors, updatedAt: semantic.updatedAt || null }
+}
+
+export function semanticIndexCoverage(index, semantic) {
+  const total = index?.chunks?.length || 0
+  const indexed = Object.keys(pruneSemanticIndex(index, semantic)?.vectors || {}).length
+  return { indexed, total, pending: total - indexed }
+}
+
 async function embeddings(model, texts) {
   const baseUrl = 'http://127.0.0.1:11434'
   const invoke = window.__TAURI__?.core?.invoke
@@ -20,7 +38,7 @@ async function embeddings(model, texts) {
 
 export async function buildSemanticIndex(index, model, previous, onProgress = () => {}) {
   if (!model.trim()) throw new Error('请填写已安装的 Ollama Embedding 模型名称')
-  const cache = previous?.model === model ? previous.vectors || {} : {}
+  const cache = previous?.model === model ? pruneSemanticIndex(index, previous)?.vectors || {} : {}
   const vectors = {}
   const missing = []
   for (const chunk of index.chunks) {

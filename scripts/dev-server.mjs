@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { execFile, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -6,13 +6,14 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { ANTIGRAVITY_ARGS, antigravityInput, parseAntigravityOutput } from './antigravity-protocol.mjs'
+import { checkForUpdates } from '../src/updates.js'
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(scriptDirectory, '..')
+const appVersion = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')).version
 const port = Number.parseInt(process.env.PORT || '4173', 10)
 const execFileAsync = promisify(execFile)
 const cliRuntimeRoot = join(tmpdir(), 'ai-creator-workbench-runtime')
-mkdirSync(cliRuntimeRoot, { recursive: true, mode: 0o700 })
 let cliTaskRunning = false
 const CLAUDE_LOGIN_ARGS = ['--print', '--output-format', 'text', '--permission-mode', 'dontAsk', '--tools', '', '--no-session-persistence', '--disable-slash-commands', '--no-chrome', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--settings', '{"disableAllHooks":true}']
 
@@ -52,11 +53,13 @@ function sendJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload))
 }
 
-async function findExecutable(command) {
+async function findExecutable(command, signal) {
+  signal?.throwIfAborted()
   const locator = process.platform === 'win32' ? 'where.exe' : '/usr/bin/which'
   try {
     const { stdout } = await execFileAsync(locator, [command], {
       timeout: 2500,
+      signal,
       maxBuffer: 32 * 1024,
       windowsHide: true
     })
@@ -148,48 +151,86 @@ async function inspectCli(driver) {
   }
 }
 
-function readJsonBody(request, maxBytes = 96 * 1024) {
+export function readJsonBody(request, maxBytes = 128 * 1024, signal) {
   return new Promise((resolveBody, rejectBody) => {
     const chunks = []
     let size = 0
-    let exceeded = false
-    request.on('data', (chunk) => {
+    let settled = false
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      request.off('data', onData)
+      request.off('end', onEnd)
+      request.off('aborted', onAbort)
+      signal?.removeEventListener('abort', onAbort)
+      if (error) { request.resume?.(); rejectBody(error) } else resolveBody(value)
+    }
+    const onError = error => finish(error)
+    const onAbort = () => finish(cancelledError())
+    const onData = chunk => {
       size += chunk.length
-      if (size > maxBytes) {
-        exceeded = true
-        return
-      }
+      if (size > maxBytes) { finish(Object.assign(new Error('请求内容过大'), { statusCode: 413 })); return }
       chunks.push(chunk)
-    })
-    request.on('end', () => {
-      if (exceeded) {
-        const error = new Error('请求内容过大')
-        error.statusCode = 413
-        rejectBody(error)
-        return
-      }
-      try {
-        resolveBody(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'))
-      } catch {
-        const error = new Error('请求 JSON 格式无效')
-        error.statusCode = 400
-        rejectBody(error)
-      }
-    })
-    request.on('error', rejectBody)
+    }
+    const onEnd = () => {
+      try { finish(null, JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')) }
+      catch { finish(Object.assign(new Error('请求 JSON 格式无效'), { statusCode: 400 })) }
+    }
+    const timer = setTimeout(() => finish(Object.assign(new Error('接收请求超时'), { statusCode: 408 })), 10000)
+    request.on('data', onData)
+    request.once('end', onEnd)
+    request.once('error', onError)
+    // An aborted IncomingMessage can emit ECONNRESET after its aborted event.
+    request.once('close', () => request.off('error', onError))
+    request.once('aborted', onAbort)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted || request.aborted) onAbort()
   })
 }
 
-function createCliPrompt(messages) {
-  const safeMessages = Array.isArray(messages) ? messages.slice(0, 12) : []
-  const content = safeMessages.map((message) => {
-    const role = message?.role === 'system' ? '系统约束' : '用户内容'
-    const value = typeof message?.content === 'string' ? message.content.slice(0, 24000) : ''
-    return value ? `## ${role}\n${value}` : ''
+export function createCliPrompt(messages) {
+  if (!Array.isArray(messages) || !messages.length || messages.length > 12) {
+    throw Object.assign(new Error('生成上下文数量无效'), { statusCode: 400 })
+  }
+  let totalBytes = 0
+  const content = messages.map((message) => {
+    if (!['system', 'user', 'assistant'].includes(message?.role) || typeof message?.content !== 'string') {
+      throw Object.assign(new Error('生成上下文格式无效'), { statusCode: 400 })
+    }
+    const role = message.role === 'system' ? '系统约束' : message.role === 'assistant' ? '助手内容' : '用户内容'
+    const value = message.content
+    totalBytes += Buffer.byteLength(value, 'utf8')
+    return value.trim() ? `## ${role}\n${value}` : ''
   }).filter(Boolean).join('\n\n')
   if (!content) throw Object.assign(new Error('缺少可执行的创作请求'), { statusCode: 400 })
-  if (content.length > 60000) throw Object.assign(new Error('发送给 CLI 的上下文过长'), { statusCode: 413 })
+  if (totalBytes > 96 * 1024) throw Object.assign(new Error('发送给 CLI 的上下文超过 96 KiB，请缩短正文或减少知识引用后重试；本次未调用 CLI'), { statusCode: 413 })
   return `你正在执行一次纯文本创作任务。不要调用工具、不要读取本机文件、不要修改环境；只输出可供用户审阅的中文候选内容。\n\n${content}`
+}
+
+function cancelledError() {
+  return Object.assign(new Error('CLI 生成已取消'), { statusCode: 499 })
+}
+
+export function isLoopbackUrl(url) {
+  return url.protocol === 'http:' && (['localhost', '[::1]'].includes(url.hostname) || /^127(?:\.\d{1,3}){3}$/.test(url.hostname))
+    && !url.username && !url.password && !url.href.includes('?') && !url.href.includes('#')
+}
+
+export function isAllowedHost(host, expectedPort = port) {
+  if (typeof host !== 'string' || !/^(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?$/i.test(host)) return false
+  try {
+    const url = new URL(`http://${host}`)
+    return isLoopbackUrl(url) && Number(url.port || 80) === expectedPort
+  } catch { return false }
+}
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true
+  try {
+    const url = new URL(origin)
+    return isLoopbackUrl(url) && url.pathname === '/' && isAllowedHost(url.host)
+  } catch { return false }
 }
 
 function buildCliEnvironment(driverId, isolatedHome) {
@@ -221,8 +262,9 @@ function sanitizeCliError(diagnostics) {
   return 'CLI 运行失败，请在终端检查登录和版本'
 }
 
-function runCliProcess(executablePath, args, input, { driverId, cwd, signal, timeoutMs = 120000, maxOutputBytes = 1024 * 1024 } = {}) {
+export function runCliProcess(executablePath, args, input, { driverId, cwd, signal, timeoutMs = 120000, maxOutputBytes = 1024 * 1024 } = {}) {
   return new Promise((resolveProcess, rejectProcess) => {
+    if (signal?.aborted) { rejectProcess(cancelledError()); return }
     const child = spawn(executablePath, args, {
       cwd,
       env: { ...buildCliEnvironment(driverId, cwd), NO_COLOR: '1', TERM: 'dumb' },
@@ -255,6 +297,7 @@ function runCliProcess(executablePath, args, input, { driverId, cwd, signal, tim
     }, timeoutMs)
     const onAbort = () => stop()
     signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
 
     const capture = (target) => (chunk) => {
       outputBytes += chunk.length
@@ -302,17 +345,10 @@ function runCliProcess(executablePath, args, input, { driverId, cwd, signal, tim
   })
 }
 
-async function handleCliGenerateRequest(request, response) {
-  const origin = request.headers.origin
-  let originAllowed = !origin
-  if (origin) {
-    try {
-      const originUrl = new URL(origin)
-      originAllowed = ['127.0.0.1', 'localhost'].includes(originUrl.hostname) && Number(originUrl.port) === port
-    } catch {
-      originAllowed = false
-    }
-  }
+export async function handleCliGenerateRequest(request, response, dependencies = {}) {
+  const lookupExecutable = dependencies.findExecutable || findExecutable
+  const executeCli = dependencies.runCliProcess || runCliProcess
+  const originAllowed = isAllowedOrigin(request.headers.origin)
   if (!originAllowed) {
     sendJson(response, 403, { error: '拒绝来自其他页面的 CLI 执行请求' })
     return
@@ -328,32 +364,40 @@ async function handleCliGenerateRequest(request, response) {
 
   cliTaskRunning = true
   let runDirectory = null
+  const controller = new AbortController()
+  const closeHandler = () => { if (!response.writableEnded) controller.abort() }
+  const abortedHandler = () => controller.abort()
+  response.on('close', closeHandler)
+  request.on('aborted', abortedHandler)
+  const assertConnected = () => {
+    if (response.destroyed || request.aborted || controller.signal.aborted) throw cancelledError()
+  }
   try {
-    const payload = await readJsonBody(request)
+    assertConnected()
+    const payload = await readJsonBody(request, 128 * 1024, controller.signal)
+    assertConnected()
     if (['antigravity', 'codex', 'claude'].includes(payload.driverId) && payload.allowUserProfile !== true) throw Object.assign(new Error('请先确认本次 CLI 调用的登录态与上下文使用'), { statusCode: 403 })
     const driver = cliDrivers.find((item) => item.id === payload.driverId && item.generateArgs)
     if (!driver) throw Object.assign(new Error('该 CLI 未在受控驱动列表中'), { statusCode: 400 })
     if (getCliExecutionStatus(driver) !== 'available') {
       throw Object.assign(new Error('CLI 安全模式需要通过环境变量显式提供模型凭据'), { statusCode: 401 })
     }
-    const executablePath = await findExecutable(driver.command)
-    if (!executablePath) throw Object.assign(new Error(`${driver.name} 未安装或不在 PATH 中`), { statusCode: 404 })
     const prompt = createCliPrompt(payload.messages)
+    const executablePath = await lookupExecutable(driver.command, controller.signal)
+    assertConnected()
+    if (!executablePath) throw Object.assign(new Error(`${driver.name} 未安装或不在 PATH 中`), { statusCode: 404 })
+    mkdirSync(cliRuntimeRoot, { recursive: true, mode: 0o700 })
     runDirectory = mkdtempSync(join(cliRuntimeRoot, 'run-'))
     const claudeLogin = driver.id === 'claude' && !process.env.ANTHROPIC_API_KEY
     const answerPath = join(runDirectory, 'answer.txt')
     const args = driver.id === 'codex' ? [...driver.generateArgs, '--output-last-message', answerPath] : claudeLogin ? CLAUDE_LOGIN_ARGS : driver.generateArgs
-    const controller = new AbortController()
-    const closeHandler = () => {
-      if (!response.writableEnded) controller.abort()
-    }
-    response.on('close', closeHandler)
-    let output = await runCliProcess(executablePath, args, driver.id === 'antigravity' ? antigravityInput(prompt) : prompt, {
+    assertConnected()
+    let output = await executeCli(executablePath, args, driver.id === 'antigravity' ? antigravityInput(prompt) : prompt, {
       cwd: runDirectory,
       driverId: claudeLogin ? 'claude-login' : driver.id,
       signal: controller.signal
     })
-    response.off('close', closeHandler)
+    assertConnected()
     if (driver.id === 'codex') {
       if (!existsSync(answerPath) || statSync(answerPath).size > 1024 * 1024) throw new Error('Codex 未返回有效的最终答复')
       output = readFileSync(answerPath, 'utf8').trim()
@@ -367,12 +411,29 @@ async function handleCliGenerateRequest(request, response) {
       })
     }
   } finally {
+    response.off('close', closeHandler)
+    request.off('aborted', abortedHandler)
     cliTaskRunning = false
     if (runDirectory) rmSync(runDirectory, { recursive: true, force: true })
   }
 }
 
 async function handleRuntimeRequest(requestUrl, response) {
+  if (requestUrl.pathname === '/api/app/version') {
+    sendJson(response, 200, { version: appVersion })
+    return true
+  }
+
+  if (requestUrl.pathname === '/api/app/updates') {
+    try {
+      const result = await checkForUpdates({ currentVersion: appVersion, platform: process.platform, architecture: process.arch })
+      sendJson(response, 200, result)
+    } catch (error) {
+      sendJson(response, Number(error?.statusCode) || 502, { error: error instanceof Error ? error.message : '检查更新失败，请稍后重试' })
+    }
+    return true
+  }
+
   if (requestUrl.pathname === '/api/runtime') {
     const drivers = await Promise.all(cliDrivers.map(inspectCli))
     sendJson(response, 200, {
@@ -388,18 +449,21 @@ async function handleRuntimeRequest(requestUrl, response) {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 2500)
     try {
-      const ollamaResponse = await fetch('http://127.0.0.1:11434/api/tags', { signal: controller.signal })
+      let baseUrl
+      try { baseUrl = new URL(requestUrl.searchParams.get('baseUrl') || 'http://127.0.0.1:11434') }
+      catch { throw Object.assign(new Error('Ollama 地址格式无效'), { code: 'INVALID_URL' }) }
+      if (!isLoopbackUrl(baseUrl)) throw Object.assign(new Error('Ollama 只允许本机 HTTP 地址'), { code: 'INVALID_URL' })
+      const ollamaResponse = await fetch(`${baseUrl.href.replace(/\/$/, '')}/api/tags`, { signal: controller.signal, redirect: 'error' })
       if (!ollamaResponse.ok) throw new Error(`HTTP ${ollamaResponse.status}`)
-      const payload = await ollamaResponse.json()
+      const payload = await readProviderJson(ollamaResponse)
+      if (!Array.isArray(payload.models) || payload.models.some(model => typeof model?.name !== 'string' || !model.name.trim())) throw Object.assign(new Error('Ollama 模型目录格式无效'), { code: 'INVALID_RESPONSE' })
       sendJson(response, 200, {
-        status: 'ready',
-        models: Array.isArray(payload.models)
-          ? payload.models.map((model) => ({ name: String(model.name || ''), size: Number(model.size || 0) }))
-          : []
+        status: payload.models.length ? 'ready' : 'no_models',
+        models: payload.models.map(model => ({ name: model.name, size: Number(model.size || 0) }))
       })
     } catch (error) {
       sendJson(response, 200, {
-        status: error?.name === 'AbortError' ? 'timeout' : 'not_running',
+        status: error?.name === 'AbortError' ? 'timeout' : error?.code === 'INVALID_RESPONSE' ? 'invalid_response' : error?.code === 'INVALID_URL' ? 'invalid_url' : 'not_running',
         models: []
       })
     } finally {
@@ -411,10 +475,31 @@ async function handleRuntimeRequest(requestUrl, response) {
   return false
 }
 
-async function handleRequest(request, response) {
+async function readProviderJson(response) {
+  const chunks = []
+  let size = 0
+  try {
+    for await (const chunk of response.body) {
+      size += chunk.length
+      if (size > 2 * 1024 * 1024) throw new Error('模型目录响应过大')
+      chunks.push(chunk)
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error
+    throw Object.assign(new Error('模型目录响应格式无效'), { code: 'INVALID_RESPONSE' })
+  }
+}
+
+export async function handleRequest(request, response) {
+  if (!isAllowedHost(request.headers.host)) {
+    sendJson(response, 403, { error: '拒绝无效的本地 Host' })
+    return
+  }
   let requestUrl
   try {
-    requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
+    if (!request.url?.startsWith('/') || request.url.startsWith('//')) throw new Error('Invalid request target')
+    requestUrl = new URL(request.url, `http://${request.headers.host}`)
   } catch {
     response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' })
     response.end('Bad request')
@@ -443,6 +528,11 @@ async function handleRequest(request, response) {
     response.end('Bad request')
     return
   }
+  if (!isAllowedStaticPath(requestedPath)) {
+    response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
+    response.end('Forbidden')
+    return
+  }
   const relativePath = normalize(requestedPath).replace(/^[/\\]+/, '')
   const filePath = resolve(join(projectRoot, relativePath))
 
@@ -458,24 +548,42 @@ async function handleRequest(request, response) {
     return
   }
 
+  if (!realpathSync(filePath).startsWith(`${realpathSync(projectRoot)}${sep}`)) {
+    response.writeHead(403)
+    response.end('Forbidden')
+    return
+  }
   response.writeHead(200, {
+    'X-Content-Type-Options': 'nosniff',
     'Cache-Control': 'no-store',
     'Content-Type': contentTypes[extname(filePath)] || 'application/octet-stream'
   })
   createReadStream(filePath).pipe(response)
 }
 
-const server = createServer((request, response) => {
-  handleRequest(request, response).catch(() => {
-    if (!response.headersSent) {
-      response.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' })
-      response.end('Internal server error')
-    } else if (!response.writableEnded) {
-      response.destroy()
-    }
-  })
-})
+export function isAllowedStaticPath(path) {
+  return path === '/index.html' || path === '/src/styles.css' || /^\/src\/[a-zA-Z0-9_-]+\.js$/.test(path) || path === '/assets/app-icon.svg'
+}
 
-server.listen(port, '127.0.0.1', () => {
-  console.log(`AI Creator Workbench is running at http://127.0.0.1:${port}`)
-})
+export function createDevServer() {
+  const server = createServer((request, response) => {
+    handleRequest(request, response).catch(() => {
+      if (!response.headersSent) {
+        response.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' })
+        response.end('Internal server error')
+      } else if (!response.writableEnded) {
+        response.destroy()
+      }
+    })
+  })
+  server.requestTimeout = 15000
+  server.headersTimeout = 10000
+  return server
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const server = createDevServer()
+  server.listen(port, '127.0.0.1', () => {
+    console.log(`AI Creator Workbench is running at http://127.0.0.1:${port}`)
+  })
+}

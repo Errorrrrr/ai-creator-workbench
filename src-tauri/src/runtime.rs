@@ -12,7 +12,7 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::State;
+use tauri::{Emitter, State, WebviewWindow};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
@@ -22,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const PROVIDER_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
+const PROVIDER_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+const PROVIDER_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const CLI_DETECTION_TIMEOUT: Duration = Duration::from_secs(3);
 const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_VERSION_OUTPUT_BYTES: usize = 64 * 1024;
@@ -561,6 +564,7 @@ async fn inspect_cli(driver: &CliDriverDefinition) -> CliDriverStatus {
 
 fn http_client(timeout_duration: Duration) -> Result<Client, String> {
     Client::builder()
+        .connect_timeout(Duration::from_secs(10))
         .timeout(timeout_duration)
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -568,7 +572,13 @@ fn http_client(timeout_duration: Duration) -> Result<Client, String> {
 }
 
 fn is_loopback_host(url: &Url) -> bool {
-    matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+    url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
 }
 
 fn validate_base_url(kind: &str, value: &str) -> Result<Url, String> {
@@ -634,14 +644,25 @@ fn provider_status_error(status: StatusCode) -> String {
     }
 }
 
-async fn detect_ollama() -> OllamaStatus {
+async fn detect_ollama(base_url: &str) -> OllamaStatus {
     let Ok(client) = http_client(Duration::from_millis(2500)) else {
         return OllamaStatus {
             status: "not_running".into(),
             models: Vec::new(),
         };
     };
-    let response = client.get("http://127.0.0.1:11434/api/tags").send().await;
+    let url = match validate_base_url("ollama", base_url)
+        .and_then(|url| endpoint_url(&url, "api/tags"))
+    {
+        Ok(url) => url,
+        Err(_) => {
+            return OllamaStatus {
+                status: "invalid_url".into(),
+                models: Vec::new(),
+            }
+        }
+    };
+    let response = client.get(url).send().await;
     let Ok(response) = response else {
         return OllamaStatus {
             status: "not_running".into(),
@@ -657,7 +678,13 @@ async fn detect_ollama() -> OllamaStatus {
     let payload = response_json(response, &CancellationToken::new())
         .await
         .unwrap_or(Value::Null);
-    let models = payload
+    if model_names(&payload, "ollama").is_err() {
+        return OllamaStatus {
+            status: "invalid_response".into(),
+            models: Vec::new(),
+        };
+    }
+    let models: Vec<OllamaModel> = payload
         .get("models")
         .and_then(Value::as_array)
         .map(|items| {
@@ -674,13 +701,20 @@ async fn detect_ollama() -> OllamaStatus {
         })
         .unwrap_or_default();
     OllamaStatus {
-        status: "ready".into(),
+        status: if models.is_empty() {
+            "no_models"
+        } else {
+            "ready"
+        }
+        .into(),
         models,
     }
 }
 
 #[tauri::command]
-pub(crate) async fn runtime_snapshot() -> Result<RuntimeSnapshot, String> {
+pub(crate) async fn runtime_snapshot(
+    ollama_base_url: Option<String>,
+) -> Result<RuntimeSnapshot, String> {
     let definitions = cli_drivers();
     let drivers = futures_util::future::join_all(definitions.iter().map(inspect_cli)).await;
     let checked_at = SystemTime::now()
@@ -697,7 +731,12 @@ pub(crate) async fn runtime_snapshot() -> Result<RuntimeSnapshot, String> {
         },
         drivers,
         checked_at,
-        ollama: detect_ollama().await,
+        ollama: detect_ollama(
+            ollama_base_url
+                .as_deref()
+                .unwrap_or("http://127.0.0.1:11434"),
+        )
+        .await,
     })
 }
 
@@ -709,19 +748,16 @@ pub(crate) async fn connection_test(
     let base_url = validate_base_url(&input.kind, &input.base_url)?;
     let client = http_client(TEST_TIMEOUT)?;
     let token = CancellationToken::new();
-    let (request, endpoint) = if input.kind == "openai-compatible" {
+    let request = if input.kind == "openai-compatible" {
         let api_key = input
             .api_key
             .filter(|key| !key.is_empty())
             .ok_or("请输入 API Key")?;
-        (
-            client
-                .get(endpoint_url(&base_url, "models")?)
-                .bearer_auth(api_key),
-            "models",
-        )
+        client
+            .get(endpoint_url(&base_url, "models")?)
+            .bearer_auth(api_key)
     } else if input.kind == "ollama" {
-        (client.get(endpoint_url(&base_url, "api/tags")?), "models")
+        client.get(endpoint_url(&base_url, "api/tags")?)
     } else {
         return Err("不支持的连接类型".into());
     };
@@ -736,37 +772,45 @@ pub(crate) async fn connection_test(
         return Err(provider_status_error(response.status()));
     }
     let payload = response_json(response, &token).await?;
-    let models = if input.kind == "openai-compatible" {
-        payload
-            .get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
-            .collect::<Vec<_>>()
-    } else {
-        payload
-            .get(endpoint)
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item.get("name").and_then(Value::as_str).map(str::to_owned))
-            .collect::<Vec<_>>()
-    };
-    if !input.model.is_empty()
-        && !models.is_empty()
-        && !models.iter().any(|model| model == &input.model)
-    {
-        return Err(format!("模型 {} 不在可用列表中", input.model));
+    let models = model_names(&payload, &input.kind)?;
+    if models.is_empty() {
+        return Err(if input.kind == "ollama" {
+            "Ollama 已运行，但还没有安装模型"
+        } else {
+            "模型目录为空，无法验证可用模型"
+        }
+        .into());
     }
-    if input.kind == "ollama" && models.is_empty() {
-        return Err("Ollama 已运行，但还没有安装模型".into());
+    if !input.model.is_empty() && !models.iter().any(|model| model == &input.model) {
+        return Err(format!("模型 {} 不在可用列表中", input.model));
     }
     Ok(ConnectionTestResult {
         status: "ready".into(),
         models,
         latency_ms: started_at.elapsed().as_millis().max(1),
     })
+}
+
+fn model_names(payload: &Value, kind: &str) -> Result<Vec<String>, String> {
+    let (list_key, name_key) = if kind == "ollama" {
+        ("models", "name")
+    } else {
+        ("data", "id")
+    };
+    let items = payload
+        .get(list_key)
+        .and_then(Value::as_array)
+        .ok_or("模型目录响应格式无效")?;
+    items
+        .iter()
+        .map(|item| {
+            item.get(name_key)
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| "模型目录含有无效模型".to_owned())
+        })
+        .collect()
 }
 
 fn validate_messages(messages: &[MessageInput]) -> Result<(), String> {
@@ -792,61 +836,165 @@ async fn send_generation_request(
     token: &CancellationToken,
 ) -> Result<Response, String> {
     tokio::select! {
+        biased;
         _ = token.cancelled() => Err("生成已取消".into()),
-        response = request.send() => response.map_err(|error| {
-            if error.is_timeout() { "生成超时".into() } else { "无法连接执行端".into() }
-        })
+        response = timeout(PROVIDER_FIRST_RESPONSE_TIMEOUT, request.send()) => match response {
+            Err(_) => Err("等待模型响应超过 120 秒，请检查服务或换用较小模型".into()),
+            Ok(response) => response.map_err(|error| {
+                if error.is_timeout() { "连接模型超时".into() } else { "无法连接执行端".into() }
+            }),
+        }
     }
 }
 
-async fn generate_provider(
-    request: &GenerationRequest,
-    token: &CancellationToken,
-) -> Result<String, String> {
-    let base_url = validate_base_url(&request.kind, &request.base_url)?;
-    if request.model.trim().is_empty() {
-        return Err("请先选择模型".into());
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerationDelta {
+    task_id: String,
+    delta: String,
+}
+
+#[derive(Clone, Copy)]
+enum StreamFormat {
+    Sse,
+    JsonLines,
+}
+
+/// Keep undecoded bytes until a complete line arrives: network chunks may split UTF-8.
+struct ProviderStream {
+    format: StreamFormat,
+    buffer: Vec<u8>,
+    event_data: Vec<String>,
+    received_bytes: usize,
+    output: String,
+    done: bool,
+}
+
+impl ProviderStream {
+    fn new(format: StreamFormat) -> Self {
+        Self {
+            format,
+            buffer: Vec::new(),
+            event_data: Vec::new(),
+            received_bytes: 0,
+            output: String::new(),
+            done: false,
+        }
     }
-    let client = http_client(GENERATION_TIMEOUT)?;
-    let response = if request.kind == "openai-compatible" {
-        let api_key = request
-            .api_key
-            .as_ref()
-            .filter(|key| !key.is_empty())
-            .ok_or("API Key 只保留在当前会话，请重新输入")?;
-        send_generation_request(
-            client
-                .post(endpoint_url(&base_url, "chat/completions")?)
-                .bearer_auth(api_key)
-                .json(&json!({
-                    "model": request.model,
-                    "messages": request.messages,
-                    "stream": false,
-                    "temperature": 0.7
-                })),
-            token,
-        )
-        .await?
-    } else if request.kind == "ollama" {
-        send_generation_request(
-            client
-                .post(endpoint_url(&base_url, "api/chat")?)
-                .json(&json!({
-                    "model": request.model,
-                    "messages": request.messages,
-                    "stream": false
-                })),
-            token,
-        )
-        .await?
-    } else {
-        return Err("不支持的连接类型".into());
-    };
-    if !response.status().is_success() {
-        return Err(provider_status_error(response.status()));
+
+    fn feed(&mut self, bytes: &[u8]) -> Result<Vec<String>, String> {
+        self.received_bytes = self.received_bytes.saturating_add(bytes.len());
+        if self.received_bytes > MAX_PROVIDER_RESPONSE_BYTES {
+            return Err("执行端响应超过 2 MiB 限制".into());
+        }
+        self.buffer.extend_from_slice(bytes);
+        let mut deltas = Vec::new();
+        while let Some(index) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let line = self.buffer.drain(..=index).collect::<Vec<_>>();
+            let line = std::str::from_utf8(&line).map_err(|_| "执行端流包含无效文字编码")?;
+            self.line(line.trim_end_matches(['\r', '\n']), &mut deltas)?;
+        }
+        Ok(deltas)
     }
-    let payload = response_json(response, token).await?;
-    let output = if request.kind == "openai-compatible" {
+
+    fn line(&mut self, line: &str, deltas: &mut Vec<String>) -> Result<(), String> {
+        if self.done {
+            return Ok(());
+        }
+        match self.format {
+            StreamFormat::Sse => {
+                if line.is_empty() {
+                    if !self.event_data.is_empty() {
+                        let data = self.event_data.join("\n");
+                        self.event_data.clear();
+                        self.event(&data, deltas)?;
+                    }
+                } else if let Some(data) = line.strip_prefix("data:") {
+                    self.event_data
+                        .push(data.strip_prefix(' ').unwrap_or(data).to_owned());
+                }
+            }
+            StreamFormat::JsonLines => {
+                if !line.trim().is_empty() {
+                    self.event(line, deltas)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn event(&mut self, data: &str, deltas: &mut Vec<String>) -> Result<(), String> {
+        if data.trim() == "[DONE]" {
+            self.done = true;
+            return Ok(());
+        }
+        let payload: Value =
+            serde_json::from_str(data).map_err(|_| "执行端返回了无法解析的流数据")?;
+        if payload.get("error").is_some_and(|error| !error.is_null()) {
+            return Err("模型在生成过程中返回错误，请检查服务日志后重试".into());
+        }
+        let delta = match self.format {
+            StreamFormat::Sse => {
+                if payload
+                    .pointer("/choices/0/finish_reason")
+                    .is_some_and(|value| !value.is_null())
+                {
+                    self.done = true;
+                }
+                payload
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+            }
+            StreamFormat::JsonLines => {
+                if payload.get("done").and_then(Value::as_bool) == Some(true) {
+                    self.done = true;
+                }
+                payload
+                    .pointer("/message/content")
+                    .and_then(Value::as_str)
+                    .or_else(|| payload.get("response").and_then(Value::as_str))
+            }
+        };
+        if let Some(delta) = delta.filter(|delta| !delta.is_empty()) {
+            self.output.push_str(delta);
+            deltas.push(delta.to_owned());
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<Vec<String>, String> {
+        let mut deltas = Vec::new();
+        if self.done {
+            // finish_reason may precede a split [DONE] or usage-only trailer.
+            self.buffer.clear();
+            self.event_data.clear();
+        }
+        if !self.buffer.is_empty() {
+            let remaining = std::mem::take(&mut self.buffer);
+            let line = std::str::from_utf8(&remaining).map_err(|_| "执行端流包含无效文字编码")?;
+            self.line(line.trim_end_matches('\r'), &mut deltas)?;
+        }
+        if !self.event_data.is_empty() {
+            self.line("", &mut deltas)?;
+        }
+        if !self.done {
+            return Err("模型输出流提前结束，当前片段尚未完成，请重试".into());
+        }
+        if self.output.trim().is_empty() {
+            return Err("执行端返回了空内容".into());
+        }
+        Ok(deltas)
+    }
+}
+
+fn provider_output(payload: &Value, kind: &str) -> Result<String, String> {
+    if payload.get("error").is_some_and(|value| !value.is_null()) {
+        return Err("模型返回错误，请检查服务日志后重试".into());
+    }
+    if kind == "ollama" && payload.get("done").and_then(Value::as_bool) == Some(false) {
+        return Err("模型输出流提前结束，当前片段尚未完成，请重试".into());
+    }
+    let output = if kind == "openai-compatible" {
         payload
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
@@ -856,13 +1004,125 @@ async fn generate_provider(
             .and_then(Value::as_str)
             .or_else(|| payload.get("response").and_then(Value::as_str))
     }
-    .unwrap_or_default()
-    .trim()
-    .to_owned();
-    if output.is_empty() {
+    .unwrap_or_default();
+    if output.trim().is_empty() {
         return Err("执行端返回了空内容".into());
     }
-    Ok(output)
+    Ok(output.to_owned())
+}
+
+async fn read_generation_response(
+    response: Response,
+    kind: &str,
+    token: &CancellationToken,
+    on_delta: &mut impl FnMut(&str) -> Result<(), String>,
+) -> Result<String, String> {
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let format = if content_type.contains("text/event-stream") {
+        Some(StreamFormat::Sse)
+    } else if content_type.contains("ndjson") || content_type.contains("jsonl") {
+        Some(StreamFormat::JsonLines)
+    } else {
+        None
+    };
+    let Some(format) = format else {
+        // Some compatible providers ignore stream=true and return a normal JSON response.
+        let payload = timeout(
+            PROVIDER_FIRST_RESPONSE_TIMEOUT,
+            response_json(response, token),
+        )
+        .await
+        .map_err(|_| "等待模型内容超过 120 秒")??;
+        let output = provider_output(&payload, kind)?;
+        if token.is_cancelled() {
+            return Err("生成已取消".into());
+        }
+        on_delta(&output)?;
+        return Ok(output);
+    };
+    let mut parser = ProviderStream::new(format);
+    let mut stream = response.bytes_stream();
+    let mut received_any = false;
+    loop {
+        let idle_timeout = if received_any {
+            PROVIDER_IDLE_TIMEOUT
+        } else {
+            PROVIDER_FIRST_RESPONSE_TIMEOUT
+        };
+        let chunk = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err("生成已取消".into()),
+            chunk = timeout(idle_timeout, stream.next()) => chunk.map_err(|_| {
+                if received_any { "模型连续 45 秒没有返回数据，已停止本次请求" } else { "等待模型内容超过 120 秒，请检查服务或换用较小模型" }
+            })?,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk.map_err(|error| {
+            if error.is_timeout() {
+                "模型生成超时"
+            } else {
+                "读取执行端响应失败"
+            }
+        })?;
+        received_any = true;
+        for delta in parser.feed(&chunk)? {
+            on_delta(&delta)?;
+        }
+        if parser.done {
+            break;
+        }
+    }
+    for delta in parser.finish()? {
+        on_delta(&delta)?;
+    }
+    if token.is_cancelled() {
+        return Err("生成已取消".into());
+    }
+    Ok(parser.output)
+}
+
+async fn generate_provider(
+    request: &GenerationRequest,
+    token: &CancellationToken,
+    on_delta: &mut impl FnMut(&str) -> Result<(), String>,
+) -> Result<String, String> {
+    let base_url = validate_base_url(&request.kind, &request.base_url)?;
+    if request.model.trim().is_empty() {
+        return Err("请先选择模型".into());
+    }
+    let client = http_client(PROVIDER_TOTAL_TIMEOUT)?;
+    let response = if request.kind == "openai-compatible" {
+        let api_key = request
+            .api_key
+            .as_ref()
+            .filter(|key| !key.is_empty())
+            .ok_or("API Key 只保留在当前会话，请重新输入")?;
+        send_generation_request(client.post(endpoint_url(&base_url, "chat/completions")?)
+            .bearer_auth(api_key).json(&json!({
+                "model": request.model, "messages": request.messages, "stream": true, "temperature": 0.7
+            })), token).await?
+    } else if request.kind == "ollama" {
+        send_generation_request(
+            client.post(endpoint_url(&base_url, "api/chat")?).json(
+                &json!({ "model": request.model, "messages": request.messages, "stream": true }),
+            ),
+            token,
+        )
+        .await?
+    } else {
+        return Err("不支持的连接类型".into());
+    };
+    if !response.status().is_success() {
+        return Err(provider_status_error(response.status()));
+    }
+    read_generation_response(response, &request.kind, token, on_delta).await
 }
 
 fn create_cli_prompt(messages: &[MessageInput]) -> Result<String, String> {
@@ -1096,6 +1356,9 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
         use std::os::unix::process::CommandExt;
         command.as_std_mut().process_group(0);
     }
+    if token.is_cancelled() {
+        return Err("生成已取消".into());
+    }
     let mut child = command.spawn().map_err(|_| "无法启动 CLI")?;
     let process_group_id = child.id();
     let Some(mut stdin) = child.stdin.take() else {
@@ -1209,6 +1472,7 @@ fn parse_antigravity_output(output: &str) -> Result<String, String> {
 
 #[tauri::command]
 pub(crate) async fn generate_text(
+    window: WebviewWindow,
     state: State<'_, RuntimeState>,
     request: GenerationRequest,
 ) -> Result<GenerationResult, String> {
@@ -1219,13 +1483,401 @@ pub(crate) async fn generate_text(
     } else if request.kind == "cli" {
         generate_cli(&state, &request, &token).await
     } else {
-        generate_provider(&request, &token).await
+        let mut on_delta = |delta: &str| {
+            window
+                .emit(
+                    "generation-delta",
+                    GenerationDelta {
+                        task_id: request.task_id.clone(),
+                        delta: delta.to_owned(),
+                    },
+                )
+                .map_err(|_| "创作窗口已关闭，已停止生成".to_owned())
+        };
+        match timeout(
+            PROVIDER_TOTAL_TIMEOUT,
+            generate_provider(&request, &token, &mut on_delta),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err("模型生成超过 10 分钟，已停止本次请求；请减少上下文后重试".into()),
+        }
     };
     state.finish(&request.task_id, &token);
+    if token.is_cancelled() {
+        return Err("生成已取消".into());
+    }
     result.map(|output| GenerationResult { output })
 }
 
 #[tauri::command]
 pub(crate) fn cancel_generation(state: State<'_, RuntimeState>, task_id: String) -> bool {
     state.cancel(&task_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_urls_include_ipv6_and_custom_ports_but_exclude_remote_http() {
+        for value in [
+            "http://127.0.0.1:11435",
+            "http://localhost:54321",
+            "http://[::1]:11434",
+        ] {
+            assert!(validate_base_url("ollama", value).is_ok(), "{value}");
+            assert!(
+                validate_base_url("openai-compatible", value).is_ok(),
+                "{value}"
+            );
+        }
+        for value in [
+            "http://example.com",
+            "http://192.168.1.1",
+            "http://user@localhost",
+            "http://localhost?key=x",
+            "http://localhost#x",
+            "https://example.com",
+        ] {
+            assert!(validate_base_url("ollama", value).is_err(), "{value}");
+        }
+        assert!(validate_base_url("openai-compatible", "https://example.com/v1").is_ok());
+        assert!(validate_base_url("openai-compatible", "http://example.com/v1").is_err());
+        let base = validate_base_url("ollama", "http://[::1]:11435/prefix/").unwrap();
+        assert_eq!(
+            endpoint_url(&base, "api/tags").unwrap().as_str(),
+            "http://[::1]:11435/prefix/api/tags"
+        );
+    }
+
+    #[test]
+    fn model_catalog_validation_rejects_false_positive_success() {
+        for payload in [
+            json!({}),
+            json!({"data": {}}),
+            json!({"data": [{}]}),
+            json!({"data": [{"id": " "}]}),
+        ] {
+            assert!(model_names(&payload, "openai-compatible").is_err());
+        }
+        assert_eq!(
+            model_names(
+                &json!({"data": [{"id": "test-model"}]}),
+                "openai-compatible"
+            )
+            .unwrap(),
+            vec!["test-model"]
+        );
+        assert_eq!(
+            model_names(&json!({"models": []}), "ollama").unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(model_names(&json!({"models": [null]}), "ollama").is_err());
+    }
+
+    #[test]
+    fn prompt_keeps_tail_and_enforces_byte_limit() {
+        let messages = vec![MessageInput {
+            role: "user".into(),
+            content: format!("{}保留这个创作要求", "文".repeat(24000)),
+        }];
+        assert!(create_cli_prompt(&messages)
+            .unwrap()
+            .ends_with("保留这个创作要求"));
+        let messages = vec![MessageInput {
+            role: "user".into(),
+            content: "文".repeat(33000),
+        }];
+        assert!(create_cli_prompt(&messages).is_err());
+    }
+
+    #[test]
+    fn cancellation_before_registration_and_registration_replacement_are_safe() {
+        let state = RuntimeState::default();
+        assert!(state.cancel("before"));
+        let token = state.register("before").unwrap();
+        assert!(token.is_cancelled());
+        state.finish("before", &token);
+        let old = state.register("same").unwrap();
+        let new = state.register("same").unwrap();
+        assert!(old.is_cancelled());
+        assert!(!new.is_cancelled());
+        state.finish("same", &old);
+        state.cancel("same");
+        assert!(new.is_cancelled());
+        state.finish("same", &new);
+        assert!(state.tasks.lock().unwrap().running.is_empty());
+        assert!(!state.cancel(""));
+    }
+
+    #[test]
+    fn sse_survives_every_possible_utf8_chunk_boundary() {
+        let stream = ": heartbeat\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"你好🌿\"}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"世界\"},\"finish_reason\":\"stop\"}]}\r\n\r\ndata: [DONE]\r\n\r\n".as_bytes();
+        for boundary in 0..stream.len() {
+            let mut parser = ProviderStream::new(StreamFormat::Sse);
+            let mut deltas = parser.feed(&stream[..boundary]).unwrap();
+            deltas.extend(parser.feed(&stream[boundary..]).unwrap());
+            deltas.extend(parser.finish().unwrap());
+            assert_eq!(deltas.concat(), "你好🌿世界");
+            assert_eq!(parser.output, "你好🌿世界");
+        }
+    }
+
+    #[test]
+    fn sse_handles_multiline_event_data_and_final_event_without_newline() {
+        let mut parser = ProviderStream::new(StreamFormat::Sse);
+        let mut deltas = parser
+            .feed(
+                b"data: {\"choices\":\ndata: [{\"delta\":{\"content\":\"text\"}}]}\n\ndata: [DONE]",
+            )
+            .unwrap();
+        deltas.extend(parser.finish().unwrap());
+        assert_eq!(deltas.concat(), "text");
+    }
+
+    #[test]
+    fn sse_finished_choice_does_not_require_a_complete_trailing_done_marker() {
+        let mut parser = ProviderStream::new(StreamFormat::Sse);
+        parser.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"finished\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DO").unwrap();
+        parser.finish().unwrap();
+        assert_eq!(parser.output, "finished");
+    }
+
+    #[test]
+    fn ollama_ndjson_handles_partial_lines_and_final_content() {
+        let bytes = "{\"message\":{\"content\":\"第一段\"},\"done\":false}\n{\"message\":{\"content\":\"结尾\"},\"done\":true}".as_bytes();
+        let mut parser = ProviderStream::new(StreamFormat::JsonLines);
+        let mut deltas = Vec::new();
+        for byte in bytes {
+            deltas.extend(parser.feed(&[*byte]).unwrap());
+        }
+        deltas.extend(parser.finish().unwrap());
+        assert_eq!(deltas.concat(), "第一段结尾");
+    }
+
+    #[test]
+    fn incomplete_empty_malformed_or_provider_error_streams_are_not_successes() {
+        let mut incomplete = ProviderStream::new(StreamFormat::Sse);
+        incomplete
+            .feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+            .unwrap();
+        assert!(incomplete.finish().unwrap_err().contains("提前结束"));
+        let mut empty = ProviderStream::new(StreamFormat::Sse);
+        empty.feed(b"data: [DONE]\n\n").unwrap();
+        assert!(empty.finish().unwrap_err().contains("空内容"));
+        for stream in [
+            "data: {\"error\":\"secret must not appear in error\"}\n\n",
+            "data: invalid-json\n\n",
+        ] {
+            let mut parser = ProviderStream::new(StreamFormat::Sse);
+            let error = parser.feed(stream.as_bytes()).unwrap_err();
+            assert!(!error.contains("secret"));
+        }
+        let mut too_large = ProviderStream::new(StreamFormat::JsonLines);
+        assert!(too_large
+            .feed(&vec![b' '; MAX_PROVIDER_RESPONSE_BYTES + 1])
+            .is_err());
+    }
+
+    #[test]
+    fn normal_json_fallback_preserves_content_and_checks_errors() {
+        assert_eq!(
+            provider_output(
+                &json!({"choices": [{"message": {"content": "正文\n"}}]}),
+                "openai-compatible"
+            )
+            .unwrap(),
+            "正文\n"
+        );
+        assert_eq!(
+            provider_output(&json!({"message": {"content": "本机正文"}}), "ollama").unwrap(),
+            "本机正文"
+        );
+        assert!(provider_output(&json!({}), "ollama").is_err());
+        assert!(provider_output(
+            &json!({"message": {"content": "半段"}, "done": false}),
+            "ollama"
+        )
+        .is_err());
+        assert!(provider_output(&json!({"error": "upstream secret"}), "ollama").is_err());
+    }
+
+    #[test]
+    fn antigravity_rejects_ambiguous_or_failed_result() {
+        let success =
+            "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"正文\"}}";
+        assert_eq!(parse_antigravity_output(success).unwrap(), "正文");
+        assert!(parse_antigravity_output(&format!("{success}\n{success}")).is_err());
+        assert!(parse_antigravity_output(
+            "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\"}}"
+        )
+        .is_err());
+        assert!(parse_antigravity_output("invalid-json").is_err());
+    }
+
+    /// A loopback mock verifies the HTTP parser/callback together, without any real model.
+    #[tokio::test]
+    async fn http_stream_emits_delta_before_response_completes() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (delta_sender, delta_receiver) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n").unwrap();
+            socket.flush().unwrap();
+            // The second event is not sent until the client has shown the first delta.
+            delta_receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+            socket.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\" second\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n").unwrap();
+        });
+        let response = http_client(Duration::from_secs(5))
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let token = CancellationToken::new();
+        let mut received = String::new();
+        let mut on_delta = |delta: &str| {
+            received.push_str(delta);
+            if delta == "first" {
+                delta_sender.send(()).unwrap();
+            }
+            Ok(())
+        };
+        let output = read_generation_response(response, "openai-compatible", &token, &mut on_delta)
+            .await
+            .unwrap();
+        assert_eq!(output, "first second");
+        assert_eq!(received, output);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_request_never_opens_a_connection() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let request = http_client(Duration::from_secs(1))
+            .unwrap()
+            .get("http://127.0.0.1:1");
+        assert_eq!(
+            send_generation_request(request, &token).await.unwrap_err(),
+            "生成已取消"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_first_http_delta_does_not_return_success() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (delta_sender, delta_receiver) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            socket.read(&mut [0u8; 4096]).unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{\"message\":{\"content\":\"partial\"},\"done\":false}\n").unwrap();
+            socket.flush().unwrap();
+            delta_receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+        });
+        let response = http_client(Duration::from_secs(5))
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let token = CancellationToken::new();
+        let mut deltas = Vec::new();
+        let mut on_delta = |delta: &str| {
+            deltas.push(delta.to_owned());
+            token.cancel();
+            delta_sender.send(()).unwrap();
+            Ok(())
+        };
+        assert_eq!(
+            read_generation_response(response, "ollama", &token, &mut on_delta)
+                .await
+                .unwrap_err(),
+            "生成已取消"
+        );
+        assert_eq!(deltas, vec!["partial"]);
+        server.join().unwrap();
+    }
+
+    fn json_mock_server(body: Value) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            socket.read(&mut [0u8; 4096]).unwrap();
+            let body = body.to_string();
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            socket.write_all(response.as_bytes()).unwrap();
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn connection_test_requires_valid_nonempty_catalog_and_requested_model() {
+        for (body, model, valid) in [
+            (json!({}), "test", false),
+            (json!({"data": []}), "test", false),
+            (json!({"data": [{"id": "other"}]}), "test", false),
+            (json!({"data": [{"id": "test"}]}), "test", true),
+        ] {
+            let (url, server) = json_mock_server(body);
+            let result = connection_test(ConnectionInput {
+                kind: "openai-compatible".into(),
+                base_url: url,
+                model: model.into(),
+                api_key: Some("mock-only".into()),
+            })
+            .await;
+            assert_eq!(result.is_ok(), valid);
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_accepts_provider_that_ignores_stream_flag_and_returns_json() {
+        let (url, server) =
+            json_mock_server(json!({"choices": [{"message": {"content": "完整正文"}}]}));
+        let request = GenerationRequest {
+            task_id: "mock".into(),
+            kind: "openai-compatible".into(),
+            base_url: url,
+            model: "mock-model".into(),
+            api_key: Some("mock-only".into()),
+            driver_id: None,
+            allow_user_profile: false,
+            messages: vec![MessageInput {
+                role: "user".into(),
+                content: "mock request".into(),
+            }],
+        };
+        let mut deltas = Vec::new();
+        let mut on_delta = |delta: &str| {
+            deltas.push(delta.to_owned());
+            Ok(())
+        };
+        let output = generate_provider(&request, &CancellationToken::new(), &mut on_delta)
+            .await
+            .unwrap();
+        assert_eq!(output, "完整正文");
+        assert_eq!(deltas, vec!["完整正文"]);
+        server.join().unwrap();
+    }
 }

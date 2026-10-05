@@ -1,0 +1,3 @@
+{"test":"disconnect while resolving CLI","launchState":{"clientDisconnected":true,"signalAborted":false}}
+{"test":"browser CLI silent truncation","inputChars":24015,"preservesTail":false}
+{"test":"static root and Host boundary","status":200,"servedPath":"/Users/zxx/dev/ai-creator-workbench/.git/HEAD"}

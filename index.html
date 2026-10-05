@@ -231,7 +231,7 @@
             </button>
           </div>
           <div class="rail-spacer"></div>
-          <button class="rail-button" type="button" data-view-target="connections" aria-label="设置" data-tooltip="设置">
+          <button class="rail-button" type="button" data-action="project-library" aria-label="数据与备份" data-tooltip="数据与备份">
             <svg class="icon"><use href="#icon-settings"></use></svg>
           </button>
           <div class="profile-avatar" aria-label="本地用户">舟</div>
@@ -264,18 +264,18 @@
 
           <div class="explorer-footer">
             <div class="progress-copy">
-              <span>本周创作</span>
+              <span>已写分场</span>
               <strong>0 / 5 场</strong>
             </div>
-            <div class="progress-track" aria-label="本周创作进度 0%"><span style="width: 0%"></span></div>
+            <div class="progress-track" aria-label="已写分场进度 0%"><span style="width: 0%"></span></div>
           </div>
         </aside>
 
         <main class="main-surface" id="workspaceMain" tabindex="-1">
           <section class="view-panel workspace-view" id="workspaceView" data-view="workspace">
             <div id="emptyWorkspace" class="empty-workspace" hidden>
-              <h1>开始你的第一个创作项目</h1>
-              <p>从一个灵感开始，逐步完成你的故事。</p>
+              <span class="eyebrow">从灵感到完整故事</span><h1>让下一个故事，<br />从这里开始。</h1>
+              <p>收集灵感、搭建人物与世界，按自己的节奏完成每一场戏。<br />内容保存在本机，随时继续。</p>
               <button class="primary-button" type="button" data-action="new-project">新建项目</button>
             </div>
             <header class="document-header">
@@ -299,7 +299,8 @@
                   <svg class="icon"><use href="#icon-redo"></use></svg>
                   <span class="sr-only">重做</span>
                 </button>
-                <button class="toolbar-button toolbar-button-text" type="button" data-action="show-history">
+                <button class="toolbar-button toolbar-button-text" type="button" data-action="save-snapshot" title="保存当前内容快照"><svg class="icon"><use href="#icon-file"></use></svg><span>保存快照</span></button>
+                <button class="toolbar-button toolbar-button-text" type="button" data-action="show-history" aria-label="查看历史版本" title="查看历史版本">
                   <svg class="icon"><use href="#icon-history"></use></svg>
                   <span>v—</span>
                 </button>
@@ -374,18 +375,19 @@
           <section class="view-panel inspirations-view" data-view="inspirations" hidden>
             <header class="page-header"><div><span class="eyebrow">捕捉故事的起点</span><h1>灵感库</h1><p>独立记录人物、画面与故事火花，无需先创建项目。</p></div><button class="primary-button" id="newInspiration" type="button">新增灵感</button></header>
             <div class="inspiration-layout">
-              <aside class="inspiration-sidebar"><label for="inspirationSearch">搜索灵感</label><input id="inspirationSearch" type="search" placeholder="搜索标题或正文" /><div id="inspirationList" class="inspiration-list"></div></aside>
+              <aside class="inspiration-sidebar"><label for="inspirationSearch">搜索灵感</label><input id="inspirationSearch" type="search" placeholder="搜索标题或正文" /><label class="archive-filter"><input id="inspirationArchived" type="checkbox" /> 查看归档灵感</label><div id="inspirationList" class="inspiration-list"></div></aside>
               <form id="inspirationForm" class="inspiration-editor">
                 <h2 id="inspirationHeading">记录一个新灵感</h2>
                 <div class="form-field"><label for="inspirationTitle">标题</label><input id="inspirationTitle" required maxlength="100" placeholder="给这个火花起个名字" /></div>
                 <div class="form-field"><label for="inspirationContent">灵感正文</label><textarea id="inspirationContent" required maxlength="100000" rows="12" placeholder="一个人物困境、一段对白，或一个还没想清楚的画面…"></textarea></div>
                 <p id="inspirationStatus" role="status">尚未保存。灵感独立于项目保存。</p>
-                <div class="inspiration-actions"><button class="primary-button" type="submit">保存灵感</button><button class="secondary-button" id="useInspiration" type="button">追加到当前项目</button><button class="secondary-button" id="exportInspirations" type="button">导出灵感库</button></div>
+                <div class="inspiration-actions"><button class="primary-button" type="submit">保存灵感</button><button class="secondary-button" id="useInspiration" type="button">追加到当前项目</button><button class="secondary-button" id="exportInspirations" type="button">导出 Markdown</button><button class="text-button" id="archiveInspiration" type="button" disabled>归档灵感</button><button class="text-button" type="button" data-action="backup-library">完整备份</button></div>
               </form>
             </div>
           </section>
 
           <section class="view-panel knowledge-view" id="knowledgeView" data-view="knowledge" hidden>
+            <p id="knowledgeImportReport" class="import-report" role="status"></p>
             <header class="page-header">
               <div>
                 <span class="eyebrow">创作上下文</span>
@@ -433,7 +435,7 @@
                 <input id="embeddingModel" placeholder="填写已安装的 Embedding 模型名称" maxlength="200" />
                 <small>仅向本机 Ollama 发送已导入的知识片段；未启用时使用文本检索。</small>
                 <div class="project-actions dialog-actions">
-                  <button class="secondary-button" type="button" data-action="build-semantic-index">建立 / 更新语义索引</button>
+                  <p id="semanticCoverage" role="status">未启用语义检索</p><button class="secondary-button" type="button" data-action="build-semantic-index">建立 / 更新语义索引</button>
                   <button class="text-button" type="button" data-action="clear-semantic-index">关闭语义检索</button>
                 </div>
               </div>
@@ -592,6 +594,7 @@
           </div>
 
           <div class="prompt-area">
+            <details class="context-preview"><summary id="contextPreviewSummary">发送范围</summary><ul id="contextPreviewList"></ul><p>仅发送列出的内容与创作要求。超出预算的资料会标出截断位置。</p></details>
             <label class="prompt-box" for="promptInput">
               <span class="sr-only">告诉 AI 你想如何处理当前内容</span>
               <textarea id="promptInput" rows="3" placeholder="描述你想怎么改，或输入下一步情节…"></textarea>
@@ -622,6 +625,7 @@
         <div class="statusbar-group statusbar-end">
           <span id="currentMode">剧本模式</span>
           <span>UTF-8</span>
+          <button type="button" data-action="check-updates" aria-haspopup="dialog" aria-controls="updateDialog">检查更新</button>
           <button type="button" data-action="open-shortcuts">快捷键</button>
         </div>
       </footer>
@@ -649,14 +653,16 @@
     <dialog class="app-dialog project-library-dialog" id="projectLibraryDialog" aria-labelledby="projectLibraryTitle">
       <div class="dialog-header"><div><span class="eyebrow">创作空间</span><h2 id="projectLibraryTitle">我的项目</h2><p class="dialog-description">选择一个项目继续创作，或开启新的故事。</p></div><button type="button" class="icon-button" data-action="close-dialog" aria-label="关闭我的项目"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
       <div class="project-library-toolbar"><span id="projectCount"></span><div><button class="secondary-button" type="button" data-action="restore-project">恢复备份</button><button class="primary-button" type="button" data-action="new-project">新建项目</button></div></div>
+      <div class="library-management"><button class="text-button" type="button" id="archiveViewButton" data-action="toggle-archived-projects" aria-pressed="false">查看归档项目</button><span class="storage-summary" id="storageSummary"></span></div>
       <div id="projectList" class="project-list"></div>
       <div class="project-library-footer"><p class="project-actions-label">当前项目操作</p>
       <div class="dialog-actions project-actions">
         <button class="secondary-button" type="button" data-action="rename-project">重命名</button>
         <button class="secondary-button" type="button" data-action="backup-project">备份当前项目</button>
         <button class="secondary-button" type="button" data-action="export-project">导出 Markdown</button>
+        <button class="secondary-button" type="button" data-action="archive-project">归档当前项目</button>
       </div>
-      <p class="dialog-description">项目独立保存。备份包含正文、版本和知识片段，不包含 API 密钥。</p></div>
+      <div class="library-management"><button class="text-button" type="button" data-action="backup-library">备份全部项目与灵感</button><button class="text-button" type="button" data-action="recover-library">恢复上一份内部快照</button></div><p class="dialog-description">完整备份包含活动项目、归档与灵感，不含密钥。恢复备份会新增副本；归档项目随时可恢复。</p></div>
     </dialog>
     <dialog class="app-dialog cli-consent-dialog" id="cliConsentDialog" aria-labelledby="cliConsentTitle" aria-describedby="cliConsentSummary cliConsentBoundary">
       <form method="dialog">
@@ -777,11 +783,36 @@
           <label><input type="radio" name="sourceType" value="obsidian" checked /><span><svg class="icon"><use href="#icon-database"></use></svg><strong>Obsidian Vault</strong><small>只读导入 Markdown 与纯文本</small></span></label>
           <label><input type="radio" name="sourceType" value="folder" /><span><svg class="icon"><use href="#icon-folder"></use></svg><strong>普通文件夹</strong><small>Markdown 与纯文本资料</small></span></label>
         </fieldset>
-        <div class="form-field"><label for="sourcePath">目录位置</label><div class="input-with-button"><input id="sourcePath" value="尚未选择目录" readonly /><button type="button" class="secondary-button" data-action="choose-folder">选择目录</button></div><small>应用只读取你本次明确选择的 Markdown 与纯文本文件；单次最多 80 个文件、单文件 1 MiB、总计 4 MiB。</small></div>
+        <div class="form-field"><label for="sourcePath">目录位置</label><div class="input-with-button"><input id="sourcePath" value="尚未选择目录" readonly /><button type="button" class="secondary-button" data-action="choose-folder">选择目录</button></div><small>应用只读取你本次明确选择的 Markdown 与纯文本文件；单次最多 80 个文件、单文件 1 MiB、总计 4 MiB。</small><p id="knowledgeImportPreview" class="import-report" role="status"></p></div>
         <input id="knowledgeFilePicker" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" multiple webkitdirectory hidden />
         <div class="privacy-callout"><svg class="icon"><use href="#icon-lock"></use></svg><p><strong>默认只读</strong><br />AI 仅在你明确勾选知识上下文时使用这些内容。</p></div>
         <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">添加并建立索引</button></div>
       </form>
+    </dialog>
+
+    <dialog class="app-dialog update-dialog" id="updateDialog" aria-labelledby="updateDialogTitle" aria-describedby="updateDialogDescription">
+      <div class="dialog-header">
+        <div><span class="eyebrow">应用更新</span><h2 id="updateDialogTitle">保持创作工具常新</h2></div>
+        <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭更新检查"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
+      </div>
+      <p class="dialog-description" id="updateDialogDescription">手动检查 GitHub 上的公开稳定版本，查看说明后选择下载。</p>
+      <div class="update-version-grid">
+        <div><span>当前版本</span><strong id="updateCurrentVersion">待读取</strong></div>
+        <div><span>最新稳定版</span><strong id="updateLatestVersion">尚未确认</strong></div>
+      </div>
+      <div class="update-release-meta"><span id="updatePlatform">等待检查</span><span id="updatePublished"></span></div>
+      <p class="update-status" id="updateStatus" role="status" aria-live="polite" aria-atomic="true" data-state="idle">点击检查获取发布信息。</p>
+      <section class="update-notes-section" id="updateNotesSection" aria-labelledby="updateNotesTitle" hidden>
+        <h3 id="updateNotesTitle">更新说明</h3>
+        <pre class="update-notes" id="updateNotes"></pre>
+      </section>
+      <p class="update-asset" id="updateAsset"></p>
+      <p class="update-install-note">只检查版本并打开官方发布链接，不会自动下载或安装。建议安装前先备份创作内容。</p>
+      <div class="dialog-actions update-actions">
+        <button class="text-button" type="button" id="updateCheckButton">重新检查</button>
+        <button class="secondary-button" type="button" id="updateReleaseButton" disabled>打开发布页</button>
+        <button class="primary-button" type="button" id="updateDownloadButton" disabled>下载对应安装包</button>
+      </div>
     </dialog>
 
     <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
