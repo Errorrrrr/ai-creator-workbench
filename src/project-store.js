@@ -1,6 +1,8 @@
 import { deserializeKnowledgeIndex } from './knowledge-index.js'
 import { pruneSemanticIndex } from './semantic-search.js'
 
+import { validateStoryboard, normalizeWorkflow } from './storyboard.js'
+
 const invoke = globalThis.window?.__TAURI__?.core?.invoke
 export const MAX_LIBRARY_BYTES = 64 * 1024 * 1024
 export const MAX_ARCHIVE_BYTES = 448 * 1024 * 1024
@@ -48,6 +50,13 @@ function validateChunks(index, sources) {
 export function validateWorkspace(workspace, index = null) {
   assert(object(workspace), '项目格式无效')
   assert(workspace.schemaVersion === undefined || [1, 2].includes(workspace.schemaVersion), '项目使用了不支持的数据版本')
+  if (workspace.storyboard !== undefined) validateStoryboard(workspace.storyboard)
+  if (workspace.workflow !== undefined) {
+    assert(object(workspace.workflow), '创作流程配置无效')
+    const normalized = normalizeWorkflow(workspace.workflow)
+    for (const [key, value] of Object.entries(normalized)) assert(workspace.workflow[key] === undefined || workspace.workflow[key] === value, '创作流程参数无效')
+    assert(Object.values(normalized).every(value => value.length <= 200), '执行端引用过长')
+  }
   assert(object(workspace.project) && typeof workspace.project.name === 'string' && workspace.project.name.trim().length > 0 && workspace.project.name.length <= 100, '项目名称无效')
   validateStringFields(workspace.project, ['type', 'stage', 'template'], '项目属性无效')
   assert(object(workspace.documents), '文档格式无效')
@@ -208,7 +217,7 @@ function serializedLibrary(next, nextArchives) {
   return { payload, archivePayload }
 }
 
-function commit(change) {
+function commit(change, { mediaImportId = null } = {}) {
   const operation = queue.then(async () => {
     assert(library, '项目库尚未载入，请先导出或恢复内部快照')
     const next = structuredClone(library)
@@ -217,7 +226,8 @@ function commit(change) {
     if (JSON.stringify(next) === JSON.stringify(library) && JSON.stringify(nextArchives) === JSON.stringify(archives)) return result
     next.revision = library.revision + 1
     const { payload, archivePayload } = serializedLibrary(next, nextArchives)
-    if (invoke) await invoke('library_write', { payload, archivePayload, expectedRevision: library.revision })
+    if (invoke) await invoke('library_write', { payload, archivePayload, expectedRevision: library.revision, ...(mediaImportId ? { mediaImportId } : {}) })
+    else if (mediaImportId) throw new Error('完整媒体包必须在桌面版恢复')
     else await writeBrowser(next, library.revision, nextArchives)
     library = next
     archives = nextArchives
@@ -324,14 +334,15 @@ export function saveProject(id, workspace, index) {
   })
 }
 
-export function createProject(workspace, index) {
+export function createProject(workspace, index, requestedId = null, { mediaImportId = null } = {}) {
   const snapshot = projectSnapshot(workspace, index)
   return commit(next => {
-    const id = crypto.randomUUID()
+    const id = requestedId || crypto.randomUUID()
+    assert(typeof id === 'string' && /^[a-zA-Z0-9_-]{1,96}$/.test(id) && !next.projects.some(project => project.id === id), '新项目标识无效或已经存在')
     next.projects.push({ id, ...snapshot, updatedAt: new Date().toISOString() })
     next.activeId = id
     return id
-  })
+  }, { mediaImportId })
 }
 
 export function activateProject(id) {
@@ -426,6 +437,7 @@ function projectSnapshot(workspace, index) {
 function portableProject(project) {
   const copy = structuredClone(project)
   delete copy.workspace.connections
+  if (copy.workspace.workflow) copy.workspace.workflow = normalizeWorkflow(copy.workspace.workflow)
   if (copy.workspace.knowledge) delete copy.workspace.knowledge.semantic
   stripLexicalVectors(copy.index)
   return copy

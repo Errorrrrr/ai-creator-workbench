@@ -43,7 +43,7 @@ struct TaskRegistry {
 #[derive(Default)]
 pub(crate) struct RuntimeState {
     tasks: Mutex<TaskRegistry>,
-    cli_running: AtomicBool,
+    pub(crate) cli_running: AtomicBool,
 }
 
 impl RuntimeState {
@@ -129,6 +129,7 @@ const CODEX_GENERATE_ARGS: &[&str] = &[
     "--ignore-rules",
     "--color",
     "never",
+    "--json",
     "-c",
     "approval_policy=\"never\"",
 ];
@@ -323,7 +324,7 @@ pub(crate) async fn embed_text(
     Ok(vectors)
 }
 
-fn trusted_executable_directories() -> Vec<PathBuf> {
+pub(crate) fn trusted_executable_directories() -> Vec<PathBuf> {
     let mut directories = vec![
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
@@ -338,7 +339,7 @@ fn trusted_executable_directories() -> Vec<PathBuf> {
     directories
 }
 
-fn find_executable(command: &str) -> Option<PathBuf> {
+pub(crate) fn find_executable(command: &str) -> Option<PathBuf> {
     trusted_executable_directories()
         .into_iter()
         .map(|directory| directory.join(command))
@@ -562,7 +563,7 @@ async fn inspect_cli(driver: &CliDriverDefinition) -> CliDriverStatus {
     }
 }
 
-fn http_client(timeout_duration: Duration) -> Result<Client, String> {
+pub(crate) fn http_client(timeout_duration: Duration) -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout_duration)
@@ -581,7 +582,7 @@ fn is_loopback_host(url: &Url) -> bool {
     })
 }
 
-fn validate_base_url(kind: &str, value: &str) -> Result<Url, String> {
+pub(crate) fn validate_base_url(kind: &str, value: &str) -> Result<Url, String> {
     let url = Url::parse(value.trim()).map_err(|_| "执行端地址格式无效")?;
     if !url.username().is_empty()
         || url.password().is_some()
@@ -600,7 +601,7 @@ fn validate_base_url(kind: &str, value: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn endpoint_url(base: &Url, suffix: &str) -> Result<Url, String> {
+pub(crate) fn endpoint_url(base: &Url, suffix: &str) -> Result<Url, String> {
     Url::parse(&format!(
         "{}/{}",
         base.as_str().trim_end_matches('/'),
@@ -1148,7 +1149,10 @@ fn create_cli_prompt(messages: &[MessageInput]) -> Result<String, String> {
     ))
 }
 
-async fn read_limited<R: AsyncRead + Unpin>(mut reader: R, limit: usize) -> (Vec<u8>, bool) {
+pub(crate) async fn read_limited<R: AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+) -> (Vec<u8>, bool) {
     let mut output = Vec::with_capacity(limit.min(16 * 1024));
     let mut buffer = [0u8; 16 * 1024];
     let mut exceeded = false;
@@ -1167,7 +1171,7 @@ async fn read_limited<R: AsyncRead + Unpin>(mut reader: R, limit: usize) -> (Vec
     (output, exceeded)
 }
 
-fn terminate_process_group(_child: &mut Child, process_group_id: Option<u32>) {
+pub(crate) fn terminate_process_group(_child: &mut Child, process_group_id: Option<u32>) {
     #[cfg(unix)]
     if let Some(process_id) = process_group_id {
         unsafe {
@@ -1180,12 +1184,12 @@ fn terminate_process_group(_child: &mut Child, process_group_id: Option<u32>) {
     }
 }
 
-async fn terminate_and_reap(child: &mut Child, process_group_id: Option<u32>) {
+pub(crate) async fn terminate_and_reap(child: &mut Child, process_group_id: Option<u32>) {
     terminate_process_group(child, process_group_id);
     let _ = timeout(PROCESS_CLEANUP_TIMEOUT, child.wait()).await;
 }
 
-fn sanitize_cli_error(diagnostics: &str) -> &'static str {
+pub(crate) fn sanitize_cli_error(diagnostics: &str) -> &'static str {
     let value = diagnostics.to_lowercase();
     if ["login", "auth", "api key", "credential", "unauthorized"]
         .iter()
@@ -1208,7 +1212,7 @@ fn sanitize_cli_error(diagnostics: &str) -> &'static str {
     {
         "CLI 无法连接上游服务"
     } else {
-        "CLI 运行失败，请在终端检查登录和版本"
+        "CLI 执行失败，未返回可用结果；请检查版本与运行环境"
     }
 }
 
@@ -1229,8 +1233,25 @@ async fn generate_cli(
     result
 }
 
+pub(crate) fn validate_codex_model(model: &str) -> Result<(), String> {
+    if !model.is_empty()
+        && (model.len() > 128
+            || !model.as_bytes()[0].is_ascii_alphanumeric()
+            || !model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte)))
+    {
+        return Err("Codex 规划模型 ID 无效；未提交生成".into());
+    }
+    Ok(())
+}
+
 async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Result<String, String> {
     let driver_id = request.driver_id.as_deref().ok_or("缺少 CLI 驱动")?;
+    let model = request.model.trim();
+    if driver_id == "codex" {
+        validate_codex_model(model)?;
+    }
     if matches!(driver_id, "antigravity" | "codex" | "claude") && !request.allow_user_profile {
         return Err("请先确认本次 CLI 调用的登录态与上下文使用".into());
     }
@@ -1262,6 +1283,12 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
         .prefix("ai-creator-workbench-")
         .tempdir()
         .map_err(|_| "无法创建 CLI 隔离目录")?;
+    let configured_model = if driver_id == "codex" && model.is_empty() {
+        crate::media_codex::configured_model(&executable_path, run_directory.path(), token).await?
+    } else {
+        None
+    };
+    let model = configured_model.as_deref().unwrap_or(model);
     let mut command = Command::new(executable_path);
     let claude_login = driver_id == "claude"
         && request
@@ -1292,6 +1319,9 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
         .map_err(|_| "无法建立 CLI 受信 PATH")?;
     command.env("PATH", trusted_path);
     if driver_id == "codex" {
+        if !model.is_empty() {
+            command.arg("--model").arg(model);
+        }
         command
             .arg("--output-last-message")
             .arg(run_directory.path().join("answer.txt"));
@@ -1423,6 +1453,14 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
         return Err("CLI 输出超过限制".into());
     }
     if !status.success() {
+        if driver_id == "codex" {
+            return Err(crate::media_codex::execution_error(
+                &String::from_utf8_lossy(&stderr),
+                &String::from_utf8_lossy(&stdout),
+                status.code(),
+                model,
+            ));
+        }
         return Err(sanitize_cli_error(&String::from_utf8_lossy(&stderr)).into());
     }
     let output = String::from_utf8_lossy(&stdout).trim().to_owned();
