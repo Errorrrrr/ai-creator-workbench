@@ -2,9 +2,9 @@
 
 面向灵感、故事设定、短剧与漫剧剧本的本地优先写作工具。支持多项目、独立灵感库、知识检索和可切换的 AI 执行端。没有配置 AI 时，仍可创建、编辑、备份和恢复内容。
 
-工程名：`ai-creator-workbench`，当前版本：`0.3.0`。浏览器模式使用 IndexedDB，Tauri 2 桌面模式使用 SQLite。首次启动为空白工作台，新项目不预填示例正文、分集或分场。
+工程名：`ai-creator-workbench`，当前版本：`0.4.0`。浏览器模式使用 IndexedDB，Tauri 2 桌面模式使用 SQLite。首次启动为空白工作台，新项目不预填示例正文、分集或分场。
 
-当前分支的 P0 文字闭环和 P1 分镜／图片主路径已在 macOS 隔离桌面环境完成验收：现有 Codex CLI 生成六镜头及带固定参考的真实图片，候选明确选用、重启保存和完整项目包恢复通过。视频阶段目前按用户选择先提供通用接入框架，真实视频生成尚未验收；本轮不是正式发布。范围和逐项证据见 [多模态实施契约](specs/多模态实现契约.md)。
+v0.4.0 的 P0 文字闭环和 P1 分镜／图片主路径已在 macOS 隔离桌面环境完成验收：现有 Codex CLI 生成六镜头及带固定参考的真实图片，候选明确选用、重启保存和完整项目包恢复通过。视频阶段目前按用户选择先提供通用接入框架，真实视频生成尚未验收。公开发布结果以 [GitHub Releases](https://github.com/Errorrrrr/ai-creator-workbench/releases) 为准。范围和逐项证据见 [多模态实施契约](specs/多模态实现契约.md)，更新要点见 [v0.4.0 发布说明](specs/发布说明-v0.4.0.md)。
 
 ## 开始使用
 
@@ -162,7 +162,7 @@ npm run desktop:build:mac
 当前构建配置输出到：
 
 - `src-tauri/target/aarch64-apple-darwin/release/bundle/macos/AI Creator Workbench.app`
-- `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/AI Creator Workbench_0.3.0_aarch64.dmg`
+- `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/AI Creator Workbench_0.4.0_aarch64.dmg`
 
 这些是本机构建的预期路径；公开安装包以 [GitHub Releases](https://github.com/Errorrrrr/ai-creator-workbench/releases) 中已发布的附件为准。当前只交付 macOS 12.3+ 的 Apple Silicon 版本，为 ad-hoc 签名，尚无 Apple Developer ID 签名或公证。
 
@@ -172,12 +172,12 @@ npm run desktop:build:mac
 
 更新使用当前仓库 `Errorrrrr/ai-creator-workbench` 的 Releases。匿名检查要求仓库和目标 Release 公开；草稿或私有仓库不会被当作公开更新。界面的“下载匹配安装包”打开浏览器下载地址，安装仍由用户完成。升级前建议导出完整备份，关闭旧应用后再替换应用；项目数据库保存在独立的应用数据目录中。
 
-推送已有版本 tag（如 `v0.3.0`）触发 [Release macOS 工作流](.github/workflows/release.yml)。流程先核对 tag 与所有版本文件，执行 JavaScript 检查、测试、前端构建和锁定依赖的 Rust 测试，再构建 Apple Silicon `.app` 与 `.dmg`。安装包、签名结构、架构和 SHA-256 校验通过后，才发布完整 GitHub Release。
+推送已有版本 tag（如 `v0.4.0`）触发 [Release macOS 工作流](.github/workflows/release.yml)。流程先核对 tag 与所有版本文件，执行 JavaScript 检查、测试、前端构建和锁定依赖的 Rust 测试，再构建 Apple Silicon `.app` 与 `.dmg`。安装包、签名结构、架构和 SHA-256 校验通过后，才发布完整 GitHub Release。
 
 发布附件名称固定为：
 
-- `ai-creator-workbench_0.3.0_aarch64.dmg`
-- `ai-creator-workbench_0.3.0_aarch64.app.zip`
+- `ai-creator-workbench_0.4.0_aarch64.dmg`
+- `ai-creator-workbench_0.4.0_aarch64.app.zip`
 - `SHA256SUMS`
 
 构建 job 只有仓库读取权限，发布 job 使用 GitHub 自带 `GITHUB_TOKEN` 的 `contents: write`，不需要在源码中放置发布 token 或自动更新签名密钥。失败的上传只会留下未公开的草稿；已经公开的版本不会被工作流覆盖。预发布与旧版本不会抢占 Latest。
@@ -191,6 +191,6 @@ npm run desktop:build:mac
 - `⌘/Ctrl + Enter`：执行 AI 请求。
 - `Esc`：关闭弹层、抽屉或停止生成。
 
-浏览器布局覆盖窄屏使用；原生窗口当前最小为 1024 × 700。多模态升级尚未完成真实图片／视频闭环验收；已有控件和适配源码不应当作正式可用能力。尚未提供应用内成片渲染、多人协作、云同步、后台文件监听、Obsidian 双向写回、Gemini 创作执行、自动下载安装更新或正式 Windows 发布。真实桌面交互、真实供应商/CLI/Embedding 调用与正式发布仍需在对应环境验收。
+浏览器布局覆盖窄屏使用；原生窗口当前最小为 1024 × 700。当前资源的文字、六镜头、参考图片与备份恢复主路径已验收，不保证其他账号、CLI 版本或模型同样可用，也不代表跨镜头人物身份一致性通过。真实视频生成仍未验收。尚未提供应用内成片渲染、多人协作、云同步、后台文件监听、Obsidian 双向写回、Gemini 创作执行、自动下载安装更新或正式 Windows 发布；其他供应商、Embedding 资源、正式签名与升级安装仍需按实际环境验证。
 
 更完整的交互规则见 [交互说明](specs/交互说明.md)，视觉规范见 [设计系统](design-system/ai-creator-workbench/MASTER.md)。
