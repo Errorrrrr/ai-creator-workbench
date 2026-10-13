@@ -253,6 +253,11 @@
             </div>
           </div>
 
+          <nav class="project-modes" aria-label="项目工作区">
+            <button type="button" data-view-target="workspace" aria-current="page">创作</button>
+            <button type="button" data-view-target="storyboard">分镜</button>
+            <button type="button" data-view-target="assets">素材</button>
+          </nav>
           <label class="explorer-search">
             <svg class="icon icon-small"><use href="#icon-search"></use></svg>
             <span class="sr-only">筛选项目内容</span>
@@ -272,6 +277,21 @@
         </aside>
 
         <main class="main-surface" id="workspaceMain" tabindex="-1">
+          <nav class="creation-navigation" id="creationNavigation" aria-label="创作步骤" hidden>
+            <div class="creation-navigation-row">
+              <span id="creationPath" class="creation-path"></span>
+              <button type="button" class="secondary-button compact-button" data-workflow-previous>上一步</button>
+              <label class="creation-step-field" for="creationStep"><span class="sr-only">当前创作步骤</span><select id="creationStep" aria-describedby="creationStepHint"></select></label>
+              <button type="button" class="secondary-button compact-button" data-workflow-next>下一步</button>
+            </div>
+            <details class="creation-step-details">
+              <summary>输入、执行端与输出</summary>
+              <p id="creationStepHint" class="creation-step-hint"></p>
+              <dl><div><dt>可用输入</dt><dd id="creationStepInput"></dd></div><div><dt>执行端</dt><dd id="creationStepExecutor"></dd></div><div><dt>输出位置</dt><dd id="creationStepOutput"></dd></div></dl>
+              <p>实际发送范围请查看助手上下文或媒体计划；步骤切换不会生成内容，序号不代表完成率。</p>
+              <div class="creation-step-actions"><button class="text-button" type="button" data-view-target="connections">配置路径与执行端</button><button class="text-button" type="button" data-view-target="knowledge">选择知识资料</button><button class="text-button" type="button" data-action="export-project">导出 Markdown</button><button class="text-button" type="button" data-view-target="assets">素材与完整备份</button></div>
+            </details>
+          </nav>
           <section class="view-panel workspace-view" id="workspaceView" data-view="workspace">
             <div id="emptyWorkspace" class="empty-workspace" hidden>
               <span class="eyebrow">从灵感到完整故事</span><h1>让下一个故事，<br />从这里开始。</h1>
@@ -372,6 +392,14 @@
             </div>
           </section>
 
+          <section class="view-panel media-view" id="storyboardView" data-view="storyboard" hidden>
+            <header class="media-page-header"><div><span class="eyebrow">从文字到画面</span><h1>分镜工作区</h1><p>拆镜、校对状态、固定参考。每个镜头都能独立生成与重做。</p></div><button class="text-button" type="button" data-view-target="connections">配置步骤执行端</button></header>
+            <div class="media-view-content"></div>
+          </section>
+          <section class="view-panel media-view" id="assetsView" data-view="assets" hidden>
+            <header class="media-page-header"><div><span class="eyebrow">项目的视觉依据</span><h1>素材库</h1><p>角色、场景与镜头素材留在本机，候选与选用版本分别保存。</p></div><button class="text-button" type="button" data-view-target="storyboard">回到分镜</button></header>
+            <div class="media-view-content"></div>
+          </section>
           <section class="view-panel inspirations-view" data-view="inspirations" hidden>
             <header class="page-header"><div><span class="eyebrow">捕捉故事的起点</span><h1>灵感库</h1><p>独立记录人物、画面与故事火花，无需先创建项目。</p></div><button class="primary-button" id="newInspiration" type="button">新增灵感</button></header>
             <div class="inspiration-layout">
@@ -381,7 +409,7 @@
                 <div class="form-field"><label for="inspirationTitle">标题</label><input id="inspirationTitle" required maxlength="100" placeholder="给这个火花起个名字" /></div>
                 <div class="form-field"><label for="inspirationContent">灵感正文</label><textarea id="inspirationContent" required maxlength="100000" rows="12" placeholder="一个人物困境、一段对白，或一个还没想清楚的画面…"></textarea></div>
                 <p id="inspirationStatus" role="status">尚未保存。灵感独立于项目保存。</p>
-                <div class="inspiration-actions"><button class="primary-button" type="submit">保存灵感</button><button class="secondary-button" id="useInspiration" type="button">追加到当前项目</button><button class="secondary-button" id="exportInspirations" type="button">导出 Markdown</button><button class="text-button" id="archiveInspiration" type="button" disabled>归档灵感</button><button class="text-button" type="button" data-action="backup-library">完整备份</button></div>
+                <div class="inspiration-actions"><button class="primary-button" type="submit">保存灵感</button><button class="secondary-button" id="useInspiration" type="button">追加到当前项目</button><button class="secondary-button" id="exportInspirations" type="button">导出 Markdown</button><button class="text-button" id="archiveInspiration" type="button" disabled>归档灵感</button><button class="text-button" type="button" data-action="backup-library">文字库备份</button></div>
               </form>
             </div>
           </section>
@@ -493,11 +521,26 @@
               <button type="button" class="text-button" data-action="test-all-connections">全部检测</button>
             </div>
 
+            <section class="connection-section" aria-labelledby="globalExecutorsTitle">
+              <div class="connection-section-heading"><div><div><h2 id="globalExecutorsTitle">全局默认执行端</h2><p>未单独选择资源的项目按能力继承。修改默认不覆盖项目选择，也不会发起生成。</p></div></div></div>
+              <div class="project-workflow" id="globalExecutors"></div>
+            </section>
+
+            <section class="connection-section" aria-labelledby="projectWorkflowTitle">
+              <div class="connection-section-heading"><div><div><h2 id="projectWorkflowTitle">当前项目 · 步骤执行端</h2><p>连接决定怎么调用，步骤决定用哪个资源。文字、图片与视频不必使用同一供应商。</p></div></div></div>
+              <div class="project-workflow" id="projectWorkflow"></div>
+            </section>
+
             <section class="connection-section" aria-labelledby="apiConnectionsTitle">
               <div class="connection-section-heading">
                 <div><span class="section-icon"><svg class="icon"><use href="#icon-key"></use></svg></span><div><h2 id="apiConnectionsTitle">模型 API</h2><p>密钥默认仅用于当前会话，可选 macOS 钥匙串保存，不进入项目文件。</p></div></div>
               </div>
               <div class="connection-list" id="apiConnectionList"></div>
+            </section>
+
+            <section class="connection-section" aria-labelledby="mediaAdaptersTitle">
+              <div class="connection-section-heading"><div><div><h2 id="mediaAdaptersTitle">媒体协议框架</h2><p id="mediaAdapterStatus" role="status">正在读取已实现的 API／CLI 协议；不会调用生成。</p></div></div></div>
+              <div id="mediaAdapterList"></div>
             </section>
 
             <section class="connection-section" aria-labelledby="cliConnectionsTitle">
@@ -551,6 +594,19 @@
               <button type="button" class="context-chip" aria-pressed="true"><svg class="icon"><use href="#icon-users"></use></svg>人物设定<svg class="icon chip-check"><use href="#icon-check"></use></svg></button>
               <button type="button" class="context-chip context-chip-accent" id="knowledgeContextChip" aria-pressed="true"><svg class="icon"><use href="#icon-link"></use></svg>知识 0</button>
             </div>
+            <div class="context-scope-controls">
+              <label><input id="includeCurrentContext" type="checkbox" checked>当前正文／大纲</label>
+              <label><input id="includeSelectionContext" type="checkbox">编辑器选区</label>
+              <button class="text-button" id="addContextObject" type="button" aria-controls="contextObjectPicker" aria-expanded="false">@ 添加对象</button>
+            </div>
+            <div id="contextObjectReferences" class="context-object-references" aria-label="主动引用的项目对象"></div>
+            <details id="contextObjectPicker" class="context-object-picker">
+              <summary>选择当前项目对象</summary>
+              <label class="sr-only" for="contextObjectSearch">搜索文档、镜头或素材说明</label>
+              <input id="contextObjectSearch" type="search" placeholder="搜索文档、镜头或素材说明">
+              <div id="contextObjectList" class="context-object-list"></div>
+              <p>文字请求只发送素材说明，不含图片或视频字节。真实媒体参考请在分镜中选择。</p>
+            </details>
           </div>
 
           <div class="assistant-scroll" id="assistantConversation">
@@ -578,6 +634,7 @@
                   <span>正在梳理场景节奏</span>
                 </div>
                 <div class="candidate-content" id="candidateContent"></div>
+                <details class="sent-context-preview"><summary>查看本次已提交的文字快照</summary><pre id="sentContextMessages"></pre></details>
                 <div class="generation-error" id="generationError" role="status" hidden></div>
                 <div class="candidate-citations" id="candidateCitations" hidden>
                   <span>参考 0 条知识</span>
@@ -585,6 +642,7 @@
                 </div>
                 <div class="candidate-actions" id="candidateActions" hidden>
                   <button class="secondary-button" type="button" data-action="retry-generation"><svg class="icon"><use href="#icon-refresh"></use></svg>重新生成</button>
+                  <button class="primary-button" id="reviewProjectPlan" type="button" data-action="review-project-plan" hidden>审阅修改计划</button>
                   <button class="secondary-button" type="button" data-action="apply-candidate" data-apply-mode="insert"><svg class="icon"><use href="#icon-check"></use></svg>插入光标</button>
                   <button class="secondary-button" type="button" data-action="apply-candidate" data-apply-mode="replace"><svg class="icon"><use href="#icon-refresh"></use></svg>替换正文</button>
                   <button class="primary-button" type="button" data-action="apply-candidate" data-apply-mode="append"><svg class="icon"><use href="#icon-check"></use></svg><span>追加并建版本</span></button>
@@ -594,7 +652,13 @@
           </div>
 
           <div class="prompt-area">
-            <details class="context-preview"><summary id="contextPreviewSummary">发送范围</summary><ul id="contextPreviewList"></ul><p>仅发送列出的内容与创作要求。超出预算的资料会标出截断位置。</p></details>
+            <div class="assistant-request-mode">
+              <label for="assistantRequestMode">本次请求</label>
+              <select id="assistantRequestMode" aria-describedby="requestModeHelp"><option value="text">文字候选</option><option value="discussion">仅讨论</option><option value="project-plan">项目计划 · 编辑与任务查询</option></select>
+              <button class="text-button" id="reviewExistingPlan" type="button" data-action="review-existing-plan" hidden>审阅已有计划</button>
+            </div>
+            <p class="request-mode-help" id="requestModeHelp">讨论不改项目；文字采纳后写入；项目计划先审阅，任务查询只读本地摘要。</p>
+            <details class="context-preview"><summary id="contextPreviewSummary">发送范围</summary><ul id="contextPreviewList"></ul><div id="contextExcludedList"></div><button class="text-button" id="resetContextScope" type="button">恢复默认上下文</button><details><summary>查看完整文字请求</summary><pre id="contextPreviewMessages"></pre></details><p>仅发送列出的内容、项目标题与创作要求。超出预算的片段会标出截断；移除只影响下次请求，不改动原资料。</p></details>
             <label class="prompt-box" for="promptInput">
               <span class="sr-only">告诉 AI 你想如何处理当前内容</span>
               <textarea id="promptInput" rows="3" placeholder="描述你想怎么改，或输入下一步情节…"></textarea>
@@ -631,6 +695,16 @@
       </footer>
     </div>
 
+    <dialog class="app-dialog project-plan-dialog" id="projectPlanDialog" aria-labelledby="projectPlanTitle" aria-describedby="projectPlanHelp">
+      <div class="dialog-header"><div><span class="eyebrow">受控项目操作</span><h2 id="projectPlanTitle">审阅项目操作计划</h2><p class="dialog-description" id="projectPlanHelp">核对文档、镜头与素材选择后一次采纳。任务查询在预览时只读本地摘要，无需保存；媒体计划须另行核对实际输入并确认生成。此处不调用供应商、不执行任意命令。</p></div><button type="button" class="icon-button" data-action="close-dialog" aria-label="关闭项目计划"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
+      <details class="project-plan-targets"><summary>查看本次允许的目标与媒体版本</summary><pre id="projectPlanTargets"></pre><p>目标来自已选正文或 @ 引用。选用素材须同时引用镜头和确切媒体版本；需要其他对象时，返回添加上下文后重新制定计划。</p></details>
+      <div class="form-field"><label for="projectPlanInput">结构化计划 JSON</label><textarea id="projectPlanInput" rows="8" maxlength="100000" spellcheck="false" aria-describedby="projectPlanStatus"></textarea></div>
+      <p id="projectPlanStatus" class="dialog-description" role="status" tabindex="-1"></p>
+      <button class="secondary-button" id="projectPlanPreviewButton" type="button">预览全部操作</button>
+      <section id="projectPlanPreview" class="project-plan-preview" aria-label="操作对照与本地查询结果" hidden></section>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">返回，不修改</button><button class="primary-button" id="projectPlanApply" type="button" disabled>采纳改动并保存</button></div>
+    </dialog>
+
     <dialog class="app-dialog command-dialog" id="commandDialog" aria-labelledby="commandTitle">
       <div class="command-search-row">
         <svg class="icon"><use href="#icon-search"></use></svg>
@@ -652,17 +726,17 @@
 
     <dialog class="app-dialog project-library-dialog" id="projectLibraryDialog" aria-labelledby="projectLibraryTitle">
       <div class="dialog-header"><div><span class="eyebrow">创作空间</span><h2 id="projectLibraryTitle">我的项目</h2><p class="dialog-description">选择一个项目继续创作，或开启新的故事。</p></div><button type="button" class="icon-button" data-action="close-dialog" aria-label="关闭我的项目"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
-      <div class="project-library-toolbar"><span id="projectCount"></span><div><button class="secondary-button" type="button" data-action="restore-project">恢复备份</button><button class="primary-button" type="button" data-action="new-project">新建项目</button></div></div>
+      <div class="project-library-toolbar"><span id="projectCount"></span><div><button class="secondary-button" type="button" data-action="restore-project">恢复文字备份</button><button class="secondary-button" type="button" data-action="restore-media-package">导入完整项目包</button><button class="primary-button" type="button" data-action="new-project">新建项目</button></div></div>
       <div class="library-management"><button class="text-button" type="button" id="archiveViewButton" data-action="toggle-archived-projects" aria-pressed="false">查看归档项目</button><span class="storage-summary" id="storageSummary"></span></div>
       <div id="projectList" class="project-list"></div>
       <div class="project-library-footer"><p class="project-actions-label">当前项目操作</p>
       <div class="dialog-actions project-actions">
         <button class="secondary-button" type="button" data-action="rename-project">重命名</button>
-        <button class="secondary-button" type="button" data-action="backup-project">备份当前项目</button>
+        <button class="secondary-button" type="button" data-action="backup-project">文字／结构 JSON 备份</button>
         <button class="secondary-button" type="button" data-action="export-project">导出 Markdown</button>
         <button class="secondary-button" type="button" data-action="archive-project">归档当前项目</button>
       </div>
-      <div class="library-management"><button class="text-button" type="button" data-action="backup-library">备份全部项目与灵感</button><button class="text-button" type="button" data-action="recover-library">恢复上一份内部快照</button></div><p class="dialog-description">完整备份包含活动项目、归档与灵感，不含密钥。恢复备份会新增副本；归档项目随时可恢复。</p></div>
+      <div class="library-management"><button class="text-button" type="button" data-action="backup-library">备份全部文字项目与灵感</button><button class="text-button" type="button" data-action="recover-library">恢复上一份内部快照</button><button class="text-button" type="button" data-action="pending-media-imports">恢复待完成的媒体导入</button></div><p class="dialog-description">JSON 备份包含活动项目、归档与灵感的文字／结构，不含实际媒体或密钥。含图片、视频的项目请在素材库导出 .acwpack 完整项目包。恢复会新增副本；归档项目随时可恢复。</p></div>
     </dialog>
     <dialog class="app-dialog cli-consent-dialog" id="cliConsentDialog" aria-labelledby="cliConsentTitle" aria-describedby="cliConsentSummary cliConsentBoundary">
       <form method="dialog">
@@ -700,6 +774,7 @@
           <label><input type="radio" name="contentType" value="漫剧" /><span><svg class="icon"><use href="#icon-layers"></use></svg><strong>漫剧</strong><small>分镜文字与对白</small></span></label>
           <label><input type="radio" name="contentType" value="通用故事" /><span><svg class="icon"><use href="#icon-book"></use></svg><strong>通用故事</strong><small>灵感、大纲与正文</small></span></label>
         </fieldset>
+        <div class="form-field"><label for="projectFlowPreset">创作路径</label><select id="projectFlowPreset" name="flowPreset"><option value="text">文字创作 · 灵感、结构与正文</option><option value="script" selected>剧本创作 · 设定、大纲与分场</option><option value="storyboard">分镜制作 · 从已有剧本或素材开始</option></select><small>路径可随时调整，不自动生成内容，也不要求配置图片或视频服务。</small></div>
         <p>新项目独立保存，不会替换已有项目。</p>
         <div class="dialog-actions">
           <button class="secondary-button" type="button" data-action="close-dialog">取消</button>
@@ -716,7 +791,8 @@
         </div>
         <input id="connectionId" name="connectionId" type="hidden" />
         <label id="rememberApiKeyOption" hidden><input id="rememberApiKey" type="checkbox" />记住密钥（macOS 钥匙串）</label>
-        <div class="form-field"><label for="connectionKind">连接类型</label><select id="connectionKind" name="connectionKind"><option value="openai-compatible">OpenAI 兼容 API</option><option value="ollama">Ollama 本地服务</option></select></div>
+        <div class="form-field"><label for="connectionKind">连接类型</label><select id="connectionKind" name="connectionKind"><option value="openai-compatible">文本 · OpenAI 兼容 API</option><option value="ollama">文本 · Ollama 本地服务</option><option value="image-api">图片 · API</option><option value="video-api">视频 · API</option></select><small>协议不同需要独立适配；填写地址不代表支持所有生成能力。不会自动采购或切换供应商。</small></div>
+        <div class="form-field" id="connectionAdapterField" hidden><label for="connectionAdapter">协议适配器</label><select id="connectionAdapter" name="connectionAdapter"></select><small>只列出已实现的协议；模型名称、账号和额度仍需独立核对。</small></div>
         <div class="form-field"><label for="connectionName">连接名称</label><input id="connectionName" name="connectionName" value="我的模型" autocomplete="off" required /></div>
         <div class="form-field"><label for="baseUrl">API 地址</label><input id="baseUrl" type="url" value="https://api.example.com/v1" autocomplete="url" /></div>
         <div class="form-field" id="apiKeyField"><label for="apiKey">API Key</label><input id="apiKey" type="password" placeholder="输入密钥，留空保留现有密钥" autocomplete="new-password" /><small>密钥不进入项目备份。桌面端可选择保存到系统钥匙串。</small></div>
@@ -729,6 +805,41 @@
       </form>
     </dialog>
 
+    <dialog class="app-dialog form-dialog" id="cliModelDialog" aria-labelledby="cliModelTitle">
+      <form id="cliModelForm">
+        <div class="dialog-header">
+          <div><span class="eyebrow">本机 CLI · 不调用生成</span><h2 id="cliModelTitle">Codex 规划模型</h2></div>
+          <button class="icon-button icon-button-compact" type="button" data-action="close-dialog" aria-label="关闭"><svg class="icon"><use href="#icon-x"></use></svg></button>
+        </div>
+        <div class="form-field">
+          <label for="cliPlanningModel">模型 ID（可选）</label>
+          <input id="cliPlanningModel" name="planningModel" maxlength="128" autocomplete="off" spellcheck="false" aria-describedby="cliModelHelp cliModelStatus" placeholder="留空跟随现有 Codex CLI 配置" />
+          <small id="cliModelHelp">默认无需填写，文字生成和图片规划跟随本机 Codex CLI 的模型设置；填写时仅覆盖此连接。模型 ID 不是 CLI 版本号，底层图片模型以实际回执为准。不从模型目录中另选推荐默认模型。</small>
+        </div>
+        <div class="dialog-inline-status" id="cliModelStatus" role="status">保存不验证账号权限或消耗生成额度。生成失败不会自动更换模型、供应商或计费路径。</div>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">保存设置</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog media-jobs-dialog media-batch-dialog" id="mediaBatchDialog" aria-labelledby="mediaBatchTitle" aria-describedby="mediaBatchHelp">
+      <div class="dialog-header"><div><span class="eyebrow">先预览 · 一次确认范围</span><h2 id="mediaBatchTitle">批量生成计划</h2></div><button type="button" class="secondary-button compact-button" data-media-batch-close>关闭</button></div>
+      <p class="media-help" id="mediaBatchHelp">只生成本次选定的图片或视频，不自动进入下一阶段。预览不调用生成，也不读取密钥；每个镜头产生一个候选。</p>
+      <div class="media-batch-controls">
+        <label class="media-field"><span>本批次生成内容</span><select id="mediaBatchCapability"><option value="image">图片候选</option><option value="video">视频候选</option></select></label>
+        <div class="media-field"><span>当前步骤执行端</span><p class="media-help" id="mediaBatchConnection"></p></div>
+      </div>
+      <fieldset class="media-batch-selection"><legend>选择镜头 · 每批最多 20 个</legend><div class="media-toolbar"><button type="button" class="text-button" data-media-batch-select>选择前 20 个镜头</button><button type="button" class="text-button" data-media-batch-clear>清空选择</button></div><div class="media-batch-checklist" id="mediaBatchShots"></div></fieldset>
+      <p class="media-notice" id="mediaBatchStatus" role="status"></p>
+      <button type="button" class="secondary-button" data-media-batch-preview>预览固定输入</button>
+      <section id="mediaBatchPreview" class="media-batch-preview" hidden></section>
+      <div class="dialog-actions"><button type="button" class="secondary-button" data-media-batch-close>返回修改</button><button type="button" class="primary-button" id="mediaBatchConfirm" disabled>预览后确认生成</button></div>
+    </dialog>
+
+    <dialog class="app-dialog media-jobs-dialog" id="mediaJobsDialog" aria-labelledby="mediaJobsTitle">
+      <div class="dialog-header"><div><span class="eyebrow">真实执行 · 原项目归属</span><h2 id="mediaJobsTitle">生成任务</h2></div><button type="button" class="secondary-button compact-button" data-media-close>关闭</button></div>
+      <p class="media-help">取消等待不一定能取消远端生成或费用。恢复只查询、下载或收录已有结果，不会自动创建新生成。</p>
+      <button type="button" class="text-button" data-media-refresh>刷新任务</button><div class="media-jobs-list"></div>
+    </dialog>
     <dialog class="app-dialog form-dialog" id="claudeCredentialDialog" aria-labelledby="claudeCredentialTitle">
       <form id="claudeCredentialForm">
         <h2 id="claudeCredentialTitle">Claude CLI 凭据</h2>

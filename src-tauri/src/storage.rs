@@ -99,11 +99,30 @@ fn validate_sizes(active_bytes: usize, archive_bytes: usize) -> Result<(), Strin
     Ok(())
 }
 
+#[cfg(test)]
 fn write_library(
     connection: &mut Connection,
     payload: String,
     archive_payload: Option<String>,
     expected_revision: i64,
+) -> Result<(), String> {
+    write_library_with_media(
+        connection,
+        payload,
+        archive_payload,
+        expected_revision,
+        None,
+        None,
+    )
+}
+
+fn write_library_with_media(
+    connection: &mut Connection,
+    payload: String,
+    archive_payload: Option<String>,
+    expected_revision: i64,
+    media_import_id: Option<&str>,
+    media_root: Option<&std::path::Path>,
 ) -> Result<(), String> {
     validate_sizes(
         payload.len(),
@@ -134,6 +153,14 @@ fn write_library(
     if !archive_value.is_array() {
         return Err("归档库格式无效".into());
     }
+    if let Some(import_id) = media_import_id {
+        crate::media_package::apply_import(
+            &transaction,
+            import_id,
+            &value,
+            media_root.ok_or("完整项目包缺少媒体根目录")?,
+        )?;
+    }
     // Both snapshots are captured in the same transaction, so recovery also restores archive moves.
     transaction
         .execute(
@@ -163,12 +190,20 @@ pub(crate) fn library_write(
     payload: String,
     archive_payload: Option<String>,
     expected_revision: i64,
+    media_import_id: Option<String>,
 ) -> Result<(), String> {
-    write_library(
+    let media_root = if media_import_id.is_some() {
+        Some(crate::media::media_root(&app)?)
+    } else {
+        None
+    };
+    write_library_with_media(
         &mut database(&app)?,
         payload,
         archive_payload,
         expected_revision,
+        media_import_id.as_deref(),
+        media_root.as_deref(),
     )
 }
 

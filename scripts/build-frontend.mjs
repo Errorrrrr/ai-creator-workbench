@@ -11,7 +11,7 @@ rmSync(outputRoot, { recursive: true, force: true })
 mkdirSync(sourceOutput, { recursive: true })
 
 copyFileSync(join(projectRoot, 'index.html'), join(outputRoot, 'index.html'))
-for (const fileName of ['app.js', 'knowledge-index.js', 'project-store.js', 'semantic-search.js', 'inspirations.js', 'creation-workflow.js', 'provider-stream.js', 'updates.js', 'update-ui.js', 'styles.css']) {
+for (const fileName of ['app.js', 'knowledge-index.js', 'project-store.js', 'semantic-search.js', 'inspirations.js', 'creation-workflow.js', 'workflow-navigation.js', 'provider-stream.js', 'updates.js', 'update-ui.js', 'storyboard.js', 'media-adapters.js', 'media-workbench.js', 'project-operations.js', 'project-plan-ui.js', 'styles.css']) {
   copyFileSync(join(projectRoot, 'src', fileName), join(sourceOutput, fileName))
 }
 

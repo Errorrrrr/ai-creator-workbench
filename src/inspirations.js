@@ -140,7 +140,7 @@ export function initializeInspirations({ appendToProject }) {
     setBusy(true)
     try {
       const path = await downloadDocument('灵感库.md', items.map(item => `# ${item.title}${item.archivedAt ? '（已归档）' : ''}\n\n${item.content}`).join('\n\n---\n\n'))
-      report(`已导出到${path}；恢复用 JSON 请使用“完整备份”。`)
+      report(`已导出到${path}；恢复用 JSON 请使用“文字库备份”。`)
     } catch (error) { report(`导出失败：${error.message || error}`) }
     finally { setBusy(false) }
   })

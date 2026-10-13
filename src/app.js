@@ -4,12 +4,23 @@ import {
   searchKnowledgeIndex,
   serializeKnowledgeIndex
 } from './knowledge-index.js'
-import { initializeProjects, getActiveProject, listProjects, saveProject, createProject, activateProject, renameProject, projectBackup, parseBackup, downloadDocument, archiveProject, restoreProject, listArchivedProjects, libraryBackup, parseLibraryBackup, importLibraryBackup, readPreviousLibrary, restorePreviousLibrary, getStorageMetrics, rawLibrarySnapshot, MAX_BACKUP_BYTES } from './project-store.js'
+import { initializeProjects, getActiveProject, listProjects, saveProject, createProject, activateProject, renameProject, projectBackup, parseBackup, downloadDocument, archiveProject, restoreProject, listArchivedProjects, libraryBackup, parseLibraryBackup, importLibraryBackup, readPreviousLibrary, restorePreviousLibrary, getStorageMetrics, rawLibrarySnapshot, MAX_BACKUP_BYTES, validateWorkspace } from './project-store.js'
 import { buildSemanticIndex, semanticSearch, pruneSemanticIndex, semanticIndexCoverage } from './semantic-search.js'
 import { initializeInspirations } from './inspirations.js'
 import { initializeUpdates } from './update-ui.js'
 import { consumeProviderStream, fetchProviderResponse, providerEndpointUrl, validateProviderBaseUrl } from './provider-stream.js'
-import { prepareGeneration, projectMarkdown, planKnowledgeFiles } from './creation-workflow.js'
+import { GENERATION_CHARACTER_LIMIT, prepareGeneration, projectMarkdown, planKnowledgeFiles } from './creation-workflow.js'
+import { emptyStoryboard, normalizeStoryboard, normalizeWorkflow, resolveConnectionRoute, supportsCapability, validateStoryboard } from './storyboard.js'
+import { initializeMediaWorkbench } from './media-workbench.js'
+import { configuredMediaAdapterId, mediaAdapterFor, mediaAdaptersForKind } from './media-adapters.js'
+import { OPERATION_CONTEXT_RESERVE, captureOperationContext, materializeOperationPlan, prepareOperationRequest } from './project-operations.js'
+import { initializeProjectPlanUI } from './project-plan-ui.js'
+import { creationSteps, initializeCreationNavigation } from './workflow-navigation.js'
+
+let mediaWorkbench = null
+let projectPlanUI = null
+let creationNavigation = null
+const isProjectView = view => ['workspace', 'storyboard', 'assets'].includes(view)
 
 async function recoverStartup(error) {
   const shell = document.querySelector('#appShell')
@@ -229,30 +240,27 @@ function normalizeStructure(value, documents) {
 function normalizeConnections(value) {
   const connections = (Array.isArray(value) ? value : []).map((connection) => {
     if (!connection || typeof connection !== 'object' || typeof connection.id !== 'string') return null
-    if (!['openai-compatible', 'ollama', 'cli'].includes(connection.kind)) return null
+    if (!['openai-compatible', 'ollama', 'cli', 'image-api', 'video-api'].includes(connection.kind)) return null
     return {
       id: connection.id,
       kind: connection.kind,
       name: typeof connection.name === 'string' && connection.name.trim() ? connection.name.trim() : '未命名连接',
       baseUrl: typeof connection.baseUrl === 'string' ? connection.baseUrl : '',
       model: typeof connection.model === 'string' ? connection.model : '',
+      ...(connection.kind === 'cli' && connection.driverId === 'codex' ? { planningModel: typeof connection.planningModel === 'string' ? connection.planningModel.trim() : '' } : {}),
+      adapter: configuredMediaAdapterId(connection),
       driverId: connection.kind === 'cli' && typeof connection.driverId === 'string' ? connection.driverId : null,
       status: 'unknown',
       capabilities: Array.isArray(connection.capabilities) ? connection.capabilities.filter((item) => typeof item === 'string').slice(0, 6) : [],
       isActive: Boolean(connection.isActive),
+      defaultFor: [...new Set(Array.isArray(connection.defaultFor) ? connection.defaultFor.filter(capability => ['image', 'video'].includes(capability)) : [])],
       rememberSecret: Boolean(connection.rememberSecret),
       error: null
     }
   }).filter(Boolean)
   if (!connections.some((connection) => ['openai-compatible', 'ollama'].includes(connection.kind))) {
-    connections.unshift(structuredClone(defaultConnections[0]))
+    connections.unshift({ ...structuredClone(defaultConnections[0]), isActive: !connections.length, defaultFor: [] })
   }
-  if (!connections.some((connection) => connection.isActive)) connections[0].isActive = true
-  let foundActive = false
-  connections.forEach((connection) => {
-    if (connection.isActive && !foundActive) foundActive = true
-    else connection.isActive = false
-  })
   return connections
 }
 
@@ -371,10 +379,13 @@ const state = {
     return Object.keys(initialDocuments)[0] || null
   })(),
   currentView: 'workspace',
+  workflowStep: null,
   project: initialProject,
   documents: initialDocuments,
   structure: normalizeStructure(storedWorkspace.structure, initialDocuments),
   connections: normalizeConnections(storedWorkspace.connections),
+  workflow: normalizeWorkflow(storedWorkspace.workflow),
+  storyboard: normalizeStoryboard(storedWorkspace.storyboard),
   runtime: { platform: null, architecture: null, drivers: [], checkedAt: null, status: 'idle' },
   knowledge: {
     sources: storedSources || [],
@@ -393,6 +404,10 @@ const state = {
   activeGenerationId: null,
   generationText: '',
   generationContext: null,
+  contextReferenceKeys: [],
+  excludedContextKeys: new Map(),
+  includeCurrentContext: true,
+  includeSelectionContext: false,
   isGenerating: false,
   candidateApplying: false,
   knowledgeBusy: false,
@@ -541,6 +556,8 @@ function workspaceSnapshot() {
     versions: state.versions,
     versionCounters: state.versionCounters,
     connections: state.connections.map(connection => ({ ...connection, status: 'unknown', error: null })),
+    workflow: state.workflow,
+    storyboard: state.storyboard,
     knowledge: { sources: state.knowledge.sources, selectedChunkIds: state.knowledge.selectedChunkIds, semantic: state.knowledge.semantic },
     theme: document.documentElement.dataset.theme
   }
@@ -550,7 +567,7 @@ let saveSequence = 0
 let pendingSaves = 0
 let unsavedEdits = false
 let editRevision = 0
-async function persistWorkspace() {
+async function persistWorkspace({ onError } = {}) {
   const sequence = ++saveSequence
   const revision = editRevision
   pendingSaves += 1
@@ -566,7 +583,9 @@ async function persistWorkspace() {
   } catch (error) {
     state.storageFailed = true
     setSaveStatus('error')
-    showToast(readableError(error, '保存失败，请先导出备份'))
+    const message = readableError(error, '保存失败，请先导出备份')
+    showToast(message)
+    onError?.(message)
     return false
   } finally { pendingSaves -= 1 }
 }
@@ -581,7 +600,7 @@ function getParentEpisodeId(documentId) {
 }
 
 function getDocumentKind(documentId) {
-  if (CORE_DOCUMENT_IDS.includes(documentId)) return 'core'
+  if (CORE_DOCUMENT_IDS.includes(documentId) || documentId === 'draft') return 'core'
   if (state.structure.episodes[documentId]) return 'episode'
   return getParentEpisodeId(documentId) ? 'scene' : 'document'
 }
@@ -666,7 +685,7 @@ function renderProjectTree() {
   coreList.className = 'tree-list'
   coreList.setAttribute('role', 'tree')
   coreList.setAttribute('aria-label', '前期创作内容')
-  CORE_DOCUMENT_IDS.forEach((documentId) => {
+  CORE_DOCUMENT_IDS.concat('draft').forEach((documentId) => {
     if (state.documents[documentId]) coreList.append(renderTreeDocumentButton(documentId, 'core', 0))
   })
   coreSection.append(coreHeading, coreList)
@@ -749,7 +768,8 @@ function updateStageAdvanceButton() {
   const labelByDocument = {
     idea: '进入创作简报', brief: '完善世界观', world: '塑造人物', characters: '形成全剧大纲', outline: '拆分为分集'
   }
-  const label = labelByDocument[state.currentDocId]
+  const textLabel = { idea: '进入创作简报', brief: '整理大纲', outline: '开始正文', draft: '审阅与导出' }
+  const label = (state.workflow.preset === 'text' ? textLabel[state.currentDocId] : null) || (state.currentDocId === 'outline' ? '开始剧本创作' : labelByDocument[state.currentDocId])
     || (kind === 'episode' ? '拆分为分场' : kind === 'scene' ? '新增下一场' : '下一步')
   elements.stageAdvanceButton.querySelector('span').textContent = label
   elements.stageAdvanceButton.setAttribute('aria-label', label)
@@ -770,6 +790,7 @@ function renderProjectIdentity() {
   document.querySelector('#projectBreadcrumb').textContent = state.project.name
   renderProjectTree()
   updateStageAdvanceButton()
+  creationNavigation?.render()
 
   const episodeCommand = document.querySelector('#command-episode')
   const commandEpisodeId = getEpisodeIds().at(-1)
@@ -958,6 +979,7 @@ function updateDocumentView({ keepFocus = false } = {}) {
   updateEditorMetrics()
   updateAssistantProfile()
   updateStageAdvanceButton()
+  creationNavigation?.render()
   setSaveStatus(state.storageFailed ? 'error' : pendingSaves ? 'saving' : unsavedEdits ? 'dirty' : 'saved')
   if (keepFocus) {
     if (isReadOnly) {
@@ -1015,19 +1037,61 @@ async function saveImmediately({ announce = true } = {}) {
 }
 
 async function selectDocument(documentId) {
-  if (projectTransition) return
-  if (state.candidateApplying) return showToast('正在保存候选，请稍候再切换内容')
-  if (!state.documents[documentId]) return
+  if (projectTransition) return false
+  if (state.candidateApplying) { showToast('正在保存候选，请稍候再切换内容'); return false }
+  if (!state.documents[documentId]) return false
   const projectId = activeProjectId
-  if (!await saveImmediately({ announce: false })) return
-  if (projectTransition || projectId !== activeProjectId) return
+  if (!await saveImmediately({ announce: false })) return false
+  if (projectTransition || projectId !== activeProjectId) return false
   abandonCandidateOnContextChange(documentId, 'script')
+  state.workflowStep = null
   state.currentDocId = documentId
   state.activeTab = 'script'
   switchView('workspace')
   updateDocumentView({ keepFocus: true })
-  await persistWorkspace()
+  const saved = await persistWorkspace()
   closeDrawers()
+  return saved
+}
+
+async function navigateCreationStep(step) {
+  if (!activeProjectId || projectTransition || state.candidateApplying) return false
+  const owner = activeProjectId
+  if (step.id === 'script') {
+    const current = getDocumentKind(state.currentDocId)
+    const target = ['episode', 'scene'].includes(current) ? state.currentDocId : getEpisodeIds()[0]
+    if (!target) { openNewContentDialog({ type: 'episode' }); return false }
+    return selectDocument(target)
+  }
+  if (step.id === 'draft' && !state.documents.draft) {
+    if (state.isGenerating) throw new Error('请先等待或停止当前文字任务，再创建正文')
+    if (!await saveImmediately({ announce: false }) || owner !== activeProjectId || projectTransition) return false
+    state.candidateApplying = true; setProjectTransition(true)
+    try {
+      const next = structuredClone(workspaceSnapshot())
+      next.documents.draft = { ...createGenericDocument('draft', '正文'), intent: '按创作简报和大纲完成内容，保留自己的表达与事实依据。', meta: [state.project.type] }
+      next.tabContents.draft = structuredClone(tabFallbacks)
+      next.versions.draft = []; next.versionCounters.draft = 0
+      next.currentDocId = 'draft'; next.activeTab = 'script'
+      validateWorkspace(next, state.knowledge.index)
+      await saveProject(owner, next, state.knowledge.index)
+      abandonCandidateOnContextChange('draft', 'script')
+      for (const key of ['documents', 'tabContents', 'versions', 'versionCounters', 'currentDocId', 'activeTab']) state[key] = next[key]
+      renderProjectIdentity(); switchView('workspace'); updateDocumentView()
+      setSaveStatus('saved')
+    } finally { state.candidateApplying = false; setProjectTransition(false) }
+  } else if (step.documentId || step.id === 'source') {
+    const target = step.documentId || state.currentDocId
+    if (!state.documents[target]) throw new Error('此项目没有对应文档，请从目录选择已有内容或创建新内容')
+    if (!await selectDocument(target)) return false
+  } else {
+    if (!await saveImmediately({ announce: false }) || owner !== activeProjectId || projectTransition) return false
+    switchView(step.view || 'workspace')
+    closeDrawers()
+  }
+  state.workflowStep = step.id
+  creationNavigation?.render()
+  return true
 }
 
 async function switchTab(tabName, { focusEditor = true } = {}) {
@@ -1049,18 +1113,25 @@ function switchView(viewName) {
   if (viewName === 'knowledge') renderKnowledge()
   if (viewName === 'connections') renderConnections()
   if (viewName === 'inspirations') inspirationUI.render()
+  if (['storyboard', 'assets'].includes(viewName)) mediaWorkbench?.refresh()
+  if (state.currentView !== viewName) state.workflowStep = null
   state.currentView = viewName
   document.querySelectorAll('.view-panel').forEach((panel) => {
     panel.hidden = panel !== view
   })
   document.querySelectorAll('.rail-button[data-view-target]').forEach((button) => {
-    const isActive = button.dataset.viewTarget === viewName
+    const isActive = button.dataset.viewTarget === viewName || (button.dataset.viewTarget === 'workspace' && isProjectView(viewName))
     button.classList.toggle('is-active', isActive)
     if (isActive) button.setAttribute('aria-current', 'page')
     else button.removeAttribute('aria-current')
   })
-  elements.appShell.classList.toggle('secondary-view', viewName !== 'workspace')
-  if (viewName !== 'workspace') closeDrawers()
+  document.querySelectorAll('.project-modes [data-view-target]').forEach(button => {
+    if (button.dataset.viewTarget === viewName) button.setAttribute('aria-current', 'page')
+    else button.removeAttribute('aria-current')
+  })
+  elements.appShell.classList.toggle('secondary-view', !isProjectView(viewName))
+  creationNavigation?.render()
+  if (!isProjectView(viewName)) closeDrawers()
   else syncAssistantAccessibility()
   document.querySelector('#workspaceMain').focus({ preventScroll: true })
   window.requestAnimationFrame(() => { view.scrollTop = 0 })
@@ -1090,7 +1161,7 @@ function toggleAssistant(forceOpen) {
 
 function syncAssistantAccessibility() {
   const usesDrawer = window.matchMedia('(max-width: 1099px)').matches
-  const isOpen = !elements.appShell.classList.contains('no-project') && state.currentView === 'workspace' && (usesDrawer
+  const isOpen = !elements.appShell.classList.contains('no-project') && isProjectView(state.currentView) && (usesDrawer
     ? elements.appShell.classList.contains('assistant-open')
     : !elements.appShell.classList.contains('assistant-collapsed'))
   const topbarToggle = document.querySelector('.titlebar [data-action="toggle-assistant"]')
@@ -1100,7 +1171,7 @@ function syncAssistantAccessibility() {
   elements.assistantPanel.inert = !isOpen
   elements.assistantPanel.setAttribute('aria-hidden', String(!isOpen))
   const explorerUsesDrawer = window.matchMedia('(max-width: 899px)').matches
-  const explorerOpen = state.currentView === 'workspace' && explorerUsesDrawer && elements.appShell.classList.contains('explorer-open')
+  const explorerOpen = isProjectView(state.currentView) && explorerUsesDrawer && elements.appShell.classList.contains('explorer-open')
   const explorerToggle = document.querySelector('[data-action="toggle-explorer"]')
   explorerToggle?.setAttribute('aria-expanded', String(explorerOpen))
   explorerToggle?.setAttribute('aria-label', explorerOpen ? '关闭内容导航' : '打开内容导航')
@@ -1218,6 +1289,21 @@ const assistantProfiles = {
       ['检查节奏', '找出重复或停滞段落', '检查当前大纲是否有重复推进或主线停滞。']
     ]
   },
+  draft: {
+    eyebrow: '针对当前正文',
+    title: '把方向写成自己的内容',
+    description: '结合简报、大纲和已选资料生成文字候选；你决定修改与采纳。',
+    placeholder: '描述主题、读者、结构或需要修改的段落…',
+    context: ['创作简报', '内容大纲'],
+    progress: '正在整理正文候选',
+    disclaimer: '采纳前请核对事实、引用和表达，AI 不会自动覆盖正文。',
+    actions: [
+      ['起草正文', '按简报与大纲展开内容', '结合创作简报和大纲起草正文，不编造事实或引用。'],
+      ['局部修改', '保留观点，改进表达', '保留当前观点，改善正文的结构和表达。'],
+      ['精简内容', '去掉重复和空泛段落', '精简当前正文，保留关键事实和有价值的论述。'],
+      ['核对依据', '标出需要查证的信息', '指出正文中需要查证的事实或引用，不把推测当作已确认信息。']
+    ]
+  },
   references: {
     eyebrow: '针对设定引用',
     title: '检查证据与既有事实',
@@ -1253,7 +1339,7 @@ const assistantProfiles = {
 function getAssistantProfileKey() {
   if (state.activeTab === 'outline') return 'outline'
   if (state.activeTab === 'references') return 'references'
-  if (['idea', 'brief', 'world', 'characters', 'outline'].includes(state.currentDocId)) return state.currentDocId
+  if (['idea', 'brief', 'world', 'characters', 'outline', 'draft'].includes(state.currentDocId)) return state.currentDocId
   return 'script'
 }
 
@@ -1296,30 +1382,132 @@ function updateCandidateCitations(chunks) {
 }
 
 
-function generationDraft(prompt) {
-  return prepareGeneration({
+function projectOperationContext() {
+  return { projectId: activeProjectId, workspace: workspaceSnapshot(), media: mediaWorkbench?.operationContext() }
+}
+
+function generationDraft(prompt, purpose = document.querySelector('#assistantRequestMode').value) {
+  const discussionInstruction = purpose === 'discussion' ? '\n本次仅讨论与分析，给出建议，不提供可自动执行的项目操作，不声称修改项目。' : ''
+  const availableObjects = contextObjects()
+  const objectReferences = state.contextReferenceKeys.map(key => availableObjects.find(item => item.key === key))
+  if (objectReferences.some(item => !item)) throw new Error('已引用对象或固定素材版本不再可用，请移除失效引用再发送。')
+  const selectedText = state.includeSelectionContext ? editorSelection() : ''
+  if (state.includeSelectionContext && !selectedText) throw new Error('编辑器选区已失效，请重新选择或关闭选区上下文。')
+  const draft = prepareGeneration({
     project: state.project, documentId: state.currentDocId, tabName: state.activeTab,
     documents: state.documents, tabContents: state.tabContents, structure: state.structure, prompt,
     includeUpstream: document.querySelectorAll('.context-chip')[0]?.getAttribute('aria-pressed') === 'true',
     includeCharacters: document.querySelectorAll('.context-chip')[1]?.getAttribute('aria-pressed') === 'true',
-    knowledgeChunks: getSelectedKnowledgeChunks()
+    knowledgeChunks: getSelectedKnowledgeChunks(), includeCurrent: state.includeCurrentContext,
+    selectedText, objectReferences, excludedContextKeys: [...state.excludedContextKeys.keys()],
+    characterLimit: GENERATION_CHARACTER_LIMIT - (purpose === 'project-plan' ? OPERATION_CONTEXT_RESERVE : discussionInstruction.length)
   })
+  if (purpose === 'project-plan') return prepareOperationRequest(draft, captureOperationContext(projectOperationContext(), draft.summary))
+  if (purpose === 'discussion') {
+    draft.messages[0].content += discussionInstruction
+    draft.characters += discussionInstruction.length
+  }
+  return draft
+}
+
+function editorSelection() {
+  if (!['script', 'outline'].includes(state.activeTab)) return ''
+  return elements.scriptEditor.value.slice(elements.scriptEditor.selectionStart, elements.scriptEditor.selectionEnd)
+}
+
+function contextObjects() {
+  const documents = Object.entries(state.documents).map(([id, doc]) => ({ key: `document:${id}`, label: doc.title, kind: '文档', content: doc.content }))
+  return [...documents, ...(mediaWorkbench?.contextObjects() || [])]
+}
+
+function renderContextObjects() {
+  const host = document.querySelector('#contextObjectReferences')
+  if (!host) return
+  const objects = contextObjects()
+  host.replaceChildren()
+  for (const key of state.contextReferenceKeys) {
+    const item = objects.find(item => item.key === key)
+    const remove = document.createElement('button')
+    remove.type = 'button'; remove.className = 'object-reference-chip'
+    remove.textContent = `${item ? `${item.kind} · ${item.label}` : '引用已失效'} ×`
+    remove.setAttribute('aria-label', `移除引用：${item?.label || key}`)
+    remove.addEventListener('click', () => { state.contextReferenceKeys = state.contextReferenceKeys.filter(value => value !== key); renderContextPreview() })
+    host.append(remove)
+  }
+  const list = document.querySelector('#contextObjectList')
+  const query = document.querySelector('#contextObjectSearch').value.trim().toLowerCase()
+  list.replaceChildren()
+  const matches = objects.filter(item => `${item.kind} ${item.label}`.toLowerCase().includes(query))
+  for (const item of matches.slice(0, 40)) {
+    const add = document.createElement('button')
+    add.type = 'button'; add.className = 'context-object-option'; add.textContent = `${item.kind} · ${item.label}`
+    add.disabled = state.contextReferenceKeys.includes(item.key)
+    if (add.disabled) add.textContent += ' · 已加入'
+    add.addEventListener('click', () => {
+      if (state.contextReferenceKeys.length >= 8) return showToast('本次最多主动引用 8 个对象；可先移除不需要的内容')
+      state.contextReferenceKeys.push(item.key)
+      const position = elements.promptInput.selectionStart
+      const prefix = elements.promptInput.value.slice(0, position)
+      const match = prefix.match(/(?:^|\s)@([^\s@]*)$/u)
+      if (match) {
+        const start = prefix.lastIndexOf('@')
+        elements.promptInput.setRangeText(`@${item.label} `, start, position, 'end')
+      }
+      document.querySelector('#contextObjectPicker').open = false
+      renderContextPreview(); elements.promptInput.focus()
+    })
+    list.append(add)
+  }
+  if (!matches.length) list.textContent = activeProjectId ? '没有匹配对象；可先创作文档或创建镜头、素材。' : '创建或打开项目后可选择对象。'
+  if (matches.length > 40) {
+    const hint = document.createElement('p'); hint.textContent = `还有 ${matches.length - 40} 项，请输入名称缩小范围。`; list.append(hint)
+  }
+}
+
+function removeContextItem(item) {
+  if (item.key === 'current') state.includeCurrentContext = false
+  else if (item.key === 'selection') state.includeSelectionContext = false
+  else if (item.key.startsWith('object:')) state.contextReferenceKeys = state.contextReferenceKeys.filter(key => key !== item.key.slice(7))
+  else if (item.key.startsWith('knowledge:')) {
+    state.knowledge.selectedChunkIds = state.knowledge.selectedChunkIds.filter(id => id !== item.key.slice(10))
+    syncCurrentDocumentReferences(); scheduleSave(); renderKnowledge()
+  } else state.excludedContextKeys.set(item.key, item.label)
+  renderContextPreview()
 }
 
 function renderContextPreview(draft = null) {
+  creationNavigation?.render()
   const list = document.querySelector('#contextPreviewList')
   if (!list) return
   list.replaceChildren()
-  if (!getCurrentDocument()) return
+  document.querySelector('#contextPreviewMessages').textContent = ''
+  document.querySelector('#contextExcludedList').replaceChildren()
+  document.querySelector('#includeCurrentContext').checked = state.includeCurrentContext
+  document.querySelector('#includeSelectionContext').checked = state.includeSelectionContext
+  renderContextObjects()
+  if (!getCurrentDocument()) { document.querySelector('#contextPreviewSummary').textContent = '创建或打开项目后查看发送范围'; return }
   try {
     const preview = draft || generationDraft(elements.promptInput.value.trim())
     document.querySelector('#contextPreviewSummary').textContent = `发送范围 · ${preview.characters.toLocaleString('zh-CN')} 字符${preview.truncated ? ' · 部分已截断' : ''}`
     for (const item of preview.summary) {
       const line = document.createElement('li')
-      line.textContent = `${item.label} · ${item.characters} 字符${item.truncated ? `（原 ${item.originalCharacters}，已截断）` : ''}`
+      const details = document.createElement('details'), summary = document.createElement('summary'), content = document.createElement('pre')
+      summary.textContent = `${item.label} · ${item.characters} 字符${item.truncated ? `（原 ${item.originalCharacters}，已截断）` : ''}`
+      content.textContent = item.content || '本项未发送：请求预算不足。'
+      details.append(summary, content)
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'text-button'; remove.textContent = '移出下次请求'
+      remove.setAttribute('aria-label', `移出下次请求：${item.label}`); remove.addEventListener('click', () => removeContextItem(item))
+      line.append(details)
+      if (!item.required) line.append(remove)
       list.append(line)
     }
-    if (!preview.summary.length) list.textContent = '当前正文为空，将只发送项目名称和创作要求。'
+    document.querySelector('#contextPreviewMessages').textContent = JSON.stringify(preview.messages, null, 2)
+    const excluded = document.querySelector('#contextExcludedList'); excluded.replaceChildren()
+    for (const [key, label] of state.excludedContextKeys) {
+      const restore = document.createElement('button'); restore.type = 'button'; restore.className = 'text-button'; restore.textContent = `加回：${label}`
+      restore.addEventListener('click', () => { state.excludedContextKeys.delete(key); renderContextPreview() }); excluded.append(restore)
+    }
+    if (!preview.summary.length) list.textContent = '未携带正文或资料，仅发送项目标题和创作要求。'
   } catch (error) { list.textContent = readableError(error) }
 }
 
@@ -1338,13 +1526,13 @@ function appendGenerationDelta(delta, generationId = state.activeGenerationId) {
 let cliSessionConsent = null
 
 function confirmCliGeneration(connection, boundary, signal) {
-  const consentKey = JSON.stringify([connection.id, connection.driverId, boundary])
+  const consentKey = JSON.stringify([connection.id, connection.driverId, connection.planningModel || '', boundary])
   if (signal.aborted) return Promise.resolve(false)
   if (cliSessionConsent === consentKey) return Promise.resolve(true)
   const dialog = document.querySelector('#cliConsentDialog')
   const remember = document.querySelector('#cliConsentRemember')
   remember.checked = false
-  document.querySelector('#cliConsentSummary').textContent = `本次将使用 ${connection.name} 的账号，发送提示词及选中的项目与知识上下文，可能消耗账号额度。`
+  document.querySelector('#cliConsentSummary').textContent = `本次将使用 ${connection.name}${connection.driverId === 'codex' ? `（规划模型：${connection.planningModel || '跟随本机 CLI 配置'}）` : ''} 的账号，发送提示词及选中的项目与知识上下文，可能消耗账号额度。`
   document.querySelector('#cliConsentBoundary').textContent = boundary
   dialog.returnValue = ''
   return new Promise((resolve) => {
@@ -1373,7 +1561,7 @@ async function generateWithConnection(connection, prompt, generationId, submitte
     const cliBoundary = connection.driverId === 'antigravity'
       ? 'agy 会读取自身用户配置（包括权限、插件和 hooks），并可能保存会话；它不是无工具模式。使用 plan 模式和终端 sandbox。'
       : connection.driverId === 'codex'
-        ? 'Codex 使用已有登录态、只读执行模式和临时工作目录，不读取用户 config.toml 或 execpolicy rules，不保留本次会话。只读不等于禁止读取本机信息；不复用自定义模型供应商配置。'
+        ? 'Codex 使用现有 CLI 登录态和模型设置，生成仍采用只读模式和临时工作目录。仅由 CLI 读取模型配置，不继承用户 hooks、MCP、execpolicy rules 或自定义供应商，不保留本次会话。只读不等于禁止读取本机信息。'
         : 'Claude 优先使用已配置 API Key；否则尝试已有 CLI 登录态。禁用内置工具、外部 MCP、技能和普通 hooks；不保留会话。组织托管策略仍可能生效，CLI 可能读取自身用户上下文。'
     if (allowUserProfile && !await confirmCliGeneration(connection, cliBoundary, controller.signal)) {
       if (generationId === state.activeGenerationId && state.isGenerating) {
@@ -1405,7 +1593,7 @@ async function generateWithConnection(connection, prompt, generationId, submitte
           taskId: String(generationId),
           kind: connection.kind,
           baseUrl: connection.baseUrl || '',
-          model: connection.model || '',
+          model: connection.kind === 'cli' ? connection.driverId === 'codex' ? connection.planningModel || '' : '' : connection.model || '',
           apiKey: secret || null,
           driverId: connection.kind === 'cli' ? connection.driverId : null,
           allowUserProfile,
@@ -1420,7 +1608,7 @@ async function generateWithConnection(connection, prompt, generationId, submitte
       response = await fetch('/api/runtime/cli/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ driverId: connection.driverId, messages, allowUserProfile }),
+        body: JSON.stringify({ driverId: connection.driverId, model: connection.driverId === 'codex' ? connection.planningModel || '' : '', messages, allowUserProfile }),
         signal: controller.signal
       })
       const payload = await response.json().catch(() => ({}))
@@ -1476,12 +1664,14 @@ function failGeneration(message, generationId = state.activeGenerationId) {
   window.clearInterval(state.generationTimer)
   state.generationTimer = null
   state.isGenerating = false
+  document.querySelector('#assistantRequestMode').disabled = false
   elements.sendButton.classList.remove('is-generating')
   elements.sendButton.setAttribute('aria-label', '执行 AI 请求')
   elements.sendButton.setAttribute('title', '执行 AI 请求')
   elements.generationState.hidden = true
   elements.candidateCard.classList.add('has-error')
   const hasPartial = Boolean(state.generationText.trim())
+  document.querySelector('#reviewProjectPlan').disabled = !hasPartial
   if (!hasPartial) elements.candidateContent.textContent = '未生成可用的候选内容。'
   elements.generationError.hidden = false
   elements.generationError.textContent = `${message}。原消息已保留在对话区，可点击“重新生成”重试${hasPartial ? '，上方部分结果仍可审阅或采纳' : ''}。`
@@ -1492,7 +1682,7 @@ function failGeneration(message, generationId = state.activeGenerationId) {
   showToast(message)
 }
 
-function startGeneration(prompt, { clearComposer = true } = {}) {
+function startGeneration(prompt, { clearComposer = true, purpose = null, connectionId = null, sourceFingerprint = '', storyboardRevision = null } = {}) {
   if (state.candidateApplying) return showToast('候选正在保存，请稍候')
   if (!getCurrentDocument()) return openDialog(elements.newProjectDialog)
   if (state.isGenerating) {
@@ -1509,13 +1699,19 @@ function startGeneration(prompt, { clearComposer = true } = {}) {
     showToast('历史版本为只读，请先切换到剧本或大纲')
     return
   }
-  const connection = getActiveConnection()
+  const route = resolveConnectionRoute(connectionId ? { connections: state.connections, workflow: { textConnectionId: connectionId } } : state, 'text')
+  const connection = route.connection
   if (!connection) {
-    showToast('请先在连接中心配置一个执行端')
+    showToast(route.error)
     return
   }
+  purpose ||= document.querySelector('#assistantRequestMode').value
+  if (['text', 'discussion', 'project-plan'].includes(purpose)) {
+    document.querySelector('#assistantRequestMode').value = purpose
+    document.querySelector('#reviewExistingPlan').hidden = purpose !== 'project-plan'
+  }
   let prepared
-  try { prepared = generationDraft(cleanPrompt) }
+  try { prepared = generationDraft(cleanPrompt, purpose) }
   catch (error) { showToast(readableError(error)); return }
   renderContextPreview(prepared)
   state.lastPrompt = cleanPrompt
@@ -1523,7 +1719,13 @@ function startGeneration(prompt, { clearComposer = true } = {}) {
   const generationId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${sequence}`
   state.activeGenerationId = generationId
   state.isGenerating = true
+  document.querySelector('#assistantRequestMode').disabled = true
   state.generationContext = {
+    projectId: activeProjectId,
+    purpose,
+    sourceFingerprint,
+    storyboardRevision,
+    operationContext: prepared.operationContext || null,
     documentId: state.currentDocId,
     tabName: state.activeTab,
     title: getCurrentDocument().title,
@@ -1533,6 +1735,7 @@ function startGeneration(prompt, { clearComposer = true } = {}) {
     knowledgeChunks: prepared.knowledgeChunks,
     messages: prepared.messages
   }
+  document.querySelector('#sentContextMessages').textContent = JSON.stringify(prepared.messages, null, 2)
   const profileKey = getAssistantProfileKey()
   const profile = assistantProfiles[profileKey]
   state.generationText = ''
@@ -1543,7 +1746,9 @@ function startGeneration(prompt, { clearComposer = true } = {}) {
   elements.generationError.hidden = true
   elements.generationError.textContent = ''
   elements.candidateCard.classList.remove('has-error')
-  elements.candidateActions.querySelectorAll('[data-action="apply-candidate"]').forEach((button) => { button.disabled = false })
+  elements.candidateActions.querySelectorAll('[data-action="apply-candidate"]').forEach((button) => { button.disabled = false; button.hidden = purpose !== 'text' })
+  document.querySelector('#reviewProjectPlan').hidden = purpose !== 'project-plan'
+  elements.candidateCard.querySelector('.candidate-warning').textContent = purpose === 'discussion' ? '讨论建议 · 不修改项目' : purpose === 'project-plan' ? '项目修改计划 · 尚未执行' : '尚未写入正文'
   elements.generationState.hidden = false
   elements.generationState.lastElementChild.textContent = profile.progress
   elements.candidateActions.hidden = true
@@ -1561,6 +1766,7 @@ function finishGeneration({ stopped = false, silent = false, generationId = stat
   window.clearInterval(state.generationTimer)
   state.generationTimer = null
   state.isGenerating = false
+  document.querySelector('#assistantRequestMode').disabled = false
   elements.sendButton.classList.remove('is-generating')
   elements.sendButton.setAttribute('aria-label', '执行 AI 请求')
   elements.sendButton.setAttribute('title', '执行 AI 请求')
@@ -1568,6 +1774,7 @@ function finishGeneration({ stopped = false, silent = false, generationId = stat
   elements.candidateActions.hidden = false
   elements.generationError.hidden = true
   const hasCandidate = Boolean(elements.candidateContent.textContent.trim())
+  document.querySelector('#reviewProjectPlan').disabled = !hasCandidate
   elements.candidateActions.querySelectorAll('[data-action="apply-candidate"]').forEach((button) => {
     button.disabled = !hasCandidate
   })
@@ -1577,6 +1784,7 @@ function finishGeneration({ stopped = false, silent = false, generationId = stat
     : 'AI 候选内容已生成，尚未写入正文'
   elements.a11yAnnouncements.textContent = announcement
   if (stopped && !silent) showToast(hasCandidate ? '已停止生成，部分内容仍可采纳' : '已停止生成，未收到候选内容')
+  if (hasCandidate && state.generationContext?.purpose === 'storyboard' && state.generationContext.projectId === activeProjectId) mediaWorkbench?.receiveCandidate(elements.candidateContent.textContent, state.generationContext)
 }
 
 function stopGeneration() {
@@ -1626,6 +1834,8 @@ async function applyCandidate(mode = 'append') {
   const candidate = elements.candidateContent.textContent.trim()
   const context = state.generationContext
   if (!candidate || !context) return
+  if (context.purpose === 'storyboard') return mediaWorkbench?.applyCandidate(mode === 'replace')
+  if (context.purpose && context.purpose !== 'text') return showToast('此请求不是文字候选，请使用对应的审阅入口')
   if (context.documentId !== state.currentDocId || context.tabName !== state.activeTab) return showToast('候选属于另一文档，未写入正文')
   const previousText = getContentAt(context.documentId, context.tabName)
   if (mode === 'replace' && previousText !== context.baseContent) return showToast('生成后正文已有修改，请选择插入或追加以保留修改')
@@ -1793,6 +2003,7 @@ let dialogReturnFocus = null
 function openDialog(dialog) {
   if (dialog === elements.newProjectDialog) {
     document.querySelector('#projectName').value = ''
+    document.querySelector('#projectFlowPreset').value = 'script'
     dialog.querySelector('[type="submit"]').textContent = '创建项目'
   }
   if (!dialog || dialog.open) return
@@ -1804,6 +2015,7 @@ function openDialog(dialog) {
 
 function closeDialog(button) {
   const dialog = button.closest('dialog')
+  if (dialog === elements.connectionDialog && document.querySelector('#connectionForm').dataset.saving === 'true') return
   if (dialog === elements.connectionDialog) invalidateConnectionDraftTest()
   dialog?.close()
 }
@@ -2251,7 +2463,31 @@ async function syncKnowledge({ announce = true } = {}) {
 }
 
 function getActiveConnection() {
-  return state.connections.find((connection) => connection.isActive) || state.connections[0]
+  return resolveConnectionRoute(state, 'text').connection
+}
+
+function renderGlobalExecutors() {
+  const host = document.querySelector('#globalExecutors')
+  host.replaceChildren()
+  for (const [capability, name] of [['text', '文字'], ['image', '图片'], ['video', '视频']]) {
+    const label = document.createElement('label'), title = document.createElement('span'), select = document.createElement('select')
+    label.className = 'media-field'
+    title.textContent = `${name}默认`
+    select.setAttribute('aria-label', `全局${name}默认执行端`)
+    const route = resolveConnectionRoute({ connections: state.connections }, capability)
+    select.append(new Option(route.error && route.source === 'global' && !route.selectedId && route.error.startsWith('存在多个') ? route.error : '不设默认 · 项目需自行选择', ''))
+    for (const connection of state.connections.filter(item => supportsCapability(item, capability))) {
+      select.append(new Option(`${connection.name}${connection.kind === 'cli' ? ' · CLI' : ''}`, connection.id))
+    }
+    if (route.selectedId && ![...select.options].some(option => option.value === route.selectedId)) select.append(new Option(route.error, route.selectedId))
+    select.value = route.selectedId
+    select.addEventListener('change', () => { select.disabled = true; void setGlobalExecutor(capability, select.value) })
+    label.append(title, select); host.append(label)
+  }
+  const help = document.createElement('p')
+  help.className = 'media-help'
+  help.textContent = '拆镜未单独选择时先沿用项目文字，再沿用全局文字。默认只决定路由，不代表登录、额度或生成能力已验证。'
+  host.append(help)
 }
 
 function getConnectionStatusCopy(connection) {
@@ -2284,10 +2520,10 @@ function createConnectionCard(connection) {
   const name = document.createElement('h3')
   name.textContent = connection.name
   nameRow.append(name)
-  if (connection.isActive) {
+  if (connection.isActive || connection.defaultFor?.length) {
     const badge = document.createElement('span')
     badge.className = 'default-badge'
-    badge.textContent = '当前'
+    badge.textContent = [connection.isActive ? '全局文字默认' : '', ...(connection.defaultFor || []).map(capability => `全局${capability === 'image' ? '图片' : '视频'}默认`)].filter(Boolean).join(' · ')
     nameRow.append(badge)
   }
   const detail = document.createElement('p')
@@ -2315,13 +2551,13 @@ function createConnectionCard(connection) {
 
   const actions = document.createElement('div')
   actions.className = 'connection-card-actions'
-  if (!connection.isActive) {
+  if (getActiveConnection()?.id !== connection.id && supportsCapability(connection, 'text')) {
     const useButton = document.createElement('button')
     useButton.type = 'button'
     useButton.className = 'secondary-button compact-button'
     useButton.dataset.action = 'activate-connection'
     useButton.dataset.connectionId = connection.id
-    useButton.textContent = '设为当前 AI'
+    useButton.textContent = activeProjectId ? '用于当前项目文字' : '设为全局文字默认'
     actions.append(useButton)
   }
   const testButton = document.createElement('button')
@@ -2329,7 +2565,10 @@ function createConnectionCard(connection) {
   testButton.className = 'secondary-button compact-button'
   testButton.dataset.action = 'test-connection'
   testButton.dataset.connectionId = connection.id
-  testButton.textContent = '测试'
+  testButton.textContent = ['image-api', 'video-api'].includes(connection.kind) ? '检查配置' : '测试'
+  if (['image-api', 'video-api'].includes(connection.kind)) {
+    testButton.dataset.action = 'configure-provider'
+  }
   testButton.disabled = connection.status === 'testing' || connectionBatchTesting
   actions.append(testButton)
   const editButton = document.createElement('button')
@@ -2356,7 +2595,7 @@ function renderRuntimeDrivers() {
   } else if (!state.runtime.drivers.length) {
     const empty = document.createElement('div')
     empty.className = 'connection-empty-state'
-    empty.textContent = state.runtime.status === 'error' ? '本机运行桥不可用，请通过 npm run dev 启动。' : '尚未检测本机 CLI。'
+    empty.textContent = state.runtime.status === 'error' ? '本机运行时检测失败，请重新检测。原执行端选择已保留，未自动切换资源。' : '尚未检测本机 CLI。'
     fragment.append(empty)
   } else {
     state.runtime.drivers.forEach((driver) => {
@@ -2418,7 +2657,7 @@ function renderRuntimeDrivers() {
         : driver.id === 'antigravity' && isReady
         ? '先在终端运行 agy 登录；使用默认模型。每次调用需确认用户配置与额度，不是无工具模式。'
         : driver.id === 'codex' && isReady
-          ? '先运行 codex login。使用默认供应商与模型；已安装不代表登录或额度已验证。'
+          ? `沿用现有 Codex CLI 登录态。规划模型：${connection?.planningModel || '跟随本机 CLI 配置'}；不复用自定义供应商。已安装或已配置不代表账号可用。`
         : driver.id === 'claude' && isReady
           ? '配置 API Key 或先运行 claude auth login。未配 Key 时尝试已有登录态；Intel 兼容模式不是禁用原因。'
         : isReady && driver.executionStatus === 'disabled'
@@ -2434,18 +2673,27 @@ function renderRuntimeDrivers() {
               : '可选'
       const actions = document.createElement('div')
       actions.className = 'connection-card-actions'
-      if (canGenerate && !connection.isActive) {
+      if (driver.id === 'codex' && connection) {
+        const modelButton = document.createElement('button')
+        modelButton.type = 'button'
+        modelButton.className = 'secondary-button compact-button'
+        modelButton.dataset.action = 'configure-cli-model'
+        modelButton.dataset.connectionId = connection.id
+        modelButton.textContent = '模型设置'
+        actions.append(modelButton)
+      }
+      if (canGenerate && getActiveConnection()?.id !== connection.id) {
         const useButton = document.createElement('button')
         useButton.type = 'button'
         useButton.className = 'secondary-button compact-button'
         useButton.dataset.action = 'activate-connection'
         useButton.dataset.connectionId = connection.id
-        useButton.textContent = '设为当前 AI'
+        useButton.textContent = activeProjectId ? '用于当前项目文字' : '设为全局文字默认'
         actions.append(useButton)
-      } else if (connection?.isActive) {
+      } else if (connection && getActiveConnection()?.id === connection.id) {
         const badge = document.createElement('span')
         badge.className = 'default-badge'
-        badge.textContent = '当前'
+        badge.textContent = activeProjectId ? '当前项目文字' : '全局文字默认'
         actions.append(badge)
       }
       card.append(brand, copy, capabilities, health, note, actions)
@@ -2456,21 +2704,23 @@ function renderRuntimeDrivers() {
 }
 
 function renderConnections() {
+  renderGlobalExecutors()
   const apiList = document.querySelector('#apiConnectionList')
   const localList = document.querySelector('#localConnectionList')
-  apiList.replaceChildren(...state.connections.filter((connection) => connection.kind === 'openai-compatible').map(createConnectionCard))
+  apiList.replaceChildren(...state.connections.filter((connection) => ['openai-compatible', 'image-api', 'video-api'].includes(connection.kind)).map(createConnectionCard))
   localList.replaceChildren(...state.connections.filter((connection) => connection.kind === 'ollama').map(createConnectionCard))
   renderRuntimeDrivers()
 
-  const active = getActiveConnection()
+  const textRoute = resolveConnectionRoute(state, 'text')
+  const active = textRoute.connection || { id: '', name: textRoute.error, status: 'unknown' }
   const readyCount = state.connections.filter((connection) => connection.status === 'ready').length
   const overview = document.querySelector('#connectionOverview')
   overview.querySelector('strong').textContent = `${readyCount} 个执行端可用`
-  overview.querySelector('div > span:last-child').textContent = `当前使用 ${active.name}`
+  overview.querySelector('div > span:last-child').textContent = textRoute.connection ? `当前使用 ${active.name}` : textRoute.error
   overview.querySelector('.status-dot').className = `status-dot ${readyCount ? 'status-dot-success' : 'status-dot-warning'}`
 
   const executor = document.querySelector('#executorSelect')
-  const availableExecutors = state.connections.filter((connection) => connection.kind !== 'cli' || ['installed', 'ready'].includes(connection.status) || connection.isActive)
+  const availableExecutors = state.connections.filter((connection) => supportsCapability(connection, 'text') && (connection.kind !== 'cli' || ['installed', 'ready'].includes(connection.status) || connection.isActive || connection.id === active.id))
   executor.replaceChildren(...availableExecutors.map((connection) => {
     const option = document.createElement('option')
     option.value = connection.id
@@ -2479,10 +2729,11 @@ function renderConnections() {
       ? ''
       : connection.status === 'installed'
         ? connection.compatibility === 'translated' ? ' · Intel 兼容模式 · 登录未验证' : ' · 登录未验证'
-        : ' · 待检测'
-    option.textContent = `${connection.name}${connection.kind === 'cli' ? ' · CLI' : ''}${statusSuffix}`
+        : ` · ${getConnectionStatusCopy(connection)[1]}`
+    option.textContent = `${connection.name}${connection.kind === 'cli' ? ' · CLI' : ''}${connection.driverId === 'codex' ? ` · ${connection.planningModel || '跟随本机 CLI 配置'}` : ''}${statusSuffix}`
     return option
   }))
+  if (!active.id) executor.prepend(new Option(textRoute.error, '', true, true))
   const selector = executor.closest('.model-selector')
   selector.querySelector('.status-dot').className = `status-dot ${active.status === 'ready' ? 'status-dot-success' : 'status-dot-warning'}`
   const chip = document.querySelector('#activeConnectionChip')
@@ -2497,14 +2748,16 @@ function renderConnections() {
 
   const readyCli = state.runtime.drivers.filter((driver) => driver.status === 'ready').length
   const cliStatus = document.querySelector('#cliStatusButton')
-  cliStatus.querySelector('span:last-child').textContent = state.runtime.status === 'loading' ? 'CLI 检测中' : `CLI ${readyCli} 个已安装`
-  cliStatus.querySelector('.status-dot').className = `status-dot ${readyCli ? 'status-dot-success' : 'status-dot-muted'}`
+  cliStatus.querySelector('span:last-child').textContent = state.runtime.status === 'loading' ? 'CLI 检测中' : state.runtime.status === 'error' ? 'CLI 检测失败' : `CLI ${readyCli} 个已安装`
+  cliStatus.querySelector('.status-dot').className = `status-dot ${state.runtime.status === 'error' ? 'status-dot-warning' : readyCli ? 'status-dot-success' : 'status-dot-muted'}`
   const runtimeSummary = document.querySelector('#cliRuntimeSummary')
   if (runtimeSummary) {
     runtimeSummary.textContent = state.runtime.status === 'ready'
       ? `${['darwin', 'macos'].includes(state.runtime.platform) ? 'macOS' : state.runtime.platform || '本机'} · ${state.runtime.architecture || '未知架构'} · 选择当前 AI 后，在创作区发起生成。安装检测不代表登录或额度已验证。`
-      : '正在通过本地运行桥检测受支持的 CLI。'
+      : state.runtime.status === 'error' ? '检测失败，请重新检测；未修改已选执行端，也不能据此判断 CLI 未安装。' : '正在通过本地运行桥检测受支持的 CLI。'
   }
+  mediaWorkbench?.renderEndpoints()
+  creationNavigation?.render()
 }
 
 function classifyProviderError(error, response = null) {
@@ -2665,19 +2918,26 @@ function syncCliConnections(drivers) {
     connection.status = driver.status === 'ready'
       ? connection.status === 'ready' ? 'ready' : 'installed'
       : 'error'
-    connection.error = driver.status === 'ready' ? null : '未发现可执行文件'
+    connection.error = driver.status === 'ready' ? null : driver.status === 'not_found' ? '未发现可执行文件' : 'CLI 检测失败或版本不兼容，请重新检测'
   })
 
   state.connections.filter((connection) => connection.kind === 'cli' && !executableIds.has(connection.id)).forEach((connection) => {
     connection.status = 'error'
     connection.error = '当前版本不允许通过该 CLI 生成'
-    connection.isActive = false
   })
-  const active = state.connections.find((connection) => connection.isActive)
-  if (!active || (active.kind === 'cli' && !['installed', 'ready'].includes(active.status))) {
-    const fallback = state.connections.find((connection) => connection.kind !== 'cli')
-    state.connections.forEach((connection) => { connection.isActive = connection.id === fallback?.id })
-  }
+}
+
+function openCliModelDialog(connectionId) {
+  if (projectTransition || state.isGenerating) return showToast('请先等待当前保存或文字任务完成，再设置规划模型')
+  const connection = state.connections.find(item => item.id === connectionId && item.kind === 'cli' && item.driverId === 'codex')
+  if (!connection) return showToast('未找到受支持的 Codex 连接，请先检测 CLI')
+  const form = document.querySelector('#cliModelForm')
+  form.dataset.connectionId = connection.id
+  const input = document.querySelector('#cliPlanningModel')
+  input.value = connection.planningModel || ''
+  input.removeAttribute('aria-invalid')
+  document.querySelector('#cliModelStatus').textContent = '保存不验证账号权限或消耗生成额度。生成失败不会自动更换模型、供应商或计费路径。'
+  openDialog(document.querySelector('#cliModelDialog'))
 }
 
 async function detectRuntime() {
@@ -2731,18 +2991,39 @@ async function detectRuntime() {
   } catch (error) {
     state.runtime.status = 'error'
     state.runtime.drivers = []
-    syncCliConnections([])
+    state.connections.filter(connection => connection.kind === 'cli').forEach(connection => {
+      connection.status = 'error'
+      connection.error = '运行时检测失败，未能确认 CLI 是否可用；请重新检测'
+    })
   }
   renderConnections()
 }
 
 async function setActiveConnection(connectionId) {
-  if (!state.connections.some((connection) => connection.id === connectionId)) return
+  if (projectTransition) return showToast('项目正在切换或保存，请稍后选择执行端')
+  if (!state.connections.some((connection) => connection.id === connectionId && supportsCapability(connection, 'text'))) return
+  if (!activeProjectId) return setGlobalExecutor('text', connectionId)
   if (getActiveConnection()?.id !== connectionId) cliSessionConsent = null
-  state.connections.forEach((connection) => { connection.isActive = connection.id === connectionId })
-  await persistWorkspace()
+  state.workflow.textConnectionId = connectionId
+  const saved = await persistWorkspace()
   renderConnections()
-  showToast(`已切换到 ${getActiveConnection().name}`)
+  if (saved) showToast(`当前项目文字已切换到 ${getActiveConnection().name}；全局默认未改变`)
+}
+
+async function setGlobalExecutor(capability, connectionId) {
+  if (projectTransition || (connectionId && !state.connections.some(connection => connection.id === connectionId && supportsCapability(connection, capability)))) {
+    renderConnections()
+    return showToast('当前无法修改默认，请等待保存完成或重新选择支持该能力的资源')
+  }
+  const previousTextId = getActiveConnection()?.id
+  state.connections.forEach(connection => {
+    if (capability === 'text') connection.isActive = connection.id === connectionId
+    else connection.defaultFor = [...(connection.defaultFor || []).filter(item => item !== capability), ...(connection.id === connectionId ? [capability] : [])]
+  })
+  if (previousTextId !== getActiveConnection()?.id) cliSessionConsent = null
+  const saved = await persistWorkspace()
+  renderConnections()
+  if (saved) showToast(`全局${{ text: '文字', image: '图片', video: '视频' }[capability]}默认已${connectionId ? '更新' : '清空'}；项目显式选择未改变`)
 }
 
 function invalidateConnectionDraftTest() {
@@ -2755,7 +3036,8 @@ function openConnectionDialog(connectionId = null) {
   invalidateConnectionDraftTest()
   const connection = state.connections.find((item) => item.id === connectionId)
   document.querySelector('#connectionId').value = connection?.id || `connection-${Date.now().toString(36)}`
-  document.querySelector('#connectionKind').value = connection?.kind === 'ollama' ? 'ollama' : 'openai-compatible'
+  document.querySelector('#connectionKind').value = ['ollama', 'image-api', 'video-api'].includes(connection?.kind) ? connection.kind : 'openai-compatible'
+  renderConnectionAdapters(document.querySelector('#connectionKind').value, configuredMediaAdapterId(connection || { kind: document.querySelector('#connectionKind').value }))
   document.querySelector('#connectionName').value = connection?.name || '我的模型'
   document.querySelector('#baseUrl').value = connection?.baseUrl || 'https://api.openai.com/v1'
   document.querySelector('#modelName').value = connection?.model || 'gpt-4.1-mini'
@@ -2763,6 +3045,8 @@ function openConnectionDialog(connectionId = null) {
   document.querySelector('#rememberApiKey').checked = Boolean(connection?.rememberSecret)
   document.querySelector('#rememberApiKeyOption').hidden = !isDesktopRuntime
   document.querySelector('#apiKeyField').hidden = connection?.kind === 'ollama'
+  document.querySelector('#connectionDialogTitle').textContent = '配置资源连接'
+  document.querySelector('[data-action="modal-test-connection"]').textContent = ['image-api', 'video-api'].includes(connection?.kind) ? '检查配置（不调用生成）' : '测试连接'
   document.querySelector('#connectionForm').dataset.testStatus = ''
   document.querySelector('#connectionForm').dataset.lastLatency = ''
   document.querySelector('#connectionForm').dataset.dirty = 'false'
@@ -2775,7 +3059,16 @@ function openConnectionDialog(connectionId = null) {
 }
 
 function hasConnectionEndpointChanged(draft, existing) {
-  return Boolean(existing && (draft.kind !== existing.kind || draft.baseUrl !== existing.baseUrl))
+  return Boolean(existing && (draft.kind !== existing.kind || draft.baseUrl !== existing.baseUrl || draft.adapter !== existing.adapter))
+}
+
+function renderConnectionAdapters(kind, selectedId) {
+  const select = document.querySelector('#connectionAdapter')
+  document.querySelector('#connectionAdapterField').hidden = !['image-api', 'video-api'].includes(kind)
+  select.replaceChildren(new Option('明确选择协议适配器', ''))
+  for (const adapter of mediaAdaptersForKind(kind)) select.append(new Option(adapter.name || adapter.id, adapter.id))
+  if (selectedId && ![...select.options].some(option => option.value === selectedId)) select.append(new Option(`${selectedId} · 尚未实现，请重新选择`, selectedId))
+  select.value = selectedId || ''
 }
 
 function getConnectionDraft() {
@@ -2787,8 +3080,9 @@ function getConnectionDraft() {
     name: document.querySelector('#connectionName').value.trim() || '未命名连接',
     baseUrl: document.querySelector('#baseUrl').value.trim().replace(/\/$/, ''),
     model: document.querySelector('#modelName').value.trim(),
+    adapter: ['image-api', 'video-api'].includes(kind) ? document.querySelector('#connectionAdapter').value : null,
     status: 'unknown',
-    capabilities: kind === 'ollama' ? ['完全本地', '流式输出'] : ['流式输出', 'OpenAI 兼容'],
+    capabilities: kind === 'image-api' ? ['图片生成', '参考图编辑 · 待实测'] : kind === 'video-api' ? ['异步视频', '输入组合由协议校验'] : kind === 'ollama' ? ['完全本地', '流式输出'] : ['流式输出', 'OpenAI 兼容'],
     isActive: false,
     error: null
   }
@@ -2800,6 +3094,15 @@ async function testConnectionDraft(button) {
   const controller = new AbortController()
   connectionDraftTestController = controller
   const draft = getConnectionDraft()
+  if (['image-api', 'video-api'].includes(draft.kind)) {
+    try {
+      if (!mediaAdapterFor(draft, draft.kind === 'image-api' ? 'image' : 'video')) throw new Error('请选择已实现的协议适配器；不会自动更换资源')
+      validateProviderBaseUrl('openai-compatible', draft.baseUrl)
+      if (!draft.model) throw new Error('请填写实际资源支持的模型')
+      elements.connectionTestStatus.replaceChildren(createIcon('icon-check'), document.createTextNode('配置格式有效；尚未验证账号、额度或真实生成能力'))
+    } catch (error) { elements.connectionTestStatus.replaceChildren(createIcon('icon-alert'), document.createTextNode(readableError(error))) }
+    return
+  }
   const secret = document.querySelector('#apiKey').value
   const existing = state.connections.find((connection) => connection.id === draft.id)
   draft.rememberSecret = Boolean(existing?.rememberSecret)
@@ -2816,7 +3119,7 @@ async function testConnectionDraft(button) {
   })
   const form = document.querySelector('#connectionForm')
   if (testId !== connectionDraftTestSequence || !elements.connectionDialog.open) {
-    if (button.isConnected) button.disabled = false
+    if (button.isConnected) button.disabled = form.dataset.saving === 'true'
     return
   }
   connectionDraftTestController = null
@@ -3102,6 +3405,11 @@ async function deleteCurrentDocument(button) {
 }
 
 async function advanceStage() {
+  if (state.workflow.preset === 'text') {
+    const steps = creationSteps('text')
+    const index = steps.findIndex(step => step.documentId === state.currentDocId)
+    if (index >= 0) { await navigateCreationStep(steps[index + 1] || steps.at(-1)); return }
+  }
   const nextDocument = { idea: 'brief', brief: 'world', world: 'characters', characters: 'outline' }[state.currentDocId]
   if (nextDocument) {
     selectDocument(nextDocument)
@@ -3109,19 +3417,8 @@ async function advanceStage() {
     return
   }
   if (state.currentDocId === 'outline') {
-    if (getEpisodeIds().length < 3) {
-      const missingCount = 3 - getEpisodeIds().length
-      for (let index = 0; index < missingCount; index += 1) {
-        await createStructuredDocument({
-          type: 'episode',
-          title: `第 ${getEpisodeIds().length + 1} 集 · 待命名`,
-          actId: state.structure.acts[0]?.id,
-          select: false
-        })
-      }
-      showToast('已从全剧大纲建立 3 集创作骨架')
-    }
-    selectDocument(getEpisodeIds()[0])
+    if (getEpisodeIds().length) await selectDocument(getEpisodeIds()[0])
+    else openNewContentDialog({ type: 'episode' })
     return
   }
   const kind = getDocumentKind(state.currentDocId)
@@ -3142,7 +3439,7 @@ async function handleAction(button, action) {
       break
     }
     case 'toggle-assistant': {
-      if (state.currentView !== 'workspace') switchView('workspace')
+      if (!isProjectView(state.currentView)) switchView('workspace')
       toggleAssistant()
       break
     }
@@ -3165,6 +3462,8 @@ async function handleAction(button, action) {
     case 'backup-project': await exportProject('json'); break
     case 'export-project': await exportProject('md'); break
     case 'restore-project': document.querySelector('#projectBackupFile').click(); break
+    case 'restore-media-package': document.querySelector('#projectLibraryDialog').close(); await mediaWorkbench?.restorePackage(); break
+    case 'pending-media-imports': document.querySelector('#projectLibraryDialog').close(); await mediaWorkbench?.showPendingImports(); break
     case 'build-semantic-index': await rebuildSemanticIndex(button); break
     case 'clear-semantic-index': {
       semanticBuildSequence += 1
@@ -3212,7 +3511,9 @@ async function handleAction(button, action) {
     case 'redo': redoCustom(); break
     case 'send-prompt': startGeneration(elements.promptInput.value); break
     case 'discard-candidate': discardCandidate(); break
-    case 'retry-generation': startGeneration(state.lastPrompt, { clearComposer: false }); break
+    case 'retry-generation': startGeneration(state.lastPrompt, { clearComposer: false, purpose: state.generationContext?.purpose || 'text', sourceFingerprint: state.generationContext?.sourceFingerprint || '', storyboardRevision: state.generationContext?.storyboardRevision ?? null }); break
+    case 'review-project-plan': projectPlanUI?.open(elements.candidateContent.textContent, state.generationContext?.operationContext); break
+    case 'review-existing-plan': if (state.isGenerating) showToast('请先停止或等待当前任务'); else projectPlanUI?.open(); break
     case 'accept-candidate': acceptCandidate(); break
     case 'apply-candidate': applyCandidate(button.dataset.applyMode); break
     case 'advance-stage': advanceStage(); break
@@ -3279,6 +3580,7 @@ async function handleAction(button, action) {
     case 'test-all-connections': testAllConnections(button); break
     case 'detect-cli': detectRuntime(); break
     case 'configure-claude': openDialog(document.querySelector('#claudeCredentialDialog')); break
+    case 'configure-cli-model': openCliModelDialog(button.dataset.connectionId); break
     case 'activate-connection': setActiveConnection(button.dataset.connectionId); break
     case 'open-terminal': showToast('已检测本机 CLI；执行能力将在受控桌面 Runner 中启用'); break
     case 'learn-local-model': openConnectionDialog('ollama-local'); break
@@ -3304,6 +3606,7 @@ document.addEventListener('click', (event) => {
   if (!button) return
 
   if (button.dataset.viewTarget) {
+    if (button.closest('.project-modes')) closeDrawers()
     switchView(button.dataset.viewTarget)
     return
   }
@@ -3409,7 +3712,34 @@ elements.commandInput.addEventListener('keydown', (event) => {
   }
 })
 
-elements.promptInput.addEventListener('input', () => renderContextPreview())
+elements.promptInput.addEventListener('input', () => {
+  renderContextPreview()
+  const prefix = elements.promptInput.value.slice(0, elements.promptInput.selectionStart)
+  const match = prefix.match(/(?:^|\s)@([^\s@]*)$/u)
+  if (match) {
+    document.querySelector('#contextObjectPicker').open = true
+    document.querySelector('#contextObjectSearch').value = match[1]
+    renderContextObjects()
+  }
+})
+document.querySelector('#addContextObject').addEventListener('click', () => {
+  const picker = document.querySelector('#contextObjectPicker'); picker.open = !picker.open
+  if (picker.open) { document.querySelector('#contextObjectSearch').value = ''; renderContextObjects(); document.querySelector('#contextObjectSearch').focus() }
+})
+document.querySelector('#contextObjectSearch').addEventListener('input', renderContextObjects)
+document.querySelector('#contextObjectPicker').addEventListener('toggle', event => document.querySelector('#addContextObject').setAttribute('aria-expanded', String(event.target.open)))
+document.querySelector('#contextObjectPicker').addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); document.querySelector('#contextObjectPicker').open = false; elements.promptInput.focus() }
+})
+for (const [id, key] of [['includeCurrentContext', 'includeCurrentContext'], ['includeSelectionContext', 'includeSelectionContext']]) {
+  document.querySelector(`#${id}`).addEventListener('change', event => { state[key] = event.target.checked; renderContextPreview() })
+}
+elements.scriptEditor.addEventListener('select', () => { if (state.includeSelectionContext) renderContextPreview() })
+document.querySelector('#resetContextScope').addEventListener('click', () => {
+  state.includeCurrentContext = true; state.includeSelectionContext = false; state.excludedContextKeys.clear(); state.contextReferenceKeys = []
+  document.querySelectorAll('.context-chip').forEach(chip => chip.setAttribute('aria-pressed', 'true'))
+  renderContextPreview()
+})
 
 elements.promptInput.addEventListener('keydown', (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
@@ -3420,6 +3750,10 @@ elements.promptInput.addEventListener('keydown', (event) => {
 
 document.addEventListener('keydown', (event) => {
   const commandKey = event.metaKey || event.ctrlKey
+  if (elements.connectionDialog.open && document.querySelector('#connectionForm').dataset.saving === 'true') {
+    if (event.key === 'Escape' || (commandKey && ['k', 'p', 's'].includes(event.key.toLowerCase()))) event.preventDefault()
+    return
+  }
   if (commandKey && event.key.toLowerCase() === 'k') {
     event.preventDefault()
     openCommandPalette()
@@ -3450,13 +3784,19 @@ document.addEventListener('keydown', (event) => {
 })
 
 function loadProjectSnapshot(snapshot) {
+  projectPlanUI?.reset()
   elements.toastStack.replaceChildren()
   document.querySelector('#embeddingModel').value = snapshot.workspace.knowledge?.semantic?.model || ''
   discardCandidate({ silent: true })
   window.clearTimeout(state.saveTimer)
   activeProjectId = snapshot.id
+  state.workflowStep = null
+  state.contextReferenceKeys = []; state.excludedContextKeys.clear(); state.includeCurrentContext = true; state.includeSelectionContext = false
+  document.querySelector('#contextObjectPicker').open = false
   const workspace = snapshot.workspace
   state.connections = normalizeConnections(workspace.connections)
+  state.workflow = normalizeWorkflow(workspace.workflow)
+  state.storyboard = normalizeStoryboard(workspace.storyboard)
   document.documentElement.dataset.theme = workspace.theme === 'dark' ? 'dark' : 'light'
   syncThemeControl()
   renderConnections()
@@ -3491,6 +3831,7 @@ function loadProjectSnapshot(snapshot) {
   renderKnowledge()
   switchView('workspace')
   updateDocumentView()
+  mediaWorkbench?.refresh()
 }
 
 let showingArchivedProjects = false
@@ -3576,8 +3917,8 @@ async function exportLibrary() {
   // Export the committed library even if current draft persistence fails; also preserve that draft separately.
   const saved = await saveImmediately({ announce: false })
   if (!saved && activeProjectId) await exportProject('json')
-  try { showToast(`完整备份已导出：${await downloadDocument('创作工作台完整备份.json', libraryBackup())}`) }
-  catch (error) { showToast(readableError(error, '完整备份失败')) }
+  try { showToast(`文字／结构库备份已导出（不含实际媒体）：${await downloadDocument('创作工作台文字库备份.json', libraryBackup())}`) }
+  catch (error) { showToast(readableError(error, '文字库备份失败')) }
 }
 
 async function recoverPreviousLibrary() {
@@ -3630,6 +3971,8 @@ document.querySelector('#newProjectForm').addEventListener('submit', async (even
   if (projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy()) return
   const projectName = String(new FormData(event.currentTarget).get('projectName') || '').trim()
   const contentType = String(new FormData(event.currentTarget).get('contentType') || '短剧')
+  const flowPreset = String(new FormData(event.currentTarget).get('flowPreset') || 'script')
+  if (!['text', 'script', 'storyboard'].includes(flowPreset)) return showToast('创作路径无效，请重新选择')
   if (!projectName || projectName.length > 100) return showToast('项目名称须为 1–100 个字符')
   setProjectTransition(true)
   try {
@@ -3637,12 +3980,14 @@ document.querySelector('#newProjectForm').addEventListener('submit', async (even
     await createProject({
       schemaVersion: WORKSPACE_SCHEMA_VERSION,
       project: { name: projectName, type: contentType, stage: `${contentType} · 新项目`, template: 'blank' },
+      workflow: normalizeWorkflow({ preset: flowPreset }), storyboard: emptyStoryboard(),
       documents: createStarterDocuments(projectName, contentType),
       structure: createBlankStructure(), currentDocId: 'idea', activeTab: 'script',
       tabContents: {}, versions: {}, versionCounters: {}, knowledge: { sources: [], selectedChunkIds: [] }
     }, createKnowledgeIndex([]))
     loadProjectSnapshot(getActiveProject())
     elements.newProjectDialog.close()
+    if (flowPreset === 'storyboard') switchView('storyboard')
     showToast(`已创建“${projectName}”，已有项目已保留`)
   } catch (error) { showToast(readableError(error, '创建失败')) }
   finally { setProjectTransition(false) }
@@ -3679,7 +4024,7 @@ document.querySelector('#projectBackupFile').addEventListener('change', async ev
     else await createProject(data.workspace, data.index)
     loadProjectSnapshot(getActiveProject())
     document.querySelector('#projectLibraryDialog').close()
-    showToast(fullLibrary ? '完整备份已合并为独立副本，原有项目与灵感保留' : '备份已恢复为独立项目，原项目未被覆盖')
+    showToast(fullLibrary ? '文字库备份已合并为独立副本，原有项目与灵感保留；实际媒体需使用完整项目包恢复' : '文字／结构备份已恢复为独立项目，原项目未被覆盖；实际媒体需使用完整项目包恢复')
   } catch (error) { showToast(readableError(error, '恢复失败')) }
   finally { setProjectTransition(false) }
 })
@@ -3739,6 +4084,14 @@ document.querySelector('#connectionKind').addEventListener('change', (event) => 
   document.querySelector('#connectionForm').dataset.dirty = 'true'
   const isOllama = event.target.value === 'ollama'
   document.querySelector('#apiKeyField').hidden = isOllama
+  const mediaKind = ['image-api', 'video-api'].includes(event.target.value)
+  renderConnectionAdapters(event.target.value, null)
+  document.querySelector('[data-action="modal-test-connection"]').textContent = mediaKind ? '检查配置（不调用生成）' : '测试连接'
+  if (mediaKind) {
+    document.querySelector('#modelName').value = ''
+    document.querySelector('#modelName').placeholder = '填写该资源实际支持的模型名称'
+    if (event.target.value === 'video-api') document.querySelector('#baseUrl').value = ''
+  }
   if (isOllama) {
     if (!document.querySelector('#connectionName').value.trim() || document.querySelector('#connectionName').value === '我的模型') {
       document.querySelector('#connectionName').value = 'Ollama'
@@ -3748,7 +4101,7 @@ document.querySelector('#connectionKind').addEventListener('change', (event) => 
   }
 })
 
-;['connectionName', 'baseUrl', 'modelName', 'apiKey'].forEach((fieldId) => {
+;['connectionName', 'connectionAdapter', 'baseUrl', 'modelName', 'apiKey'].forEach((fieldId) => {
   document.querySelector(`#${fieldId}`).addEventListener('input', () => {
     invalidateConnectionDraftTest()
     const form = document.querySelector('#connectionForm')
@@ -3760,26 +4113,42 @@ document.querySelector('#connectionKind').addEventListener('change', (event) => 
   })
 })
 
-elements.connectionDialog.addEventListener('cancel', invalidateConnectionDraftTest)
+elements.connectionDialog.addEventListener('cancel', event => {
+  if (document.querySelector('#connectionForm').dataset.saving === 'true') event.preventDefault()
+  else invalidateConnectionDraftTest()
+})
 elements.connectionDialog.addEventListener('close', invalidateConnectionDraftTest)
 
 document.querySelector('#executorSelect').addEventListener('change', (event) => setActiveConnection(event.target.value))
 
 document.querySelector('#connectionForm').addEventListener('submit', async (event) => {
   event.preventDefault()
+  const form = event.currentTarget
+  if (form.dataset.saving === 'true') return
   const draft = getConnectionDraft()
   const existingIndex = state.connections.findIndex((connection) => connection.id === draft.id)
   const existing = state.connections[existingIndex]
   const endpointChanged = hasConnectionEndpointChanged(draft, existing)
-  const isDirty = event.currentTarget.dataset.dirty === 'true'
-  draft.isActive = existing?.isActive || !state.connections.some((connection) => connection.isActive)
-  draft.status = event.currentTarget.dataset.testStatus || (!isDirty && existing?.status === 'ready' ? 'ready' : 'unknown')
-  draft.lastLatency = Number(event.currentTarget.dataset.lastLatency) || (!isDirty ? existing?.lastLatency : null) || null
+  const isDirty = form.dataset.dirty === 'true'
+  draft.isActive = Boolean(existing?.isActive)
+  draft.defaultFor = [...(existing?.defaultFor || [])]
+  draft.status = form.dataset.testStatus || (!isDirty && existing?.status === 'ready' ? 'ready' : 'unknown')
+  draft.lastLatency = Number(form.dataset.lastLatency) || (!isDirty ? existing?.lastLatency : null) || null
   const secret = document.querySelector('#apiKey').value
-  draft.rememberSecret = isDesktopRuntime && draft.kind === 'openai-compatible' && document.querySelector('#rememberApiKey').checked
+  draft.rememberSecret = isDesktopRuntime && draft.kind !== 'ollama' && document.querySelector('#rememberApiKey').checked
+  invalidateConnectionDraftTest()
+  const controls = [...form.querySelectorAll('input, select, button')].map(control => ({ control, disabled: control.disabled }))
+  const submitButton = form.querySelector('[type="submit"]')
+  const submitLabel = submitButton.textContent
+  form.dataset.saving = 'true'
+  form.setAttribute('aria-busy', 'true')
+  controls.forEach(({ control }) => { control.disabled = true })
+  submitButton.textContent = '保存中…'
   try {
-    validateProviderBaseUrl(draft.kind, draft.baseUrl)
-    if (isDesktopRuntime && draft.kind === 'openai-compatible') {
+    if (['image-api', 'video-api'].includes(draft.kind) && !mediaAdapterFor(draft, draft.kind === 'image-api' ? 'image' : 'video')) throw new Error('请选择已实现的协议适配器；不会自动更换资源')
+    validateProviderBaseUrl(['image-api', 'video-api'].includes(draft.kind) ? 'openai-compatible' : draft.kind, draft.baseUrl)
+    if (!draft.model) throw new Error('请填写实际支持的模型名称')
+    if (isDesktopRuntime && draft.kind !== 'ollama') {
       if (draft.rememberSecret) {
         const value = secret || (!endpointChanged && existing ? await connectionSecret(existing) : '')
         if (!value) throw new Error('请填写需要保存的 API Key')
@@ -3788,16 +4157,76 @@ document.querySelector('#connectionForm').addEventListener('submit', async (even
         await invokeDesktop('credential_save', { id: existing.id, endpoint: existing.baseUrl, secret: '' })
       }
     }
-  } catch (error) { showToast(readableError(error)); return }
-  if (existingIndex >= 0) state.connections.splice(existingIndex, 1, draft)
-  else state.connections.push(draft)
-  if (endpointChanged) sessionSecrets.delete(draft.id)
-  if (draft.kind === 'openai-compatible' && secret) sessionSecrets.set(draft.id, secret)
-  document.querySelector('#apiKey').value = ''
-  elements.connectionDialog.close()
-  await persistWorkspace()
-  renderConnections()
-  showToast(draft.rememberSecret ? '连接已保存，密钥保存在 macOS 钥匙串' : '连接已保存；密钥仅用于当前会话')
+    if (existingIndex >= 0) state.connections.splice(existingIndex, 1, draft)
+    else state.connections.push(draft)
+    if (endpointChanged) sessionSecrets.delete(draft.id)
+    if (draft.kind !== 'ollama' && secret) sessionSecrets.set(draft.id, secret)
+    const saved = await persistWorkspace({
+      onError: message => elements.connectionTestStatus.replaceChildren(createIcon('icon-alert'), document.createTextNode(`连接尚未保存：${message}。输入已保留。`))
+    })
+    renderConnections()
+    if (!saved) return
+    document.querySelector('#apiKey').value = ''
+    elements.connectionDialog.close()
+    showToast(draft.rememberSecret ? '连接已保存，密钥保存在 macOS 钥匙串' : '连接已保存；密钥仅用于当前会话')
+  } catch (error) {
+    const message = readableError(error)
+    elements.connectionTestStatus.replaceChildren(createIcon('icon-alert'), document.createTextNode(message))
+    showToast(message)
+  } finally {
+    form.dataset.saving = 'false'
+    form.removeAttribute('aria-busy')
+    controls.forEach(({ control, disabled }) => { control.disabled = control.matches('[data-action="modal-test-connection"]') ? false : disabled })
+    submitButton.textContent = submitLabel
+  }
+})
+
+document.querySelector('#cliPlanningModel').addEventListener('input', event => {
+  event.target.removeAttribute('aria-invalid')
+  document.querySelector('#cliModelStatus').textContent = '尚未保存。只保存模型选择，不调用生成或验证账号权限。'
+})
+
+document.querySelector('#cliModelForm').addEventListener('submit', async event => {
+  event.preventDefault()
+  const form = event.currentTarget
+  if (form.dataset.saving === 'true' || projectTransition) return
+  const input = document.querySelector('#cliPlanningModel'), status = document.querySelector('#cliModelStatus')
+  const connection = state.connections.find(item => item.id === form.dataset.connectionId && item.kind === 'cli' && item.driverId === 'codex')
+  if (!connection || state.isGenerating) { status.textContent = '执行端已变化或文字任务仍在运行，请关闭后重新设置。'; return }
+  const model = input.value.trim()
+  if (model && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(model)) {
+    input.setAttribute('aria-invalid', 'true')
+    status.textContent = '请输入不超过 128 字符的模型 ID：以字母或数字开头，仅可含字母、数字、点、下划线、冒号、斜线和连字符。'
+    input.focus()
+    return
+  }
+  const previous = { planningModel: connection.planningModel, status: connection.status, error: connection.error }
+  const controls = [...form.querySelectorAll('input, button')]
+  const submit = form.querySelector('[type="submit"]')
+  form.dataset.saving = 'true'; controls.forEach(control => { control.disabled = true }); submit.textContent = '保存中…'
+  status.textContent = '正在保存规划模型，不调用生成…'
+  setProjectTransition(true)
+  try {
+    connection.planningModel = model
+    if (state.runtime.drivers.some(driver => driver.id === 'codex' && driver.status === 'ready')) {
+      connection.status = 'installed'; connection.error = null
+    } else if (connection.status === 'ready') connection.status = 'unknown'
+    if (!await persistWorkspace({ onError: message => { status.textContent = `设置未保存：${message}。原设置和输入保留，请重试。` } })) {
+      Object.assign(connection, previous)
+      if (previous.planningModel === undefined) delete connection.planningModel
+      renderConnections()
+      return
+    }
+    cliSessionConsent = null
+    renderConnections()
+    document.querySelector('#cliModelDialog').close()
+    showToast(model ? 'Codex 规划模型已保存；实际账号可用性尚未验证' : '已恢复使用 CLI 默认规划模型；不会自动挑选其他模型')
+  } finally {
+    form.dataset.saving = 'false'; controls.forEach(control => { control.disabled = false }); submit.textContent = '保存设置'
+    setProjectTransition(false)
+    if (document.querySelector('#cliModelDialog').open) input.focus()
+    else document.querySelector('[data-action="configure-cli-model"][data-connection-id="cli-codex"]')?.focus()
+  }
 })
 
 document.querySelector('#claudeCredentialForm').addEventListener('submit', async event => {
@@ -3857,7 +4286,10 @@ document.querySelectorAll('dialog').forEach((dialog) => {
       elements.commandInput.setAttribute('aria-expanded', 'false')
       elements.commandInput.removeAttribute('aria-activedescendant')
     }
-    if (dialogReturnFocus instanceof HTMLElement) dialogReturnFocus.focus()
+    const returnTarget = dialog.id === 'cliModelDialog'
+      ? [...document.querySelectorAll('[data-action="configure-cli-model"]')].find(button => button.dataset.connectionId === document.querySelector('#cliModelForm').dataset.connectionId) || dialogReturnFocus
+      : dialogReturnFocus
+    if (returnTarget instanceof HTMLElement) returnTarget.focus()
     dialogReturnFocus = null
   })
 })
@@ -3900,6 +4332,52 @@ if (isDesktopRuntime && window.__TAURI__.window?.getCurrentWindow) {
     } finally { closeRequestActive = false }
   }).catch(error => showToast(readableError(error, '关闭前保存监听失败，请手动保存')))
 }
+function initializeProjectMediaWorkbench() {
+  return initializeMediaWorkbench({
+  getContext: () => ({ projectId: activeProjectId, project: state.project, documents: state.documents, currentDocId: state.currentDocId, connections: state.connections, workflow: state.workflow, storyboard: state.storyboard }),
+  commit: async (patch, { projectId, revision = null, immediate = true } = {}) => {
+    if (!activeProjectId || activeProjectId !== projectId || projectTransition) throw new Error('项目已切换或正在保存，未修改其他项目')
+    if (revision !== null && state.storyboard.revision !== revision) throw new Error('分镜已有新的修改，请重试；未覆盖当前内容')
+    if (patch.storyboard) { validateStoryboard(patch.storyboard); state.storyboard = patch.storyboard; creationNavigation?.render() }
+    if (patch.workflow) {
+      const previousTextId = getActiveConnection()?.id
+      const previousStoryboardId = resolveConnectionRoute(state, 'storyboard').connection?.id
+      state.workflow = normalizeWorkflow(patch.workflow)
+      if (previousTextId !== getActiveConnection()?.id || previousStoryboardId !== resolveConnectionRoute(state, 'storyboard').connection?.id) cliSessionConsent = null
+      renderConnections()
+    }
+    if (!immediate) { scheduleSave(); return }
+    unsavedEdits = true
+    editRevision += 1
+    if (!await persistWorkspace()) throw new Error('保存失败，当前编辑仍保留，请重试保存或导出备份')
+  },
+  invoke: isDesktopRuntime ? invokeDesktop : null,
+  secret: connectionSecret,
+  beforeSubmit: async () => { if (!await saveImmediately({ announce: false })) throw new Error('请先保存当前项目再生成媒体') },
+  requestText: async (prompt, metadata) => {
+    if (state.isGenerating) return showToast('请先等待当前文字任务完成或停止')
+    await selectDocument(metadata.documentId)
+    if (state.activeTab !== 'script') await switchTab('script')
+    switchView('workspace')
+    startGeneration(prompt, { ...metadata, clearComposer: false })
+    focusAssistant()
+  },
+  notify: showToast,
+  navigate: switchView,
+  portableProject: async () => {
+    if (!await saveImmediately({ announce: false })) throw new Error('请先保存当前项目再导出完整包')
+    return JSON.parse(projectBackup(workspaceSnapshot(), state.knowledge.index))
+  },
+  importPackage: async (data, projectId) => {
+    validateWorkspace(data.workspace, data.index)
+    if (!await saveImmediately({ announce: false })) throw new Error('当前项目保存失败，原项目和已导入媒体均保留，未切换项目')
+    await createProject(data.workspace, data.index, projectId, { mediaImportId: data.importId })
+    loadProjectSnapshot(getActiveProject())
+    switchView('assets')
+  }
+  })
+}
+
 document.querySelectorAll('svg.icon').forEach((icon) => icon.setAttribute('aria-hidden', 'true'))
 syncThemeControl()
 document.querySelector('#claudeCredentialButton').hidden = !isDesktopRuntime
@@ -3933,3 +4411,63 @@ const inspirationUI = initializeInspirations({
 })
 
 const updatesUI = initializeUpdates({ invoke: isDesktopRuntime ? invokeDesktop : null, openDialog })
+mediaWorkbench = initializeProjectMediaWorkbench()
+mediaWorkbench.refresh()
+creationNavigation = initializeCreationNavigation({
+  getContext: () => ({ projectId: activeProjectId, workflow: state.workflow, documents: state.documents, documentId: state.currentDocId, structure: state.structure, storyboard: state.storyboard, view: state.currentView, step: state.workflowStep, connections: state.connections, textConnection: getActiveConnection(), connectionStatus: connection => getConnectionStatusCopy(connection)[1], knowledgeCount: getSelectedKnowledgeChunks().length }),
+  navigate: navigateCreationStep,
+  notify: showToast
+})
+creationNavigation.render()
+projectPlanUI = initializeProjectPlanUI({
+  getContext: projectOperationContext,
+  captureContext: () => {
+    if (state.isGenerating || state.candidateApplying) throw new Error('请先等待或停止当前任务')
+    return captureOperationContext(projectOperationContext(), generationDraft(elements.promptInput.value.trim(), 'text').summary)
+  },
+  commit: async (plan, base) => {
+    if (projectTransition || state.candidateApplying || state.isGenerating) throw new Error('当前任务尚未结束，请稍候再采纳')
+    state.candidateApplying = true
+    setProjectTransition(true)
+    try {
+      if (!await saveImmediately({ announce: false })) throw new Error('原项目保存失败，尚未采纳修改')
+      const versionIds = [...new Set(plan.operations.filter(operation => operation.tool === 'select_shot_media').map(operation => operation.versionId))]
+      if (versionIds.length) {
+        if (!isDesktopRuntime) throw new Error('选用媒体前须在桌面版核验真实文件，未修改项目')
+        const verified = await invokeDesktop('media_verify_versions', { projectId: base.projectId, versionIds })
+        if (verified.length !== versionIds.length || versionIds.some(id => !verified.some(version => version.id === id && version.mimeType === base.mediaVersions[id].mimeType && version.bytes === base.mediaVersions[id].bytes))) throw new Error('媒体核验结果与计划不一致，请刷新后重新审阅')
+      }
+      const result = materializeOperationPlan(plan, base, projectOperationContext(), { recordVersions: true, knowledgeChunks: state.generationContext?.purpose === 'project-plan' ? state.generationContext.knowledgeChunks : [] })
+      if (result.hasWorkspaceChanges) {
+        validateWorkspace(result.workspace, state.knowledge.index)
+        try { await saveProject(activeProjectId, result.workspace, state.knowledge.index) }
+        catch (error) { state.storageFailed = true; setSaveStatus('error'); throw error }
+        for (const key of ['documents', 'tabContents', 'versions', 'versionCounters', 'storyboard']) state[key] = result.workspace[key]
+        for (const id of new Set(result.changes.map(change => change.documentId).filter(Boolean))) {
+          for (const tab of ['script', 'outline', 'references']) state.editHistories.delete(`${id}:${tab}`)
+          state.selectedVersionByDocument[id] = state.versionCounters[id]
+          state.tabContents[id].history = formatVersionHistory(id)
+        }
+        editRevision += 1; unsavedEdits = false; state.storageFailed = false
+      }
+      if (state.generationContext?.purpose === 'project-plan') discardCandidate({ silent: true })
+      renderProjectTree(); updateDocumentView(); mediaWorkbench.refresh(); setSaveStatus('saved')
+      return result
+    } finally { state.candidateApplying = false; setProjectTransition(false) }
+  },
+  renderMedia: versionId => mediaWorkbench.previewVersion(versionId),
+  queryTasks: async ({ projectId, shotIds }) => {
+    if (!isDesktopRuntime) throw new Error('请在桌面版读取持久化任务；浏览器未伪造查询结果')
+    if (activeProjectId !== projectId || shotIds.some(id => !state.storyboard.shots.some(shot => shot.id === id))) throw new Error('查询目标已失效，请在原项目重新预览')
+    const result = await invokeDesktop('media_query_jobs', { projectId, targetIds: shotIds })
+    if (activeProjectId !== projectId || result?.projectId !== projectId || JSON.stringify(result.targetIds) !== JSON.stringify(shotIds)) throw new Error('项目或查询范围已改变，请重新预览；未修改项目')
+    if (!Array.isArray(result.jobs) || result.jobs.length > 20 || typeof result.hasMore !== 'boolean' || typeof result.queriedAt !== 'string' || result.jobs.some(job => !shotIds.includes(job.targetId) || typeof job.id !== 'string' || typeof job.status !== 'string' || !['image', 'video'].includes(job.capability))) throw new Error('本地任务摘要格式无效，未修改项目')
+    return result
+  },
+  openMediaPlan: options => mediaWorkbench.openBatchPlan(options),
+  notify: showToast, openDialog
+})
+document.querySelector('#assistantRequestMode').addEventListener('change', () => {
+  document.querySelector('#reviewExistingPlan').hidden = document.querySelector('#assistantRequestMode').value !== 'project-plan'
+  renderContextPreview()
+})

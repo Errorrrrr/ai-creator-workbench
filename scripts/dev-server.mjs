@@ -24,7 +24,7 @@ const cliDrivers = [
     name: 'Codex CLI',
     command: 'codex',
     versionArgs: ['exec', '--help'],
-    generateArgs: ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--color', 'never', '-c', 'approval_policy="never"']
+    generateArgs: ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--color', 'never', '--json', '-c', 'approval_policy="never"']
   },
   {
     id: 'claude',
@@ -262,6 +262,132 @@ function sanitizeCliError(diagnostics) {
   return 'CLI 运行失败，请在终端检查登录和版本'
 }
 
+function codexDiagnosticMessage(message) {
+  for (const [pattern, detail] of [
+    [/unexpected argument|unrecognized option|unknown option/i, '命令行选项'],
+    [/invalid type/i, '字段类型'],
+    [/unknown field/i, '未知字段'],
+    [/missing field/i, '缺少字段'],
+    [/unknown method/i, '未知方法'],
+    [/invalid params|invalid parameter/i, '请求参数']
+  ]) {
+    if (pattern.test(message)) return `CLI 协议或参数不兼容（${detail}）；未自动重试`
+  }
+  if (/not supported when using codex with a chatgpt account/i.test(message)) {
+    return '当前 Codex CLI 的 ChatGPT 登录方式不支持所选规划模型；请在现有 CLI 中确认可用模型。未自动切换模型或计费路径'
+  }
+  if (/model_not_found|unsupported_model/i.test(message) || message.split('\n').some(line => /model/i.test(line) && /not supported|unsupported|not available|unavailable|does not exist|not found|do not have access|not have access|not permitted/i.test(line))) {
+    return 'CLI 返回模型拒绝相关错误；未切换模型或计费路径'
+  }
+  return message.trim() ? sanitizeCliError(message) : 'CLI 未提供可分类的退出诊断；具体原因未确认'
+}
+
+function codexExecutionError(diagnostics, events, code, terminationSignal, args) {
+  let category = codexDiagnosticMessage(diagnostics), phase = 'CLI 轮次阶段未确认', httpStatus = null
+  for (const line of events.split('\n')) {
+    let event
+    try { event = JSON.parse(line) } catch { continue }
+    if (!event || typeof event !== 'object' || Array.isArray(event)) continue
+    let message
+    if (event.type === 'thread.started') phase = 'CLI 已报告线程创建'
+    else if (event.type === 'turn.started') phase = 'CLI 已报告轮次开始'
+    else if (event.type === 'turn.completed') phase = 'CLI 已报告轮次完成后退出异常'
+    else if (event.type === 'turn.failed') { phase = 'CLI 已报告轮次失败'; message = event.error?.message }
+    else if (event.type === 'error') message = event.message
+    // Never inspect agent/tool item content or return original event text.
+    if (typeof message === 'string' && message.trim()) {
+      const classified = codexDiagnosticMessage(message)
+      if (classified !== sanitizeCliError('')) {
+        category = classified
+        httpStatus = null
+        try {
+          const error = JSON.parse(message)
+          if (error?.type === 'error' && error.error && typeof error.error === 'object' && !Array.isArray(error.error) && Number.isInteger(error.status) && error.status >= 100 && error.status <= 599) httpStatus = error.status
+        } catch { /* Only a known serialized upstream envelope has an HTTP status. */ }
+      }
+    }
+  }
+  const exit = Number.isInteger(code) ? `退出码 ${code}` : terminationSignal ? '信号终止' : '退出码未知'
+  const model = args[args.indexOf('--model') + 1]
+  const modelContext = args.includes('--model') && typeof model === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(model) ? `；请求规划模型：${model}` : ''
+  return `Codex 文字执行失败（${exit}；${phase}）：${category}${httpStatus ? `；CLI 报告上游 HTTP ${httpStatus}` : ''}${modelContext}`
+}
+
+// Ask the installed CLI to parse its own config. This connection never creates a thread/turn.
+// Only the validated model ID crosses into the isolated generation process.
+export function readCodexConfiguredModel(executablePath, cwd, signal) {
+  return new Promise((resolveModel, rejectModel) => {
+    if (signal?.aborted) { rejectModel(cancelledError()); return }
+    const args = ['app-server', '--listen', 'stdio://']
+    for (const feature of ['hooks', 'plugins', 'apps', 'memories', 'multi_agent', 'shell_tool', 'unified_exec', 'browser_use', 'computer_use', 'workspace_dependencies', 'code_mode', 'code_mode_only']) args.push('--disable', feature)
+    for (const setting of ['approval_policy="never"', 'sandbox_mode="workspace-write"', 'sandbox_workspace_write.network_access=false', 'sandbox_workspace_write.exclude_slash_tmp=true', 'sandbox_workspace_write.exclude_tmpdir_env_var=true', 'project_doc_max_bytes=0', 'notify=[]', 'web_search="disabled"']) args.push('-c', setting)
+    const child = spawn(executablePath, args, {
+      cwd,
+      env: { ...buildCliEnvironment('codex', cwd), TMPDIR: cwd, NO_COLOR: '1', TERM: 'dumb' },
+      shell: false, detached: process.platform !== 'win32', windowsHide: true,
+      stdio: ['pipe', 'pipe', 'ignore']
+    })
+    let settled = false
+    let buffer = ''
+    let outputBytes = 0
+    const finish = (error, model) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      if (child.pid) {
+        try { if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL') } catch { child.kill('SIGKILL') }
+      }
+      if (error) rejectModel(error)
+      else resolveModel(model)
+    }
+    const readError = () => new Error('无法读取现有 Codex CLI 模型设置；未提交生成')
+    const onAbort = () => finish(cancelledError())
+    const timer = setTimeout(() => finish(new Error('读取现有 Codex CLI 模型设置超时；未提交生成')), 8000)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    child.on('error', () => finish(readError()))
+    child.on('close', () => { if (!settled) finish(readError()) })
+    child.stdin.on('error', () => finish(readError()))
+    const send = message => child.stdin.write(`${JSON.stringify(message)}\n`)
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', chunk => {
+      if (settled) return
+      outputBytes += Buffer.byteLength(chunk)
+      if (outputBytes > 2 * 1024 * 1024) { finish(readError()); return }
+      buffer += chunk
+      for (;;) {
+        const newline = buffer.indexOf('\n')
+        if (newline < 0 || settled) break
+        const line = buffer.slice(0, newline)
+        buffer = buffer.slice(newline + 1)
+        let message
+        try { message = JSON.parse(line) } catch { finish(readError()); return }
+        if (message.method && message.id !== undefined) {
+          send({ id: message.id, error: { code: -32601, message: 'This host only reads model settings.' } })
+          continue
+        }
+        if (message.id === 1) {
+          if (message.error || !message.result) { finish(readError()); return }
+          send({ method: 'initialized', params: {} })
+          send({ id: 2, method: 'config/read', params: { includeLayers: false, cwd } })
+        } else if (message.id === 2) {
+          const config = message.result?.config
+          if (message.error || !config || typeof config !== 'object' || Array.isArray(config)) { finish(readError()); return }
+          if (config.model_provider != null && config.model_provider !== 'openai') {
+            finish(new Error('现有 Codex CLI 配置了自定义供应商；当前接入不会继承其计费路径或自动换服务'))
+            return
+          }
+          if (config.model == null) finish(null, null)
+          else if (typeof config.model === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(config.model)) finish(null, config.model)
+          else finish(new Error('现有 Codex CLI 模型设置无效；未回退到其他模型'))
+        }
+      }
+    })
+    send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'ai_creator_workbench_settings', version: appVersion } } })
+    if (signal?.aborted) onAbort()
+  })
+}
+
 export function runCliProcess(executablePath, args, input, { driverId, cwd, signal, timeoutMs = 120000, maxOutputBytes = 1024 * 1024 } = {}) {
   return new Promise((resolveProcess, rejectProcess) => {
     if (signal?.aborted) { rejectProcess(cancelledError()); return }
@@ -333,7 +459,8 @@ export function runCliProcess(executablePath, args, input, { driverId, cwd, sign
       } else if (outputBytes > maxOutputBytes) {
         rejectProcess(Object.assign(new Error('CLI 输出超过限制'), { statusCode: 413 }))
       } else if (code !== 0) {
-        rejectProcess(Object.assign(new Error(sanitizeCliError(diagnostics)), { statusCode: 502 }))
+        const message = driverId === 'codex' ? codexExecutionError(diagnostics, output, code, terminationSignal, args) : sanitizeCliError(diagnostics)
+        rejectProcess(Object.assign(new Error(message), { statusCode: 502 }))
       } else if (!output && driverId !== 'codex') {
         rejectProcess(Object.assign(new Error('CLI 未返回内容'), { statusCode: 502 }))
       } else {
@@ -379,6 +506,7 @@ export async function handleCliGenerateRequest(request, response, dependencies =
     if (['antigravity', 'codex', 'claude'].includes(payload.driverId) && payload.allowUserProfile !== true) throw Object.assign(new Error('请先确认本次 CLI 调用的登录态与上下文使用'), { statusCode: 403 })
     const driver = cliDrivers.find((item) => item.id === payload.driverId && item.generateArgs)
     if (!driver) throw Object.assign(new Error('该 CLI 未在受控驱动列表中'), { statusCode: 400 })
+    if (driver.id === 'codex' && payload.model !== undefined && (typeof payload.model !== 'string' || (payload.model.trim() && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(payload.model.trim())))) throw Object.assign(new Error('Codex 规划模型 ID 无效；未提交生成'), { statusCode: 400 })
     if (getCliExecutionStatus(driver) !== 'available') {
       throw Object.assign(new Error('CLI 安全模式需要通过环境变量显式提供模型凭据'), { statusCode: 401 })
     }
@@ -391,6 +519,10 @@ export async function handleCliGenerateRequest(request, response, dependencies =
     const claudeLogin = driver.id === 'claude' && !process.env.ANTHROPIC_API_KEY
     const answerPath = join(runDirectory, 'answer.txt')
     const args = driver.id === 'codex' ? [...driver.generateArgs, '--output-last-message', answerPath] : claudeLogin ? CLAUDE_LOGIN_ARGS : driver.generateArgs
+    if (driver.id === 'codex') {
+      const model = payload.model?.trim() || await (dependencies.readCodexConfiguredModel || readCodexConfiguredModel)(executablePath, runDirectory, controller.signal)
+      if (model) args.push('--model', model)
+    }
     assertConnected()
     let output = await executeCli(executablePath, args, driver.id === 'antigravity' ? antigravityInput(prompt) : prompt, {
       cwd: runDirectory,
