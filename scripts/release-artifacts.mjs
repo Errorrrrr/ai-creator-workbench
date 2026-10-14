@@ -5,11 +5,12 @@ import { execFileSync } from 'node:child_process'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { checkRelease, parseReleaseTag } from './check-release-version.mjs'
+import { RELEASES_URL, parseRelease } from '../src/updates.js'
 
 export const RELEASE_TARGET = 'aarch64-apple-darwin'
 export function releaseAssetNames(version) {
   parseReleaseTag(`v${version}`)
-  return [`ai-creator-workbench_${version}_aarch64.dmg`, `ai-creator-workbench_${version}_aarch64.app.zip`, 'SHA256SUMS']
+  return [`ai-creator-workbench_${version}_aarch64.dmg`, `ai-creator-workbench_${version}_aarch64.app.zip`, 'latest.json', 'SHA256SUMS']
 }
 export async function sha256(path) {
   const hash = createHash('sha256')
@@ -26,6 +27,15 @@ export async function createReleaseManifest(directory, release) {
   const names = releaseAssetNames(release.version)
   const assets = []
   for (const name of names.slice(0, 2)) assets.push(await fileRecord(directory, name))
+  const update = {
+    tag_name: release.tag, draft: false, prerelease: parseReleaseTag(release.tag).prerelease.length > 0,
+    html_url: `${RELEASES_URL}/tag/${release.tag}`,
+    body: release.notes || `AI 创作工作台 ${release.tag}`,
+    published_at: new Date().toISOString(),
+    assets: assets.map(asset => ({ name: asset.name, state: 'uploaded', browser_download_url: `${RELEASES_URL}/download/${release.tag}/${asset.name}` }))
+  }
+  await writeFile(join(directory, 'latest.json'), `${JSON.stringify(update, null, 2)}\n`)
+  assets.push(await fileRecord(directory, 'latest.json'))
   await writeFile(join(directory, 'SHA256SUMS'), assets.map(asset => `${asset.sha256}  ${asset.name}\n`).join(''))
   assets.push(await fileRecord(directory, 'SHA256SUMS'))
   const manifest = { format: 'ai-creator-workbench-release', version: 1, tag: release.tag, releaseVersion: release.version, commit: release.commit, target: RELEASE_TARGET, assets }
@@ -45,7 +55,12 @@ export async function verifyReleaseArtifacts(directory, { tag, commit }) {
     const actual = await fileRecord(directory, asset.name)
     if (actual.size !== asset.size || actual.sha256 !== asset.sha256) throw new Error(`发布文件校验失败：${asset.name}`)
   }
-  const expectedChecksums = manifest.assets.slice(0, 2).map(asset => `${asset.sha256}  ${asset.name}\n`).join('')
+  const update = JSON.parse(await readFile(join(directory, 'latest.json'), 'utf8'))
+  if (update.tag_name !== tag || update.draft !== false || update.prerelease !== (release.prerelease.length > 0)
+    || update.html_url !== `${RELEASES_URL}/tag/${tag}`
+    || JSON.stringify(update.assets) !== JSON.stringify(manifest.assets.slice(0, 2).map(asset => ({ name: asset.name, state: 'uploaded', browser_download_url: `${RELEASES_URL}/download/${tag}/${asset.name}` })))) throw new Error('更新清单与发布版本或安装包不一致')
+  if (!release.prerelease.length) parseRelease(update, { currentVersion: release.version, platform: 'macos', architecture: 'aarch64' })
+  const expectedChecksums = manifest.assets.slice(0, 3).map(asset => `${asset.sha256}  ${asset.name}\n`).join('')
   if (await readFile(join(directory, 'SHA256SUMS'), 'utf8') !== expectedChecksums) throw new Error('SHA256SUMS 内容与发布文件不一致')
   return manifest
 }
@@ -73,7 +88,10 @@ export async function prepareReleaseArtifacts(tag, { root = process.cwd() } = {}
   const names = releaseAssetNames(release.version)
   await copyFile(dmg, join(output, names[0]))
   execFileSync('/usr/bin/ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', app, join(output, names[1])], { stdio: 'inherit' })
-  await createReleaseManifest(output, release)
+  let notes
+  try { notes = await readFile(join(root, 'specs', `发布说明-${tag}.md`), 'utf8') }
+  catch (error) { if (error.code !== 'ENOENT') throw error }
+  await createReleaseManifest(output, { ...release, notes })
   await verifyReleaseArtifacts(output, release)
   return { directory: basename(output), ...release }
 }

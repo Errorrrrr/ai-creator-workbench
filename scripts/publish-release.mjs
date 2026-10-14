@@ -43,7 +43,7 @@ export async function publishRelease({ github, context, directory, tag, commit }
   // Failures leave only a private draft; retries replace its incomplete asset set.
   for (const asset of manifest.assets) {
     const data = await readFile(join(directory, asset.name))
-    const contentType = asset.name.endsWith('.dmg') ? 'application/x-apple-diskimage' : asset.name.endsWith('.zip') ? 'application/zip' : 'text/plain'
+    const contentType = asset.name.endsWith('.dmg') ? 'application/x-apple-diskimage' : asset.name.endsWith('.zip') ? 'application/zip' : asset.name.endsWith('.json') ? 'application/json' : 'text/plain'
     await github.rest.repos.uploadReleaseAsset({ ...repo, release_id: existing.id, name: asset.name, data, headers: { 'content-type': contentType, 'content-length': data.length } })
   }
   const uploaded = await github.paginate(github.rest.repos.listReleaseAssets, { ...repo, release_id: existing.id, per_page: 100 })

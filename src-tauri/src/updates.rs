@@ -6,10 +6,26 @@ use serde_json::Value;
 use std::{cmp::Ordering, time::Duration};
 
 const RELEASES_URL: &str = "https://github.com/Errorrrrr/ai-creator-workbench/releases";
-const LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/Errorrrrr/ai-creator-workbench/releases/latest";
+const UPDATE_MANIFEST_URL: &str =
+    "https://github.com/Errorrrrr/ai-creator-workbench/releases/latest/download/latest.json";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn trusted_manifest_location(url: &Url) -> bool {
+    let github_path = url.path()
+        == "/Errorrrrr/ai-creator-workbench/releases/latest/download/latest.json"
+        || url
+            .path()
+            .strip_prefix("/Errorrrrr/ai-creator-workbench/releases/download/")
+            .and_then(|path| path.split_once('/'))
+            .is_some_and(|(tag, file)| !tag.is_empty() && file == "latest.json");
+    url.scheme() == "https"
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && (url.host_str() == Some("release-assets.githubusercontent.com")
+            || (url.host_str() == Some("github.com") && github_path))
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,7 +136,7 @@ fn empty_result(
         current_version: current_version.into(),
         latest_version: None,
         published_at: None,
-        notes: "未找到可访问的稳定发布；可能尚未发布，或仓库当前不可访问。".into(),
+        notes: "未找到可访问的稳定更新清单；可能尚未发布更新清单，或仓库当前不可访问。".into(),
         release_url: Some(RELEASES_URL.into()),
         download_url: None,
         asset_name: None,
@@ -255,9 +271,9 @@ fn parse_release(
     Ok(result)
 }
 
-fn status_error(status: u16, remaining: Option<&str>) -> String {
-    if status == 429 || (status == 403 && remaining == Some("0")) {
-        "GitHub 检查更新次数已达上限，请稍后重试".into()
+fn status_error(status: u16) -> String {
+    if status == 429 {
+        "GitHub 下载服务暂时限制请求，请稍后重试".into()
     } else if matches!(status, 401 | 403) {
         "GitHub 暂时拒绝访问此发布信息，请稍后重试".into()
     } else {
@@ -275,13 +291,18 @@ pub(crate) async fn check_for_updates() -> Result<UpdateCheck, String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(CHECK_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > 5 || !trusted_manifest_location(attempt.url()) {
+                attempt.error("更新清单重定向地址不受信任或次数过多")
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .map_err(|_| "无法初始化更新检查")?;
     let response = client
-        .get(LATEST_RELEASE_API)
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
+        .get(UPDATE_MANIFEST_URL)
+        .header(reqwest::header::ACCEPT, "application/json")
         .header(
             reqwest::header::USER_AGENT,
             format!("AI-Creator-Workbench/{}", app_version()),
@@ -299,13 +320,7 @@ pub(crate) async fn check_for_updates() -> Result<UpdateCheck, String> {
         return empty_result(&app_version(), std::env::consts::OS, std::env::consts::ARCH);
     }
     if !response.status().is_success() {
-        return Err(status_error(
-            response.status().as_u16(),
-            response
-                .headers()
-                .get("x-ratelimit-remaining")
-                .and_then(|value| value.to_str().ok()),
-        ));
+        return Err(status_error(response.status().as_u16()));
     }
     if response
         .content_length()
@@ -456,7 +471,7 @@ mod tests {
         let missing = empty_result("0.3.0", "macos", "aarch64").unwrap();
         assert_eq!(missing.status, "no_release");
         assert!(missing.notes.contains("仓库当前不可访问"));
-        assert!(status_error(403, Some("0")).contains("次数已达上限"));
-        assert!(status_error(403, None).contains("拒绝访问"));
+        assert!(status_error(429).contains("暂时限制请求"));
+        assert!(status_error(403).contains("拒绝访问"));
     }
 }
