@@ -85,7 +85,7 @@ async function artifacts(t) {
 
 test('release artifacts are complete, regular non-empty files and match their SHA256 manifest', async t => {
   const { directory, release, names } = await artifacts(t)
-  assert.equal((await verifyReleaseArtifacts(directory, release)).assets.length, 3)
+  assert.equal((await verifyReleaseArtifacts(directory, release)).assets.length, 4)
   await writeFile(join(directory, names[0]), 'tampered')
   await assert.rejects(verifyReleaseArtifacts(directory, release), /校验失败/)
 })
@@ -128,10 +128,10 @@ test('publication uploads and verifies all assets privately before making one fi
   assert.equal(fake.events[0].type, 'create')
   assert.equal(fake.events[0].args.draft, true)
   assert.equal(fake.events[0].args.make_latest, 'false')
-  assert.equal(fake.events.filter(event => event.type === 'upload').length, 3)
+  assert.equal(fake.events.filter(event => event.type === 'upload').length, 4)
   assert.equal(fake.events.at(-1).args.draft, false)
   assert.equal(fake.events.at(-1).args.make_latest, 'true')
-  assert.equal(result.assets.length, 3)
+  assert.equal(result.assets.length, 4)
 })
 
 test('failed uploads stay private and cannot replace Latest with a partial release', async t => {

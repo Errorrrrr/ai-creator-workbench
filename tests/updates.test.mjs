@@ -67,18 +67,18 @@ test('official URL allowlist rejects credentials, alternate hosts, query strings
   ]) assert.throws(() => validateUpdateUrl(url), /链接/)
 })
 
-test('update check uses only the fixed unauthenticated latest endpoint and refuses redirects', async () => {
+test('update check uses the static release attachment with manually validated redirects and no API credentials', async () => {
   let request
   const result = await checkForUpdates({ ...options, fetchImpl: async (url, init) => {
     request = { url, init }
     return new Response(JSON.stringify(release()))
   } })
   assert.equal(result.status, 'update_available')
-  assert.equal(request.url, 'https://api.github.com/repos/Errorrrrr/ai-creator-workbench/releases/latest')
+  assert.equal(request.url, 'https://github.com/Errorrrrr/ai-creator-workbench/releases/latest/download/latest.json')
   assert.equal(request.init.method, 'GET')
-  assert.equal(request.init.redirect, 'error')
+  assert.equal(request.init.redirect, 'manual')
   assert.equal(request.init.headers.Authorization, undefined)
-  assert.equal(request.init.headers['X-GitHub-Api-Version'], '2022-11-28')
+  assert.equal(request.init.headers['X-GitHub-Api-Version'], undefined)
 })
 
 test('404 means no accessible release, never that the installed version is current', async () => {
@@ -90,8 +90,8 @@ test('404 means no accessible release, never that the installed version is curre
 
 test('rate limits, authorization errors, server errors and invalid JSON are explicit failures', async () => {
   for (const [response, error] of [
-    [new Response('', { status: 429 }), /次数已达上限/],
-    [new Response('', { status: 403, headers: { 'x-ratelimit-remaining': '0' } }), /次数已达上限/],
+    [new Response('', { status: 429 }), /暂时限制请求/],
+    [new Response('', { status: 403, headers: { 'x-ratelimit-remaining': '0' } }), /拒绝访问/],
     [new Response('', { status: 403 }), /拒绝访问/],
     [new Response('', { status: 500 }), /HTTP 500/],
     [new Response('not json'), /无法解析/]

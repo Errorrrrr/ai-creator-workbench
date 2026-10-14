@@ -1,11 +1,36 @@
 export const UPDATE_REPOSITORY = 'Errorrrrr/ai-creator-workbench'
 export const RELEASES_URL = `https://github.com/${UPDATE_REPOSITORY}/releases`
-const LATEST_RELEASE_API = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases/latest`
+export const UPDATE_MANIFEST_URL = `${RELEASES_URL}/latest/download/latest.json`
 const MAX_RESPONSE_BYTES = 1024 * 1024
 const MAX_NOTES_CHARACTERS = 12000
 
 function updateError(message, statusCode = 502) {
   return Object.assign(new Error(message), { statusCode })
+}
+
+function validateManifestLocation(value) {
+  const url = new URL(value)
+  const githubPath = url.pathname === `/Errorrrrr/ai-creator-workbench/releases/latest/download/latest.json`
+    || /^\/Errorrrrr\/ai-creator-workbench\/releases\/download\/[^/]+\/latest\.json$/.test(url.pathname)
+  const allowedHost = (url.hostname === 'github.com' && githubPath)
+    || url.hostname === 'release-assets.githubusercontent.com'
+  if (url.protocol !== 'https:' || url.port || url.username || url.password || !allowedHost) throw updateError('更新清单重定向地址不受信任')
+  return url.href
+}
+
+async function fetchManifest(fetchImpl, signal, currentVersion) {
+  let url = UPDATE_MANIFEST_URL
+  for (let redirects = 0; redirects <= 5; redirects++) {
+    const response = await fetchImpl(url, {
+      method: 'GET', redirect: 'manual', signal,
+      headers: { Accept: 'application/json', 'User-Agent': `AI-Creator-Workbench/${currentVersion}` }
+    })
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response
+    response.body?.cancel().catch(() => {})
+    const location = response.headers.get('location')
+    if (!location || redirects === 5) throw updateError('更新清单重定向次数过多或缺少地址')
+    url = validateManifestLocation(new URL(location, url).href)
+  }
 }
 
 function parsedUpdateUrl(value) {
@@ -79,7 +104,7 @@ function assetScore(name, arch) {
 
 function emptyResult(currentVersion, platform, architecture) {
   semver(currentVersion)
-  return { status: 'no_release', currentVersion, latestVersion: null, publishedAt: null, notes: '未找到可访问的稳定发布；可能尚未发布，或仓库当前不可访问。', releaseUrl: RELEASES_URL, downloadUrl: null, assetName: null, platform: platformInfo(platform, architecture).label }
+  return { status: 'no_release', currentVersion, latestVersion: null, publishedAt: null, notes: '未找到可访问的稳定更新清单；可能尚未发布更新清单，或仓库当前不可访问。', releaseUrl: RELEASES_URL, downloadUrl: null, assetName: null, platform: platformInfo(platform, architecture).label }
 }
 
 export function parseRelease(payload, { currentVersion, platform, architecture }) {
@@ -153,16 +178,16 @@ export async function checkForUpdates({ currentVersion, platform, architecture, 
   const request = (async () => {
     let response
     try {
-      response = await fetchImpl(LATEST_RELEASE_API, {
-        method: 'GET', redirect: 'error', signal: controller.signal,
-        headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': `AI-Creator-Workbench/${currentVersion}` }
-      })
-    } catch { throw updateError('无法连接 GitHub 检查更新，请检查网络后重试') }
+      response = await fetchManifest(fetchImpl, controller.signal, currentVersion)
+    } catch (error) {
+      if (error?.statusCode) throw error
+      throw updateError('无法连接 GitHub 下载更新清单，请检查网络后重试')
+    }
     if (controller.signal.aborted) { response.body?.cancel().catch(() => {}); throw updateError('检查更新超时，请稍后重试', 504) }
     if (!response.ok) {
       response.body?.cancel().catch(() => {})
       if (response.status === 404) return empty
-      if (response.status === 429 || (response.status === 403 && response.headers.get('x-ratelimit-remaining') === '0')) throw updateError('GitHub 检查更新次数已达上限，请稍后重试', 429)
+      if (response.status === 429) throw updateError('GitHub 下载服务暂时限制请求，请稍后重试', 429)
       if (response.status === 401 || response.status === 403) throw updateError('GitHub 暂时拒绝访问此发布信息，请稍后重试')
       throw updateError(`GitHub 检查更新返回 HTTP ${response.status}`)
     }
