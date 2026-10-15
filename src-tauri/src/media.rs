@@ -178,6 +178,7 @@ pub(crate) fn database(app: &tauri::AppHandle) -> Result<Connection, String> {
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
         .map_err(|e| e.to_string())?;
     if version == 2 {
+        crate::project_deletion::initialize(&db)?;
         return Ok(db);
     }
     let migration = db
@@ -195,6 +196,7 @@ pub(crate) fn database(app: &tauri::AppHandle) -> Result<Connection, String> {
         CREATE INDEX IF NOT EXISTS media_registrations_project ON media_registrations(project_id);
         INSERT INTO media_schema(id,version) VALUES(1,2) ON CONFLICT(id) DO UPDATE SET version=2;").map_err(|e| e.to_string())?;
     migration.commit().map_err(|e| e.to_string())?;
+    crate::project_deletion::initialize(&db)?;
     Ok(db)
 }
 
@@ -462,11 +464,16 @@ pub(crate) async fn import_path(
         crc32: checksum_file(temporary.path(), copied)?,
         version,
     };
+    let mut db = database(app)?;
+    let transaction = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    crate::project_deletion::ensure_live(&transaction, project_id)?;
     fs::hard_link(temporary.path(), root.join("incoming").join(staging_file))
         .map_err(|e| format!("暂存媒体失败，原文件保留：{e}"))?;
     sync_directory(&root.join("incoming"))
         .map_err(|_| "媒体暂存目录同步失败，未登记到项目，原文件保留".to_string())?;
-    database(app)?
+    transaction
         .execute(
             "INSERT INTO media_registrations(id,project_id,payload) VALUES(?1,?2,?3)",
             params![
@@ -476,6 +483,7 @@ pub(crate) async fn import_path(
             ],
         )
         .map_err(|e| format!("媒体已暂存但恢复记录保存失败，原文件保留：{e}"))?;
+    transaction.commit().map_err(|e| e.to_string())?;
     register_pending(app, &registration)
 }
 
@@ -514,6 +522,11 @@ fn register_pending(app: &tauri::AppHandle, registration: &Registration) -> Resu
     {
         return Err("待恢复文件登记路径无效".into());
     }
+    let mut db = database(app)?;
+    let transaction = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    crate::project_deletion::ensure_live(&transaction, project_id)?;
     let root = media_root(app)?;
     let path = root.join("files").join(relative_path);
     if let Some(staging_file) = staging_file {
@@ -542,10 +555,6 @@ fn register_pending(app: &tauri::AppHandle, registration: &Registration) -> Resu
         return Err("待恢复媒体真实类型与登记不符".into());
     }
     sync_directory(&root.join("files"))?;
-    let mut db = database(app)?;
-    let transaction = db
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| e.to_string())?;
     let pending: bool = transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM media_registrations WHERE id=?1 AND project_id=?2)",

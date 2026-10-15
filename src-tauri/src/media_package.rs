@@ -153,6 +153,7 @@ fn portable_workflow(workspace: &mut Value) -> Result<(), String> {
 fn initialize(app: &tauri::AppHandle) -> Result<rusqlite::Connection, String> {
     let db = media::database(app)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS media_imports(id TEXT PRIMARY KEY,project_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL,created_at TEXT NOT NULL);").map_err(|e| e.to_string())?;
+    crate::project_deletion::initialize(&db)?;
     Ok(db)
 }
 
@@ -478,6 +479,7 @@ pub(crate) async fn media_import_package(
 
 fn stage_import(app: &tauri::AppHandle, project_id: &str, path: &Path) -> Result<Value, String> {
     let db = initialize(app)?;
+    crate::project_deletion::ensure_live(&db, project_id)?;
     for payload in [
         storage::library_read(app.clone())?,
         storage::library_read_archives(app.clone())?,

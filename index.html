@@ -738,6 +738,14 @@
       </div>
       <div class="library-management"><button class="text-button" type="button" data-action="backup-library">备份全部文字项目与灵感</button><button class="text-button" type="button" data-action="recover-library">恢复上一份内部快照</button><button class="text-button" type="button" data-action="pending-media-imports">恢复待完成的媒体导入</button></div><p class="dialog-description">JSON 备份包含活动项目、归档与灵感的文字／结构，不含实际媒体或密钥。含图片、视频的项目请在素材库导出 .acwpack 完整项目包。恢复会新增副本；归档项目随时可恢复。</p></div>
     </dialog>
+    <dialog class="app-dialog form-dialog" id="deleteProjectDialog" aria-labelledby="deleteProjectTitle" aria-describedby="deleteProjectDescription">
+      <form method="dialog">
+        <h2 id="deleteProjectTitle">永久删除项目？</h2>
+        <p>即将删除：<strong id="deleteProjectName"></strong></p>
+        <p id="deleteProjectDescription" class="dialog-description">将删除正文、历史版本、知识资料及项目内的图片、视频和任务记录，内部快照也不能恢复。此前导出的备份和外部原始文件保留。此操作无法撤销。</p>
+        <div class="dialog-actions"><button class="secondary-button" type="submit" value="cancel" autofocus>取消</button><button class="secondary-button danger-button" type="submit" value="delete">永久删除</button></div>
+      </form>
+    </dialog>
     <dialog class="app-dialog cli-consent-dialog" id="cliConsentDialog" aria-labelledby="cliConsentTitle" aria-describedby="cliConsentSummary cliConsentBoundary">
       <form method="dialog">
         <div class="dialog-header"><div><span class="eyebrow">执行前确认</span><h2 id="cliConsentTitle">确认 CLI 生成</h2></div><button class="icon-button" type="submit" value="cancel" aria-label="取消生成"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>

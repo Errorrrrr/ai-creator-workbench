@@ -40,6 +40,29 @@ impl Default for MediaRuntime {
 }
 
 impl MediaRuntime {
+    pub(crate) fn guard_project_deletion<'a>(
+        &'a self,
+        db: &rusqlite::Connection,
+        project_id: &str,
+    ) -> Result<std::sync::MutexGuard<'a, HashMap<String, CancellationToken>>, String> {
+        let running = self.running.lock().map_err(|_| "媒体运行状态不可用")?;
+        let has_jobs: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_jobs')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+        if has_jobs {
+            let mut statement = db
+                .prepare("SELECT id FROM media_jobs WHERE project_id=?1")
+                .map_err(|e| e.to_string())?;
+            let ids = statement
+                .query_map([project_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            for id in ids {
+                if running.contains_key(&id.map_err(|e| e.to_string())?) {
+                    return Err("项目仍有媒体任务，请先停止任务并等待结束后再删除".into());
+                }
+            }
+        }
+        Ok(running)
+    }
+
     pub(crate) fn register_cli(
         &self,
         id: &str,
@@ -439,6 +462,7 @@ fn submit_requests(
             }
         }
     }
+    crate::project_deletion::ensure_live(&transaction, &project_id)?;
     let time = media::now();
     let mut prepared = Vec::with_capacity(requests.len());
     for (index, request) in requests.into_iter().enumerate() {

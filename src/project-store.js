@@ -176,7 +176,17 @@ function readBrowser(key = 'current') {
   })
 }
 
-function writeBrowser(next, revision, nextArchives) {
+function withoutProject(value, id) {
+  if (!value) return value
+  const copy = structuredClone(value)
+  if (Array.isArray(copy)) return copy.filter(project => project.id !== id)
+  copy.projects = copy.projects.filter(project => project.id !== id)
+  if (copy.legacyTemplateBackups) copy.legacyTemplateBackups = copy.legacyTemplateBackups.filter(project => project.id !== id)
+  if (copy.activeId === id) copy.activeId = copy.projects[0]?.id || null
+  return copy
+}
+
+function writeBrowser(next, revision, nextArchives, deletedProjectId = null) {
   return new Promise((resolve, reject) => {
     const transaction = database.transaction('library', 'readwrite')
     const store = transaction.objectStore('library')
@@ -190,8 +200,8 @@ function writeBrowser(next, revision, nextArchives) {
         return
       }
       if (current.result) {
-        store.put(current.result, 'previous')
-        store.put(archived.result || [], 'previousArchives')
+        store.put(deletedProjectId ? withoutProject(current.result, deletedProjectId) : current.result, 'previous')
+        store.put(deletedProjectId ? withoutProject(archived.result || [], deletedProjectId) : archived.result || [], 'previousArchives')
       }
       store.put(next, 'current')
       store.put(nextArchives, 'archives')
@@ -217,7 +227,7 @@ function serializedLibrary(next, nextArchives) {
   return { payload, archivePayload }
 }
 
-function commit(change, { mediaImportId = null } = {}) {
+function commit(change, { mediaImportId = null, deletedProjectId = null } = {}) {
   const operation = queue.then(async () => {
     assert(library, '项目库尚未载入，请先导出或恢复内部快照')
     const next = structuredClone(library)
@@ -226,12 +236,13 @@ function commit(change, { mediaImportId = null } = {}) {
     if (JSON.stringify(next) === JSON.stringify(library) && JSON.stringify(nextArchives) === JSON.stringify(archives)) return result
     next.revision = library.revision + 1
     const { payload, archivePayload } = serializedLibrary(next, nextArchives)
-    if (invoke) await invoke('library_write', { payload, archivePayload, expectedRevision: library.revision, ...(mediaImportId ? { mediaImportId } : {}) })
+    let cleanupPending = 0
+    if (invoke) cleanupPending = await invoke('library_write', { payload, archivePayload, expectedRevision: library.revision, ...(mediaImportId ? { mediaImportId } : {}), ...(deletedProjectId ? { deletedProjectId } : {}) }) || 0
     else if (mediaImportId) throw new Error('完整媒体包必须在桌面版恢复')
-    else await writeBrowser(next, library.revision, nextArchives)
+    else await writeBrowser(next, library.revision, nextArchives, deletedProjectId)
     library = next
     archives = nextArchives
-    return result
+    return deletedProjectId ? { cleanupPending } : result
   })
   queue = operation.catch(() => {})
   return operation
@@ -377,6 +388,17 @@ export async function downloadDocument(name, content) {
 export function listArchivedProjects() {
   return archives.map(item => ({ id: item.id, name: item.workspace.project.name, type: item.workspace.project.type, updatedAt: item.updatedAt, archivedAt: item.archivedAt }))
     .sort((a, b) => b.archivedAt.localeCompare(a.archivedAt))
+}
+
+export function deleteProject(id) {
+  return commit((next, nextArchives) => {
+    assert(next.projects.some(project => project.id === id) || nextArchives.some(project => project.id === id), '未找到项目')
+    next.projects = next.projects.filter(project => project.id !== id)
+    const archivedIndex = nextArchives.findIndex(project => project.id === id)
+    if (archivedIndex >= 0) nextArchives.splice(archivedIndex, 1)
+    if (next.legacyTemplateBackups) next.legacyTemplateBackups = next.legacyTemplateBackups.filter(project => project.id !== id)
+    if (next.activeId === id) next.activeId = next.projects[0]?.id || null
+  }, { deletedProjectId: id })
 }
 
 export function archiveProject(id, workspace = null, index = null) {

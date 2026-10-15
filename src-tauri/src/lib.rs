@@ -6,6 +6,7 @@ mod media_integrity;
 mod media_jobs;
 mod media_package;
 mod media_video;
+mod project_deletion;
 mod runtime;
 mod storage;
 mod updates;

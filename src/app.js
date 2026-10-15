@@ -4,7 +4,7 @@ import {
   searchKnowledgeIndex,
   serializeKnowledgeIndex
 } from './knowledge-index.js'
-import { initializeProjects, getActiveProject, listProjects, saveProject, createProject, activateProject, renameProject, projectBackup, parseBackup, downloadDocument, archiveProject, restoreProject, listArchivedProjects, libraryBackup, parseLibraryBackup, importLibraryBackup, readPreviousLibrary, restorePreviousLibrary, getStorageMetrics, rawLibrarySnapshot, MAX_BACKUP_BYTES, validateWorkspace } from './project-store.js'
+import { initializeProjects, getActiveProject, listProjects, saveProject, createProject, activateProject, renameProject, projectBackup, parseBackup, downloadDocument, archiveProject, restoreProject, deleteProject, listArchivedProjects, libraryBackup, parseLibraryBackup, importLibraryBackup, readPreviousLibrary, restorePreviousLibrary, getStorageMetrics, rawLibrarySnapshot, MAX_BACKUP_BYTES, validateWorkspace } from './project-store.js'
 import { buildSemanticIndex, semanticSearch, pruneSemanticIndex, semanticIndexCoverage } from './semantic-search.js'
 import { initializeInspirations } from './inspirations.js'
 import { initializeUpdates } from './update-ui.js'
@@ -3455,6 +3455,7 @@ async function handleAction(button, action) {
     case 'project-library': await openProjectLibrary(); break
     case 'toggle-archived-projects': showingArchivedProjects = !showingArchivedProjects; await openProjectLibrary(); break
     case 'archive-project': await archiveCurrentProject(); break
+    case 'delete-project': await deleteSelectedProject(button.dataset.projectId); break
     case 'restore-archived-project': await restoreArchivedProject(button.dataset.projectId); break
     case 'backup-library': await exportLibrary(); break
     case 'recover-library': await recoverPreviousLibrary(); break
@@ -3867,7 +3868,17 @@ async function openProjectLibrary() {
     badge.className = 'project-list-status'
     badge.textContent = showingArchivedProjects ? '恢复并打开 →' : current ? '当前项目' : '打开项目 →'
     button.append(details, badge)
-    list.append(button)
+    const row = document.createElement('div')
+    row.className = 'project-list-row'
+    const remove = document.createElement('button')
+    remove.type = 'button'
+    remove.className = 'text-button danger-button'
+    remove.dataset.action = 'delete-project'
+    remove.dataset.projectId = project.id
+    remove.textContent = '删除'
+    remove.setAttribute('aria-label', `删除项目“${project.name}”`)
+    row.append(button, remove)
+    list.append(row)
   }
   if (!list.children.length) {
     const empty = document.createElement('div')
@@ -3881,6 +3892,37 @@ async function openProjectLibrary() {
   }
   document.querySelectorAll('[data-action="backup-project"], [data-action="export-project"], [data-action="rename-project"], [data-action="archive-project"]').forEach(button => { button.disabled = !activeProjectId })
   openDialog(document.querySelector('#projectLibraryDialog'))
+}
+
+function confirmProjectDeletion(project) {
+  const dialog = document.querySelector('#deleteProjectDialog')
+  if (dialog.open) return Promise.resolve(false)
+  document.querySelector('#deleteProjectName').textContent = project.name
+  dialog.returnValue = ''
+  return new Promise(resolve => {
+    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'delete'), { once: true })
+    openDialog(dialog)
+  })
+}
+
+async function deleteSelectedProject(id) {
+  if (projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy()) return
+  const project = [...listProjects(), ...listArchivedProjects()].find(item => item.id === id)
+  if (!project) return showToast('未找到项目，请重新打开项目库')
+  if (state.isGenerating) return showToast('请先停止当前文字生成，再删除项目')
+  if (!await confirmProjectDeletion(project)) return
+  if (projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy() || state.isGenerating) return
+  setProjectTransition(true)
+  try {
+    // Save only the project that survives deletion. A damaged/full target must remain deletable.
+    if (activeProjectId !== id && !await saveImmediately({ announce: false })) return
+    window.clearTimeout(state.saveTimer)
+    const result = await deleteProject(id)
+    if (activeProjectId === id) loadProjectSnapshot(getActiveProject())
+    await openProjectLibrary()
+    showToast(result.cleanupPending ? '项目已删除，部分媒体文件待清理；重新打开应用时会自动重试' : '项目已永久删除')
+  } catch (error) { showToast(readableError(error, '删除失败，项目已保留')) }
+  finally { setProjectTransition(false) }
 }
 
 async function archiveCurrentProject() {

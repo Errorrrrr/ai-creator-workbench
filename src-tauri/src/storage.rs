@@ -11,7 +11,8 @@ fn initialize_database(connection: &Connection) -> Result<(), String> {
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
-    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS library (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS archive_snapshots (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);").map_err(|e| e.to_string())
+    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS library (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS archive_snapshots (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);").map_err(|e| e.to_string())?;
+    crate::project_deletion::initialize(connection)
 }
 
 fn database(app: &tauri::AppHandle) -> Result<Connection, String> {
@@ -57,7 +58,11 @@ fn current_revision(connection: &Connection) -> Result<i64, String> {
 
 #[tauri::command]
 pub(crate) fn library_read(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    read_library(&database(&app)?, false)
+    let db = database(&app)?;
+    if let Ok(root) = crate::media::media_root(&app) {
+        let _ = crate::project_deletion::cleanup(&db, &root);
+    }
+    read_library(&db, false)
 }
 
 #[tauri::command]
@@ -113,6 +118,7 @@ fn write_library(
         expected_revision,
         None,
         None,
+        None,
     )
 }
 
@@ -123,6 +129,7 @@ fn write_library_with_media(
     expected_revision: i64,
     media_import_id: Option<&str>,
     media_root: Option<&std::path::Path>,
+    deleted_project_id: Option<&str>,
 ) -> Result<(), String> {
     validate_sizes(
         payload.len(),
@@ -153,6 +160,33 @@ fn write_library_with_media(
     if !archive_value.is_array() {
         return Err("归档库格式无效".into());
     }
+    crate::project_deletion::validate_library(&transaction, &value, &archive_value)?;
+    if let Some(id) = deleted_project_id {
+        if media_import_id.is_some() {
+            return Err("不能同时导入和删除项目".into());
+        }
+        let current: serde_json::Value =
+            serde_json::from_str(&read_library(&transaction, false)?.ok_or("未找到项目库")?)
+                .map_err(|e| e.to_string())?;
+        let old_archives: serde_json::Value = serde_json::from_str(
+            &read_archives(&transaction, false)?.unwrap_or_else(|| "[]".into()),
+        )
+        .map_err(|e| e.to_string())?;
+        let contains = |v: &serde_json::Value| {
+            v.as_array()
+                .is_some_and(|items| items.iter().any(|p| p["id"] == id))
+        };
+        if !contains(&current["projects"]) && !contains(&old_archives) {
+            return Err("未找到要删除的项目".into());
+        }
+        if contains(&value["projects"])
+            || contains(&archive_value)
+            || contains(&value["legacyTemplateBackups"])
+        {
+            return Err("删除后的项目库仍包含目标项目".into());
+        }
+        crate::project_deletion::prepare(&transaction, id)?;
+    }
     if let Some(import_id) = media_import_id {
         crate::media_package::apply_import(
             &transaction,
@@ -181,6 +215,24 @@ fn write_library_with_media(
             [archives],
         )
         .map_err(|e| e.to_string())?;
+    if let Some(id) = deleted_project_id {
+        for (table, previous) in [
+            ("library", read_library(&transaction, true)?),
+            ("archive_snapshots", read_archives(&transaction, true)?),
+        ] {
+            if let Some(previous) = previous {
+                let mut snapshot: serde_json::Value =
+                    serde_json::from_str(&previous).map_err(|e| e.to_string())?;
+                crate::project_deletion::remove_from_snapshot(&mut snapshot, id);
+                transaction
+                    .execute(
+                        &format!("UPDATE {table} SET payload=?1 WHERE id=2"),
+                        [snapshot.to_string()],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
     transaction.commit().map_err(|e| e.to_string())
 }
 
@@ -191,20 +243,46 @@ pub(crate) fn library_write(
     archive_payload: Option<String>,
     expected_revision: i64,
     media_import_id: Option<String>,
-) -> Result<(), String> {
+    deleted_project_id: Option<String>,
+) -> Result<usize, String> {
     let media_root = if media_import_id.is_some() {
         Some(crate::media::media_root(&app)?)
     } else {
         None
     };
+    let mut db = database(&app)?;
+    // Hold the worker registry lock until the deletion commits. A terminal job may
+    // still be unwinding; deleting its task directory while it runs is unsafe.
+    let runtime = app.state::<crate::media_jobs::MediaRuntime>();
+    let guard = if let Some(id) = deleted_project_id.as_deref() {
+        Some(runtime.guard_project_deletion(&db, id)?)
+    } else {
+        None
+    };
     write_library_with_media(
-        &mut database(&app)?,
+        &mut db,
         payload,
         archive_payload,
         expected_revision,
         media_import_id.as_deref(),
         media_root.as_deref(),
-    )
+        deleted_project_id.as_deref(),
+    )?;
+    drop(guard);
+    if deleted_project_id.is_some() {
+        // A committed deletion must not be reported as rolled back if file cleanup fails.
+        let pending = || {
+            db.query_row("SELECT count(*) FROM media_deletion_queue", [], |row| {
+                row.get::<_, usize>(0)
+            })
+            .unwrap_or(1)
+        };
+        Ok(crate::media::media_root(&app)
+            .and_then(|root| crate::project_deletion::cleanup(&db, &root))
+            .unwrap_or_else(|_| pending()))
+    } else {
+        Ok(0)
+    }
 }
 
 #[tauri::command]
@@ -330,6 +408,126 @@ mod tests {
         );
         assert_eq!(read_archives(&db, false).unwrap().unwrap(), "[]");
         assert_eq!(current_revision(&db).unwrap(), 3);
+    }
+
+    #[test]
+    fn project_deletion_scrubs_snapshots_and_is_atomic_on_stale_revision() {
+        let mut db = memory_database();
+        write_library(
+            &mut db,
+            payload(1, json!([{"id":"a"},{"id":"b"}])),
+            Some("[]".into()),
+            0,
+        )
+        .unwrap();
+        assert!(write_library_with_media(
+            &mut db,
+            payload(1, json!([{"id":"b"}])),
+            Some("[]".into()),
+            0,
+            None,
+            None,
+            Some("a")
+        )
+        .is_err());
+        assert!(crate::project_deletion::ensure_live(&db, "a").is_ok());
+        write_library_with_media(
+            &mut db,
+            payload(2, json!([{"id":"b"}])),
+            Some("[]".into()),
+            1,
+            None,
+            None,
+            Some("a"),
+        )
+        .unwrap();
+        let previous: serde_json::Value =
+            serde_json::from_str(&read_library(&db, true).unwrap().unwrap()).unwrap();
+        assert_eq!(previous["projects"], json!([{"id":"b"}]));
+        assert!(write_library(
+            &mut db,
+            payload(3, json!([{"id":"a"}])),
+            Some("[]".into()),
+            2
+        )
+        .is_err());
+        assert_eq!(current_revision(&db).unwrap(), 2);
+        write_library_with_media(
+            &mut db,
+            payload(3, json!([])),
+            Some("[]".into()),
+            2,
+            None,
+            None,
+            Some("b"),
+        )
+        .unwrap();
+        assert_eq!(current_revision(&db).unwrap(), 3);
+    }
+
+    #[test]
+    fn failed_library_write_rolls_back_the_deletion_tombstone_and_queue() {
+        let mut db = memory_database();
+        write_library(
+            &mut db,
+            payload(1, json!([{"id":"a"}])),
+            Some("[]".into()),
+            0,
+        )
+        .unwrap();
+        db.execute_batch("CREATE TABLE media_files(id TEXT PRIMARY KEY,project_id TEXT,relative_path TEXT); INSERT INTO media_files VALUES('file','a','file.png'); CREATE TRIGGER fail_delete BEFORE INSERT ON library WHEN NEW.id=1 AND NEW.revision=2 BEGIN SELECT RAISE(ABORT,'simulated disk failure'); END;").unwrap();
+        crate::project_deletion::initialize(&db).unwrap();
+        assert!(write_library_with_media(
+            &mut db,
+            payload(2, json!([])),
+            Some("[]".into()),
+            1,
+            None,
+            None,
+            Some("a")
+        )
+        .is_err());
+        assert!(crate::project_deletion::ensure_live(&db, "a").is_ok());
+        assert_eq!(current_revision(&db).unwrap(), 1);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM media_files", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM media_deletion_queue", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn deleting_an_archived_project_keeps_other_archives() {
+        let mut db = memory_database();
+        write_library(
+            &mut db,
+            payload(1, json!([])),
+            Some(json!([{"id":"a"},{"id":"b"}]).to_string()),
+            0,
+        )
+        .unwrap();
+        write_library_with_media(
+            &mut db,
+            payload(2, json!([])),
+            Some(json!([{"id":"b"}]).to_string()),
+            1,
+            None,
+            None,
+            Some("a"),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&read_archives(&db, true).unwrap().unwrap())
+                .unwrap(),
+            json!([{"id":"b"}])
+        );
     }
 
     #[test]
