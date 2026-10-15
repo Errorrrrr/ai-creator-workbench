@@ -16,6 +16,8 @@ import { configuredMediaAdapterId, mediaAdapterFor, mediaAdaptersForKind } from 
 import { OPERATION_CONTEXT_RESERVE, captureOperationContext, materializeOperationPlan, prepareOperationRequest } from './project-operations.js'
 import { initializeProjectPlanUI } from './project-plan-ui.js'
 import { creationSteps, initializeCreationNavigation } from './workflow-navigation.js'
+import { MAX_CANDIDATE_DRAFTS, candidateDraftsFor, upsertCandidateDraft, removeCandidateDraft } from './candidate-drafts.js'
+import { createReviewDiff } from './review-diff.js'
 
 let mediaWorkbench = null
 let projectPlanUI = null
@@ -404,6 +406,11 @@ const state = {
   activeGenerationId: null,
   generationText: '',
   generationContext: null,
+  candidateDrafts: structuredClone(storedWorkspace.candidateDrafts || []),
+  activeCandidateId: null,
+  candidateCreatedAt: null,
+  candidateStatus: 'partial',
+  candidateSaveTimer: null,
   contextReferenceKeys: [],
   excludedContextKeys: new Map(),
   includeCurrentContext: true,
@@ -545,6 +552,7 @@ function getEditHistory(documentId = state.currentDocId, tabName = state.activeT
 }
 
 function workspaceSnapshot() {
+  rememberCurrentCandidate()
   return {
     schemaVersion: WORKSPACE_SCHEMA_VERSION,
     currentDocId: state.currentDocId,
@@ -555,6 +563,7 @@ function workspaceSnapshot() {
     tabContents: state.tabContents,
     versions: state.versions,
     versionCounters: state.versionCounters,
+    candidateDrafts: state.candidateDrafts,
     connections: state.connections.map(connection => ({ ...connection, status: 'unknown', error: null })),
     workflow: state.workflow,
     storyboard: state.storyboard,
@@ -940,6 +949,7 @@ function updateDocumentView({ keepFocus = false } = {}) {
   elements.documentBadge.textContent = documentData.badge
   elements.sceneKicker.textContent = documentData.kicker
   elements.sceneTitle.textContent = documentData.sceneTitle
+  elements.sceneTitle.hidden = !documentData.sceneTitle || documentData.sceneTitle === documentData.title
   elements.sceneIntent.querySelector('p').textContent = documentData.intent
   elements.sceneIntent.querySelector('.scene-meta').replaceChildren(
     ...documentData.meta.map((value) => {
@@ -978,6 +988,7 @@ function updateDocumentView({ keepFocus = false } = {}) {
 
   updateEditorMetrics()
   updateAssistantProfile()
+  restoreDocumentCandidate()
   updateStageAdvanceButton()
   creationNavigation?.render()
   setSaveStatus(state.storageFailed ? 'error' : pendingSaves ? 'saving' : unsavedEdits ? 'dirty' : 'saved')
@@ -1030,6 +1041,8 @@ function scheduleSave() {
 
 async function saveImmediately({ announce = true } = {}) {
   window.clearTimeout(state.saveTimer)
+  window.clearTimeout(state.candidateSaveTimer)
+  state.candidateSaveTimer = null
   if (state.activeTab !== 'history') setCurrentContent(elements.scriptEditor.value)
   const saved = await persistWorkspace()
   if (announce) showToast(saved ? '当前内容已保存到本地' : '本地保存失败，请复制内容后重试')
@@ -1040,6 +1053,7 @@ async function selectDocument(documentId) {
   if (projectTransition) return false
   if (state.candidateApplying) { showToast('正在保存候选，请稍候再切换内容'); return false }
   if (!state.documents[documentId]) return false
+  if (state.isGenerating && documentId !== state.currentDocId) stopGeneration()
   const projectId = activeProjectId
   if (!await saveImmediately({ announce: false })) return false
   if (projectTransition || projectId !== activeProjectId) return false
@@ -1098,6 +1112,7 @@ async function switchTab(tabName, { focusEditor = true } = {}) {
   if (projectTransition) return
   if (state.candidateApplying) return showToast('正在保存候选，请稍候再切换视图')
   if (!Object.hasOwn(tabFallbacks, tabName) && tabName !== 'script') return
+  if (state.isGenerating && tabName !== state.activeTab) stopGeneration()
   const projectId = activeProjectId
   if (!await saveImmediately({ announce: false })) return
   if (projectTransition || projectId !== activeProjectId) return
@@ -1519,6 +1534,7 @@ function appendGenerationDelta(delta, generationId = state.activeGenerationId) {
   if (!delta || !state.isGenerating || generationId !== state.activeGenerationId) return
   state.generationText += delta
   elements.candidateContent.textContent = state.generationText
+  scheduleCandidateSave()
   elements.assistantConversation.scrollTop = elements.assistantConversation.scrollHeight
 }
 
@@ -1680,6 +1696,10 @@ function failGeneration(message, generationId = state.activeGenerationId) {
   updateCandidateCitations(state.generationContext?.knowledgeChunks || [])
   elements.a11yAnnouncements.textContent = `AI 生成失败：${message}`
   showToast(message)
+  state.candidateStatus = 'error'
+  rememberCurrentCandidate()
+  renderCandidateDrafts()
+  scheduleCandidateSave({ immediate: true })
 }
 
 function startGeneration(prompt, { clearComposer = true, purpose = null, connectionId = null, sourceFingerprint = '', storyboardRevision = null } = {}) {
@@ -1713,11 +1733,16 @@ function startGeneration(prompt, { clearComposer = true, purpose = null, connect
   let prepared
   try { prepared = generationDraft(cleanPrompt, purpose) }
   catch (error) { showToast(readableError(error)); return }
+  rememberCurrentCandidate()
+  if (state.candidateDrafts.length >= MAX_CANDIDATE_DRAFTS) return showToast(`已保留 ${MAX_CANDIDATE_DRAFTS} 份待审稿，请先采纳或丢弃部分候选再生成`)
   renderContextPreview(prepared)
   state.lastPrompt = cleanPrompt
   const sequence = ++state.generationSequence
   const generationId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${sequence}`
   state.activeGenerationId = generationId
+  state.activeCandidateId = generationId
+  state.candidateCreatedAt = new Date().toISOString()
+  state.candidateStatus = 'partial'
   state.isGenerating = true
   document.querySelector('#assistantRequestMode').disabled = true
   state.generationContext = {
@@ -1757,6 +1782,9 @@ function startGeneration(prompt, { clearComposer = true, purpose = null, connect
   elements.sendButton.classList.add('is-generating')
   elements.sendButton.setAttribute('aria-label', '停止 AI 生成')
   elements.sendButton.setAttribute('title', '停止 AI 生成')
+  rememberCurrentCandidate()
+  renderCandidateDrafts()
+  scheduleCandidateSave({ immediate: true })
 
   generateWithConnection(connection, cleanPrompt, generationId, clearComposer && elements.promptInput.value.trim() === cleanPrompt ? elements.promptInput.value : null)
 }
@@ -1784,7 +1812,11 @@ function finishGeneration({ stopped = false, silent = false, generationId = stat
     : 'AI 候选内容已生成，尚未写入正文'
   elements.a11yAnnouncements.textContent = announcement
   if (stopped && !silent) showToast(hasCandidate ? '已停止生成，部分内容仍可采纳' : '已停止生成，未收到候选内容')
-  if (hasCandidate && state.generationContext?.purpose === 'storyboard' && state.generationContext.projectId === activeProjectId) mediaWorkbench?.receiveCandidate(elements.candidateContent.textContent, state.generationContext)
+  if (hasCandidate && state.generationContext?.purpose === 'storyboard' && state.generationContext.projectId === activeProjectId) mediaWorkbench?.receiveCandidate(elements.candidateContent.textContent, state.generationContext, state.activeCandidateId)
+  state.candidateStatus = stopped ? 'partial' : 'complete'
+  rememberCurrentCandidate()
+  renderCandidateDrafts()
+  scheduleCandidateSave({ immediate: true })
 }
 
 function stopGeneration() {
@@ -1797,13 +1829,158 @@ function stopGeneration() {
   finishGeneration({ stopped: true, generationId })
 }
 
-function discardCandidate({ silent = false } = {}) {
+function scheduleCandidateSave({ immediate = false } = {}) {
+  editRevision += 1
+  unsavedEdits = true
+  setSaveStatus('dirty')
+  if (state.candidateSaveTimer && !immediate) return
+  window.clearTimeout(state.candidateSaveTimer)
+  const owner = activeProjectId
+  const save = () => {
+    state.candidateSaveTimer = null
+    if (owner === activeProjectId && !projectTransition && !state.candidateApplying) persistWorkspace()
+  }
+  // Continuous tokens must not indefinitely postpone saving like editor debounce.
+  if (immediate) save()
+  else state.candidateSaveTimer = window.setTimeout(save, 1000)
+}
+
+function rememberCurrentCandidate() {
+  if (!state.activeCandidateId || !state.generationContext || state.candidateApplying || !activeProjectId) return
+  state.candidateDrafts = upsertCandidateDraft(state.candidateDrafts, {
+    id: state.activeCandidateId, documentId: state.generationContext.documentId, tabName: state.generationContext.tabName,
+    prompt: state.lastPrompt, text: state.generationText, createdAt: state.candidateCreatedAt,
+    status: state.isGenerating ? 'partial' : state.candidateStatus,
+    context: state.generationContext
+  })
+}
+
+function renderCandidateDrafts() {
+  let shelf = document.querySelector('#candidateDraftShelf')
+  if (!shelf) {
+    shelf = document.createElement('details'); shelf.id = 'candidateDraftShelf'; shelf.className = 'candidate-draft-shelf'
+    const summary = document.createElement('summary'); summary.id = 'candidateDraftSummary'
+    const label = document.createElement('label'); label.htmlFor = 'candidateDraftSelect'; label.textContent = '已保留候选'
+    const select = document.createElement('select'); select.id = 'candidateDraftSelect'
+    select.addEventListener('change', async () => {
+      const id = select.value, owner = activeProjectId
+      const draft = state.candidateDrafts.find(item => item.id === id)
+      if (!draft || state.isGenerating || state.candidateApplying) return
+      rememberCurrentCandidate()
+      if (state.documents[draft.documentId]) {
+        if (draft.documentId !== state.currentDocId && !await selectDocument(draft.documentId)) return
+        if (owner !== activeProjectId) return
+        if (draft.tabName !== state.activeTab) await switchTab(draft.tabName)
+        if (owner !== activeProjectId || state.currentDocId !== draft.documentId || state.activeTab !== draft.tabName) return
+      }
+      showSavedCandidate(draft)
+    })
+    const hint = document.createElement('p'); hint.textContent = '切换内容后仍保留；重新生成会新增一稿。待审稿随项目备份。'
+    shelf.append(summary, label, select, hint)
+    elements.assistantConversation.prepend(shelf)
+    const review = document.createElement('details'); review.id = 'candidateDiffReview'; review.className = 'candidate-diff-review'
+    const reviewTitle = document.createElement('summary'); reviewTitle.textContent = '审阅替换差异'
+    const body = document.createElement('div'); body.id = 'candidateDiffBody'
+    review.append(reviewTitle, body)
+    review.addEventListener('toggle', () => { if (review.open) renderCandidateDiff() })
+    elements.candidateContent.after(review)
+  }
+  const select = shelf.querySelector('select')
+  select.replaceChildren()
+  const tabs = { script: '正文', outline: '大纲', references: '设定引用' }
+  for (const draft of [...state.candidateDrafts].reverse()) {
+    const title = state.documents[draft.documentId]?.title || `${draft.context.title}（原文档已删除）`
+    const status = { complete: '待审', partial: '部分内容', error: '生成未完成' }[draft.status]
+    const option = new Option(`${title} · ${tabs[draft.tabName]} · ${status} · ${draft.prompt.slice(0, 28)} · ${new Date(draft.createdAt).toLocaleString('zh-CN')}`, draft.id)
+    select.append(option)
+  }
+  if (!state.activeCandidateId && state.candidateDrafts.length) select.prepend(new Option('选择一份待审稿', ''))
+  select.value = state.activeCandidateId || ''
+  select.disabled = state.isGenerating || state.candidateApplying
+  shelf.hidden = state.candidateDrafts.length === 0
+  shelf.querySelector('summary').textContent = `待审稿 · ${state.candidateDrafts.length}`
+  const review = document.querySelector('#candidateDiffReview')
+  review.hidden = state.isGenerating || !state.generationText.trim() || state.generationContext?.purpose !== 'text'
+  if (review.open && !review.hidden) renderCandidateDiff()
+  else document.querySelector('#candidateDiffBody').replaceChildren()
+}
+
+function renderCandidateDiff() {
+  const body = document.querySelector('#candidateDiffBody'), context = state.generationContext
+  body.replaceChildren()
+  if (!context || context.purpose !== 'text' || !state.generationText.trim() || state.isGenerating) return
+  const current = getContentAt(context.documentId, context.tabName)
+  if (current !== context.baseContent) {
+    const warning = document.createElement('p'); warning.className = 'candidate-draft-warning'
+    warning.textContent = '正文在生成后已有修改。以下对比生成时原文；替换已受保护，可插入或追加保留当前修改。'
+    body.append(warning)
+  }
+  body.append(createReviewDiff({ before: context.baseContent, after: state.generationText.trim(), title: '生成时原文与候选' }))
+}
+
+function showSavedCandidate(draft) {
+  if (state.isGenerating || state.candidateApplying) return
+  state.activeCandidateId = draft.id
+  state.candidateCreatedAt = draft.createdAt
+  state.candidateStatus = draft.status
+  state.generationText = draft.text
+  // Keep the submitted project/asset identities. An imported plan must fail its
+  // existing project guard instead of silently acquiring authority over a copy.
+  state.generationContext = structuredClone(draft.context)
+  state.lastPrompt = draft.prompt
+  state.activeGenerationId = null
+  elements.welcome.hidden = true; elements.conversationThread.hidden = false
+  elements.userMessage.textContent = draft.prompt
+  elements.candidateContent.textContent = draft.text || '尚未收到可用内容，可重新生成。'
+  elements.generationState.hidden = true
+  const orphaned = !state.documents[draft.documentId]
+  elements.generationError.hidden = !orphaned && draft.status === 'complete'
+  elements.generationError.textContent = orphaned ? '原文档已删除，候选仍保留在项目中。恢复原文档后再采纳，或复制候选内容。' : draft.status === 'error' ? '上次生成未完成；已有内容已保留，可审阅或重新生成。' : '这是已停止或中断的部分内容，请检查完整性后再采纳。'
+  elements.candidateCard.classList.toggle('has-error', draft.status === 'error')
+  elements.candidateActions.hidden = false
+  const purpose = draft.context.purpose
+  if (['text', 'discussion', 'project-plan'].includes(purpose)) {
+    document.querySelector('#assistantRequestMode').value = purpose
+    document.querySelector('#reviewExistingPlan').hidden = purpose !== 'project-plan'
+  }
+  elements.candidateActions.querySelectorAll('[data-action="apply-candidate"]').forEach(button => { button.hidden = purpose !== 'text'; button.disabled = orphaned || !draft.text.trim() })
+  const planButton = document.querySelector('#reviewProjectPlan')
+  planButton.hidden = purpose !== 'project-plan'; planButton.disabled = orphaned || !draft.text.trim()
+  elements.candidateCard.querySelector('.candidate-warning').textContent = purpose === 'discussion' ? '讨论建议 · 不修改项目' : purpose === 'project-plan' ? '项目修改计划 · 尚未执行' : '待审稿 · 尚未写入正文'
+  document.querySelector('#sentContextMessages').textContent = JSON.stringify(draft.context.messages || [], null, 2)
+  updateCandidateCitations(draft.context.knowledgeChunks || [])
+  if (purpose === 'storyboard' && draft.context.projectId === activeProjectId) mediaWorkbench?.receiveCandidate(draft.text, state.generationContext, draft.id)
+  renderCandidateDrafts()
+}
+
+function restoreDocumentCandidate() {
+  if (state.isGenerating || state.candidateApplying) return
+  const context = state.generationContext
+  if (context?.documentId === state.currentDocId && context?.tabName === state.activeTab && state.activeCandidateId) {
+    renderCandidateDrafts()
+    return
+  }
+  discardCandidate({ silent: true, remove: false, persist: false })
+  const draft = candidateDraftsFor(state.candidateDrafts, state.currentDocId, state.activeTab).at(-1)
+  if (draft) showSavedCandidate(draft)
+  else renderCandidateDrafts()
+}
+
+function discardCandidate({ silent = false, remove = true, persist = true } = {}) {
+  const hadCandidate = Boolean(state.activeCandidateId)
+  window.clearTimeout(state.candidateSaveTimer)
+  state.candidateSaveTimer = null
   const generationId = state.activeGenerationId
   state.generationAbortController?.abort()
   if (isDesktopRuntime && state.isGenerating && generationId !== null) {
     invokeDesktop('cancel_generation', { taskId: String(generationId) }).catch(() => {})
   }
   if (state.isGenerating) finishGeneration({ stopped: true, silent: true, generationId })
+  const previousCount = state.candidateDrafts.length
+  if (remove && state.activeCandidateId) mediaWorkbench?.clearCandidate?.(state.activeCandidateId)
+  if (remove && state.activeCandidateId) state.candidateDrafts = removeCandidateDraft(state.candidateDrafts, state.activeCandidateId)
+  state.activeCandidateId = null
+  state.generationText = ''
   state.activeGenerationId = null
   state.generationAbortController = null
   elements.conversationThread.hidden = true
@@ -1814,15 +1991,17 @@ function discardCandidate({ silent = false } = {}) {
   elements.candidateCard.classList.remove('has-error')
   elements.candidateActions.querySelectorAll('[data-action="apply-candidate"]').forEach((button) => { button.disabled = false })
   state.generationContext = null
-  elements.a11yAnnouncements.textContent = '候选内容已丢弃'
+  renderCandidateDrafts()
+  if (persist && previousCount !== state.candidateDrafts.length) scheduleSave()
+  if (hadCandidate && (!silent || !remove)) elements.a11yAnnouncements.textContent = remove ? '候选内容已丢弃' : '候选已保留，可从待审稿继续审阅'
   if (!silent) showToast('候选内容已丢弃，正文没有变化')
 }
 
 function abandonCandidateOnContextChange(documentId, tabName) {
   const context = state.generationContext
   if (!context || (context.documentId === documentId && context.tabName === tabName)) return
-  discardCandidate({ silent: true })
-  showToast('已取消上一文档的 AI 候选，正文没有变化')
+  rememberCurrentCandidate()
+  discardCandidate({ silent: true, remove: false, persist: false })
 }
 
 function acceptCandidate() {
@@ -1849,7 +2028,8 @@ async function applyCandidate(mode = 'append') {
   const history = getEditHistory(context.documentId, context.tabName)
   const before = {
     undo: [...history.undo], redo: [...history.redo], versions: structuredClone(state.versions[context.documentId] || []),
-    counter: state.versionCounters[context.documentId] || 0, selected: state.selectedVersionByDocument[context.documentId]
+    counter: state.versionCounters[context.documentId] || 0, selected: state.selectedVersionByDocument[context.documentId],
+    candidateDrafts: state.candidateDrafts
   }
   const transaction = { before: previousText, after: acceptedText }
   const controls = [...document.querySelectorAll('[data-action="apply-candidate"], [data-action="discard-candidate"], [data-action="retry-generation"]')]
@@ -1866,11 +2046,13 @@ async function applyCandidate(mode = 'append') {
     elements.scriptEditor.value = acceptedText
     const source = { replace: 'AI 替换正文', insert: 'AI 插入候选', append: '采纳 AI 候选' }[mode]
     const versionNumber = addVersion(context.documentId, acceptedText, source, { tabName: context.tabName, knowledgeChunks: context.knowledgeChunks || [] })
+    if (state.activeCandidateId) state.candidateDrafts = removeCandidateDraft(state.candidateDrafts, state.activeCandidateId)
     const saved = await persistWorkspace()
     if (projectId !== activeProjectId) return
     if (!saved) {
       const untouched = editRevision === startingRevision && getContentAt(context.documentId, context.tabName) === acceptedText
       if (untouched) {
+        state.candidateDrafts = before.candidateDrafts
         history.undo.splice(0, history.undo.length, ...before.undo)
         history.redo.splice(0, history.redo.length, ...before.redo)
         state.versions[context.documentId] = before.versions
@@ -1907,6 +2089,7 @@ async function applyCandidate(mode = 'append') {
     state.candidateApplying = false
     elements.candidateActions.removeAttribute('aria-busy')
     controls.forEach(button => { button.disabled = false })
+    renderCandidateDrafts()
   }
 }
 
@@ -3513,7 +3696,7 @@ async function handleAction(button, action) {
     case 'send-prompt': startGeneration(elements.promptInput.value); break
     case 'discard-candidate': discardCandidate(); break
     case 'retry-generation': startGeneration(state.lastPrompt, { clearComposer: false, purpose: state.generationContext?.purpose || 'text', sourceFingerprint: state.generationContext?.sourceFingerprint || '', storyboardRevision: state.generationContext?.storyboardRevision ?? null }); break
-    case 'review-project-plan': projectPlanUI?.open(elements.candidateContent.textContent, state.generationContext?.operationContext); break
+    case 'review-project-plan': projectPlanUI?.open(elements.candidateContent.textContent, state.generationContext?.operationContext, { candidateId: state.activeCandidateId }); break
     case 'review-existing-plan': if (state.isGenerating) showToast('请先停止或等待当前任务'); else projectPlanUI?.open(); break
     case 'accept-candidate': acceptCandidate(); break
     case 'apply-candidate': applyCandidate(button.dataset.applyMode); break
@@ -3788,13 +3971,14 @@ function loadProjectSnapshot(snapshot) {
   projectPlanUI?.reset()
   elements.toastStack.replaceChildren()
   document.querySelector('#embeddingModel').value = snapshot.workspace.knowledge?.semantic?.model || ''
-  discardCandidate({ silent: true })
+  discardCandidate({ silent: true, remove: false, persist: false })
   window.clearTimeout(state.saveTimer)
   activeProjectId = snapshot.id
   state.workflowStep = null
   state.contextReferenceKeys = []; state.excludedContextKeys.clear(); state.includeCurrentContext = true; state.includeSelectionContext = false
   document.querySelector('#contextObjectPicker').open = false
   const workspace = snapshot.workspace
+  state.candidateDrafts = structuredClone(workspace.candidateDrafts || [])
   state.connections = normalizeConnections(workspace.connections)
   state.workflow = normalizeWorkflow(workspace.workflow)
   state.storyboard = normalizeStoryboard(workspace.storyboard)
@@ -3929,6 +4113,7 @@ async function archiveCurrentProject() {
   if (!activeProjectId || projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy()) return
   setProjectTransition(true)
   try {
+    if (state.isGenerating) stopGeneration()
     window.clearTimeout(state.saveTimer)
     if (state.activeTab !== 'history') setCurrentContent(elements.scriptEditor.value)
     await archiveProject(activeProjectId, workspaceSnapshot(), state.knowledge.index)
@@ -3944,6 +4129,7 @@ async function restoreArchivedProject(id) {
   if (projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy()) return
   setProjectTransition(true)
   try {
+    if (state.isGenerating) stopGeneration()
     if (!await saveImmediately({ announce: false })) return
     await restoreProject(id)
     loadProjectSnapshot(getActiveProject())
@@ -3965,8 +4151,11 @@ async function exportLibrary() {
 
 async function recoverPreviousLibrary() {
   if (projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy()) return
+  if (state.isGenerating) return showToast('请先停止当前生成并确认保存，再恢复内部快照')
   setProjectTransition(true)
   window.clearTimeout(state.saveTimer)
+  window.clearTimeout(state.candidateSaveTimer)
+  state.candidateSaveTimer = null
   try {
     const previous = await readPreviousLibrary()
     if (!previous.available) return showToast('还没有上一份内部快照')
@@ -3986,6 +4175,7 @@ async function switchProject(id) {
   if (projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy() || id === activeProjectId) return
   setProjectTransition(true)
   try {
+    if (state.isGenerating) stopGeneration()
     if (!await saveImmediately({ announce: false })) return
     await activateProject(id)
     loadProjectSnapshot(getActiveProject())
@@ -4018,6 +4208,7 @@ document.querySelector('#newProjectForm').addEventListener('submit', async (even
   if (!projectName || projectName.length > 100) return showToast('项目名称须为 1–100 个字符')
   setProjectTransition(true)
   try {
+    if (state.isGenerating) stopGeneration()
     if (!await saveImmediately({ announce: false })) return
     await createProject({
       schemaVersion: WORKSPACE_SCHEMA_VERSION,
@@ -4061,6 +4252,7 @@ document.querySelector('#projectBackupFile').addEventListener('change', async ev
     const text = await file.text()
     const fullLibrary = JSON.parse(text)?.format === 'ai-creator-workbench-library'
     const data = fullLibrary ? parseLibraryBackup(text) : parseBackup(text)
+    if (state.isGenerating) stopGeneration()
     if (!await saveImmediately({ announce: false })) return
     if (fullLibrary) { await importLibraryBackup(data); inspirationUI.render() }
     else await createProject(data.workspace, data.index)
@@ -4365,6 +4557,7 @@ if (isDesktopRuntime && window.__TAURI__.window?.getCurrentWindow) {
     closeRequestActive = true
     try {
     if (projectTransition || state.candidateApplying || state.knowledgeBusy) return showToast('内容正在保存，请稍候再关闭')
+    if (state.isGenerating) stopGeneration()
     if (inspirationUI.dirty() && !await inspirationUI.save()) {
       switchView('inspirations')
       showToast('灵感尚未保存，请补全标题与正文后再关闭')
@@ -4377,9 +4570,29 @@ if (isDesktopRuntime && window.__TAURI__.window?.getCurrentWindow) {
 function initializeProjectMediaWorkbench() {
   return initializeMediaWorkbench({
   getContext: () => ({ projectId: activeProjectId, project: state.project, documents: state.documents, currentDocId: state.currentDocId, connections: state.connections, workflow: state.workflow, storyboard: state.storyboard }),
-  commit: async (patch, { projectId, revision = null, immediate = true } = {}) => {
+  commit: async (patch, { projectId, revision = null, immediate = true, resolvedCandidateId = null } = {}) => {
     if (!activeProjectId || activeProjectId !== projectId || projectTransition) throw new Error('项目已切换或正在保存，未修改其他项目')
     if (revision !== null && state.storyboard.revision !== revision) throw new Error('分镜已有新的修改，请重试；未覆盖当前内容')
+    if (resolvedCandidateId) {
+      if (state.isGenerating || state.candidateApplying) throw new Error('请先等待或停止当前任务')
+      rememberCurrentCandidate()
+      state.candidateApplying = true
+      setProjectTransition(true)
+      try {
+        if (!await saveImmediately({ announce: false })) throw new Error('原项目保存失败，尚未采纳分镜')
+        const next = structuredClone(workspaceSnapshot())
+        next.storyboard = patch.storyboard
+        next.candidateDrafts = removeCandidateDraft(next.candidateDrafts, resolvedCandidateId)
+        validateWorkspace(next, state.knowledge.index)
+        try { await saveProject(projectId, next, state.knowledge.index) }
+        catch (error) { state.storageFailed = true; setSaveStatus('error'); throw error }
+        state.storyboard = next.storyboard
+        state.candidateDrafts = next.candidateDrafts
+        editRevision += 1; unsavedEdits = false; state.storageFailed = false
+        creationNavigation?.render(); setSaveStatus('saved')
+      } finally { state.candidateApplying = false; setProjectTransition(false); renderCandidateDrafts() }
+      return
+    }
     if (patch.storyboard) { validateStoryboard(patch.storyboard); state.storyboard = patch.storyboard; creationNavigation?.render() }
     if (patch.workflow) {
       const previousTextId = getActiveConnection()?.id
@@ -4392,6 +4605,25 @@ function initializeProjectMediaWorkbench() {
     unsavedEdits = true
     editRevision += 1
     if (!await persistWorkspace()) throw new Error('保存失败，当前编辑仍保留，请重试保存或导出备份')
+  },
+  getSavedCandidate: () => {
+    const drafts = state.candidateDrafts.filter(draft => draft.context.purpose === 'storyboard' && draft.context.projectId === activeProjectId)
+    return drafts.find(draft => draft.id === state.activeCandidateId) || drafts.at(-1) || null
+  },
+  onCandidateChange: (id, text) => {
+    if (projectTransition || state.candidateApplying) throw new Error('项目正在保存，请稍后编辑候选')
+    const draft = state.candidateDrafts.find(item => item.id === id)
+    if (!draft) throw new Error('待审稿已失效，请重新打开')
+    state.candidateDrafts = upsertCandidateDraft(state.candidateDrafts, { ...draft, text })
+    if (state.activeCandidateId === id) { state.generationText = text; elements.candidateContent.textContent = text }
+    scheduleCandidateSave()
+  },
+  onCandidateResolved: (id, { committed }) => {
+    if (state.activeCandidateId === id) discardCandidate({ silent: true, remove: !committed, persist: !committed })
+    else if (!committed) {
+      state.candidateDrafts = removeCandidateDraft(state.candidateDrafts, id)
+      scheduleSave(); renderCandidateDrafts()
+    }
   },
   invoke: isDesktopRuntime ? invokeDesktop : null,
   secret: connectionSecret,
@@ -4412,6 +4644,7 @@ function initializeProjectMediaWorkbench() {
   },
   importPackage: async (data, projectId) => {
     validateWorkspace(data.workspace, data.index)
+    if (state.isGenerating) stopGeneration()
     if (!await saveImmediately({ announce: false })) throw new Error('当前项目保存失败，原项目和已导入媒体均保留，未切换项目')
     await createProject(data.workspace, data.index, projectId, { mediaImportId: data.importId })
     loadProjectSnapshot(getActiveProject())
@@ -4467,8 +4700,10 @@ projectPlanUI = initializeProjectPlanUI({
     if (state.isGenerating || state.candidateApplying) throw new Error('请先等待或停止当前任务')
     return captureOperationContext(projectOperationContext(), generationDraft(elements.promptInput.value.trim(), 'text').summary)
   },
-  commit: async (plan, base) => {
+  commit: async (plan, base, { candidateId = null } = {}) => {
     if (projectTransition || state.candidateApplying || state.isGenerating) throw new Error('当前任务尚未结束，请稍候再采纳')
+    const sourceDraft = candidateId ? state.candidateDrafts.find(draft => draft.id === candidateId && draft.context.purpose === 'project-plan' && draft.context.projectId === base.projectId) : null
+    if (candidateId && !sourceDraft) throw new Error('来源候选已失效，请重新打开计划；尚未采纳修改')
     state.candidateApplying = true
     setProjectTransition(true)
     try {
@@ -4479,12 +4714,13 @@ projectPlanUI = initializeProjectPlanUI({
         const verified = await invokeDesktop('media_verify_versions', { projectId: base.projectId, versionIds })
         if (verified.length !== versionIds.length || versionIds.some(id => !verified.some(version => version.id === id && version.mimeType === base.mediaVersions[id].mimeType && version.bytes === base.mediaVersions[id].bytes))) throw new Error('媒体核验结果与计划不一致，请刷新后重新审阅')
       }
-      const result = materializeOperationPlan(plan, base, projectOperationContext(), { recordVersions: true, knowledgeChunks: state.generationContext?.purpose === 'project-plan' ? state.generationContext.knowledgeChunks : [] })
+      const result = materializeOperationPlan(plan, base, projectOperationContext(), { recordVersions: true, knowledgeChunks: sourceDraft?.context.knowledgeChunks || [] })
       if (result.hasWorkspaceChanges) {
+        if (sourceDraft) result.workspace.candidateDrafts = removeCandidateDraft(result.workspace.candidateDrafts || [], sourceDraft.id)
         validateWorkspace(result.workspace, state.knowledge.index)
         try { await saveProject(activeProjectId, result.workspace, state.knowledge.index) }
         catch (error) { state.storageFailed = true; setSaveStatus('error'); throw error }
-        for (const key of ['documents', 'tabContents', 'versions', 'versionCounters', 'storyboard']) state[key] = result.workspace[key]
+        for (const key of ['documents', 'tabContents', 'versions', 'versionCounters', 'storyboard', 'candidateDrafts']) state[key] = result.workspace[key]
         for (const id of new Set(result.changes.map(change => change.documentId).filter(Boolean))) {
           for (const tab of ['script', 'outline', 'references']) state.editHistories.delete(`${id}:${tab}`)
           state.selectedVersionByDocument[id] = state.versionCounters[id]
@@ -4492,10 +4728,14 @@ projectPlanUI = initializeProjectPlanUI({
         }
         editRevision += 1; unsavedEdits = false; state.storageFailed = false
       }
-      if (state.generationContext?.purpose === 'project-plan') discardCandidate({ silent: true })
+      if (sourceDraft && state.activeCandidateId === sourceDraft.id) discardCandidate({ silent: true })
+      else if (sourceDraft && !result.hasWorkspaceChanges) {
+        state.candidateDrafts = removeCandidateDraft(state.candidateDrafts, sourceDraft.id)
+        scheduleSave()
+      }
       renderProjectTree(); updateDocumentView(); mediaWorkbench.refresh(); setSaveStatus('saved')
       return result
-    } finally { state.candidateApplying = false; setProjectTransition(false) }
+    } finally { state.candidateApplying = false; setProjectTransition(false); renderCandidateDrafts() }
   },
   renderMedia: versionId => mediaWorkbench.previewVersion(versionId),
   queryTasks: async ({ projectId, shotIds }) => {

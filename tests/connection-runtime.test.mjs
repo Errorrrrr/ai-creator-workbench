@@ -119,7 +119,7 @@ function desktopGenerationHarness({ secret } = {}) {
   const context = vm.createContext({
     state, elements, AbortController, isDesktopRuntime: true, validateProviderBaseUrl,
     connectionSecret: secret || (async () => 'mock-only'), renderConnections() {}, readableError: error => error.message,
-    persistWorkspace: async () => true,
+    persistWorkspace: async () => true, scheduleCandidateSave() {},
     finishGeneration: () => { calls.finish++; state.isGenerating = false },
     failGeneration: () => { calls.fail++; state.isGenerating = false },
     window: { __TAURI__: { event: { listen: async (_name, callback) => { listener = callback; return () => { calls.unlisten++ } } } } },

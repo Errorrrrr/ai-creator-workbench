@@ -1,6 +1,6 @@
 [package]
 name = "ai-creator-workbench"
-version = "0.4.2"
+version = "0.5.0"
 description = "Local-first AI creation workbench"
 edition = "2021"
 

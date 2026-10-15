@@ -694,7 +694,7 @@ export async function handleRequest(request, response) {
 }
 
 export function isAllowedStaticPath(path) {
-  return path === '/index.html' || path === '/src/styles.css' || /^\/src\/[a-zA-Z0-9_-]+\.js$/.test(path) || path === '/assets/app-icon.svg'
+  return path === '/index.html' || ['/src/styles.css', '/src/review-diff.css', '/src/candidate-drafts-ui.css'].includes(path) || /^\/src\/[a-zA-Z0-9_-]+\.js$/.test(path) || path === '/assets/app-icon.svg'
 }
 
 export function createDevServer() {

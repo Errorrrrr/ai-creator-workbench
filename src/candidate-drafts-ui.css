@@ -1,0 +1,36 @@
+.candidate-draft-shelf {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.candidate-draft-shelf summary,
+.candidate-diff-review > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--accent-text);
+}
+.candidate-draft-shelf label { display: block; margin: 12px 0 6px; }
+.candidate-draft-shelf select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+  color: var(--ink);
+}
+.candidate-draft-shelf p,
+.candidate-draft-warning { margin: 8px 0 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.candidate-draft-warning { color: var(--warning); padding: 8px; background: var(--warning-soft); }
+.candidate-diff-review { margin: 12px 0; font-size: 13px; }
+#candidateDiffBody { margin-top: 10px; min-width: 0; }
+@media (max-width: 699px) {
+  .candidate-draft-shelf select { min-height: 44px; font-size: 16px; }
+  .candidate-draft-shelf summary,
+  .candidate-diff-review > summary { min-height: 32px; padding-block: 6px; }
+}

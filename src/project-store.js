@@ -1,5 +1,6 @@
 import { deserializeKnowledgeIndex } from './knowledge-index.js'
 import { pruneSemanticIndex } from './semantic-search.js'
+import { validateCandidateDrafts } from './candidate-drafts.js'
 
 import { validateStoryboard, normalizeWorkflow } from './storyboard.js'
 
@@ -50,6 +51,7 @@ function validateChunks(index, sources) {
 export function validateWorkspace(workspace, index = null) {
   assert(object(workspace), '项目格式无效')
   assert(workspace.schemaVersion === undefined || [1, 2].includes(workspace.schemaVersion), '项目使用了不支持的数据版本')
+  if (workspace.candidateDrafts !== undefined) validateCandidateDrafts(workspace.candidateDrafts)
   if (workspace.storyboard !== undefined) validateStoryboard(workspace.storyboard)
   if (workspace.workflow !== undefined) {
     assert(object(workspace.workflow), '创作流程配置无效')

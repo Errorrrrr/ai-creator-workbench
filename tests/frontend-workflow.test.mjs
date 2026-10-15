@@ -194,7 +194,7 @@ function candidateHarness() {
     formatVersionHistory: () => state.versions['scene-1'].map(entry => entry.content).join('\n'),
     updateDocumentView: () => { elements.scriptEditor.value = content.value },
     discardCandidate: () => { calls.discarded++; elements.candidateContent.textContent = ''; state.generationContext = null },
-    updateEditorMetrics: () => {}, renderProjectIdentity: () => {},
+    updateEditorMetrics: () => {}, renderProjectIdentity: () => {}, renderCandidateDrafts: () => {},
     setSaveStatus: status => calls.statuses.push(status),
     showToast: (message, options) => calls.toasts.push({ message, options }),
   }

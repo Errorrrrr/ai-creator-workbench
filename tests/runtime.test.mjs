@@ -46,7 +46,7 @@ test('Ollama URL validation accepts IPv6/custom ports without accepting remote o
 
 test('static allowlist excludes git, env, scripts, reports and nested/dot files', async () => {
   for (const path of ['/.git/HEAD', '/.env', '/src/.secret.js', '/src/nested/test.js', '/package.json', '/scripts/dev-server.mjs', '/specs/report.md', '/src/../.env']) assert.equal(isAllowedStaticPath(path), false)
-  for (const path of ['/index.html', '/src/app.js', '/src/styles.css', '/assets/app-icon.svg']) assert.equal(isAllowedStaticPath(path), true)
+  for (const path of ['/index.html', '/src/app.js', '/src/styles.css', '/src/review-diff.css', '/src/candidate-drafts-ui.css', '/assets/app-icon.svg']) assert.equal(isAllowedStaticPath(path), true)
   for (const url of ['/.git/HEAD', '/%2egit/HEAD', '/src/%2e%2e/%2egit/HEAD']) {
     const response = responseMock()
     await handleRequest({ method: 'GET', url, headers: { host: '127.0.0.1:4173' } }, response)

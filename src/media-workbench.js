@@ -22,7 +22,7 @@ function field(label, input) {
 const terminal = status => ['completed', 'failed', 'cancelled', 'submission_unknown'].includes(status)
 const BATCH_LIMIT = 20
 
-export function initializeMediaWorkbench({ getContext, commit, invoke, secret, requestText, notify, navigate, importPackage, portableProject, beforeSubmit }) {
+export function initializeMediaWorkbench({ getContext, commit, invoke, secret, requestText, notify, navigate, importPackage, portableProject, beforeSubmit, getSavedCandidate, onCandidateChange, onCandidateResolved }) {
   let assets = [], jobs = [], recoveryIssues = [], projectId = null, selectedShotId = null, selectedAssetId = null
   let loading = false, error = '', requestSequence = 0, candidate = null, selectedSourceId = ''
   let operationBusy = false
@@ -134,11 +134,11 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (!adapterCatalogReady) throw new Error('媒体协议目录尚未就绪；未提交生成，请重新打开桌面应用')
   }
   function requireProject() { if (!context().projectId) throw new Error('请先创建或打开项目') }
-  async function changeStoryboard(transform, { immediate = true } = {}) {
+  async function changeStoryboard(transform, { immediate = true, resolvedCandidateId = null } = {}) {
     const data = context(), next = structuredClone(data.storyboard)
     transform(next.shots)
     next.revision += 1
-    await commit({ storyboard: next }, { projectId: data.projectId, revision: data.storyboard.revision, immediate })
+    await commit({ storyboard: next }, { projectId: data.projectId, revision: data.storyboard.revision, immediate, ...(resolvedCandidateId ? { resolvedCandidateId } : {}) })
   }
   async function updateWorkflow(patch) {
     try {
@@ -343,19 +343,48 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       requestText(storyboardPrompt(), { purpose: 'storyboard', documentId: sourceSelect.value, sourceFingerprint: contentFingerprint(doc.content), storyboardRevision: data.storyboard.revision, connectionId: connection.id })
     } catch (problem) { notify(String(problem?.message || problem)) }
   }
-  function receiveCandidate(text, generationContext) {
-    candidate = { text, projectId: generationContext.projectId, documentId: generationContext.documentId, fingerprint: generationContext.sourceFingerprint, revision: generationContext.storyboardRevision }
+  function candidateSnapshot(text, generationContext, draftId = null) {
+    return { text, draftId, projectId: generationContext.projectId, documentId: generationContext.documentId, fingerprint: generationContext.sourceFingerprint, revision: generationContext.storyboardRevision }
+  }
+  function receiveCandidate(text, generationContext, draftId = null) {
+    candidate = candidateSnapshot(text, generationContext, draftId)
     renderCandidate(); navigate('storyboard')
+  }
+  function clearCandidate(draftId) {
+    if (!candidate || candidate.draftId !== draftId) return
+    candidate = null
+    renderCandidate()
+  }
+  function restoreSavedCandidate() {
+    try {
+      const saved = getSavedCandidate?.()
+      if (saved?.context?.purpose === 'storyboard' && typeof saved.text === 'string') candidate = candidateSnapshot(saved.text, saved.context, saved.id)
+    } catch (problem) { notify(`待审分镜恢复失败：${String(problem?.message || problem)}`) }
   }
   function renderCandidate() {
     candidateHost.replaceChildren(); candidateHost.hidden = !candidate
     if (!candidate) return
     const text = el('textarea'); text.rows = 7; text.value = candidate.text; text.setAttribute('aria-label', '可编辑的 AI 分镜候选 JSON')
     const summary = el('p', 'media-help')
-    const updateSummary = () => { candidate.text = text.value; try { summary.textContent = `${parseStoryboardCandidate(candidate.text).length} 个候选镜头，尚未写入项目。` } catch (problem) { summary.textContent = problem.message } }
-    text.addEventListener('input', updateSummary); updateSummary()
+    const displayed = candidate
+    const updateSummary = () => { try { summary.textContent = `${parseStoryboardCandidate(displayed.text).length} 个候选镜头，尚未写入项目。` } catch (problem) { summary.textContent = problem.message } }
+    text.addEventListener('input', () => {
+      if (candidate !== displayed) return
+      displayed.text = text.value; updateSummary()
+      try {
+        Promise.resolve(onCandidateChange?.(displayed.draftId, displayed.text)).catch(problem => notify(`候选修改尚未保存：${String(problem?.message || problem)}`))
+      } catch (problem) { notify(`候选修改尚未保存：${String(problem?.message || problem)}`) }
+    })
+    updateSummary()
     const actions = el('div', 'media-toolbar')
-    actions.append(button('采纳并追加镜头', () => applyCandidate(false), 'primary-button'), button('替换当前分镜', () => applyCandidate(true)), button('放弃候选', () => { candidate = null; renderCandidate() }))
+    actions.append(button('采纳并追加镜头', () => applyCandidate(false), 'primary-button'), button('替换当前分镜', () => applyCandidate(true)), button('放弃候选', () => run(async () => {
+      text.readOnly = true
+      try {
+        if (await onCandidateResolved?.(displayed.draftId, { committed: false }) === false) return
+        if (candidate === displayed) candidate = null
+        renderCandidate()
+      } finally { if (text.isConnected) text.readOnly = false }
+    })))
     candidateHost.append(el('h2', '', 'AI 分镜候选'), summary, text, actions)
   }
   async function applyCandidate(replace = false) {
@@ -364,11 +393,22 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       if (!candidate || candidate.projectId !== data.projectId) throw new Error('候选属于另一个项目')
       if (candidate.revision !== data.storyboard.revision) throw new Error('候选生成后分镜已有修改。候选保留，请重新拆镜或手动整理，未覆盖当前内容。')
       if (contentFingerprint(data.documents[candidate.documentId]?.content || '') !== candidate.fingerprint) throw new Error('剧本在生成后已修改。请重新拆镜，原候选仍保留。')
-      const shots = parseStoryboardCandidate(candidate.text, { documentId: candidate.documentId, fingerprint: candidate.fingerprint })
+      const applying = candidate
+      const shots = parseStoryboardCandidate(applying.text, { documentId: applying.documentId, fingerprint: applying.fingerprint })
       if (shots.length + (replace ? 0 : data.storyboard.shots.length) > SHOT_LIMIT) throw new Error(`项目最多 ${SHOT_LIMIT} 个镜头`)
       if (replace && data.storyboard.shots.length && !window.confirm(`替换当前 ${data.storyboard.shots.length} 个镜头？已生成素材保留，但当前镜头编辑与引用将被替换。`)) return
-      await changeStoryboard(list => { if (replace) list.length = 0; list.push(...shots) })
-      selectedShotId = shots[0].id; candidate = null; renderCandidate(); renderShots(); notify('分镜已采纳，剧本没有变化')
+      const editor = candidateHost.querySelector('textarea')
+      if (editor) editor.readOnly = true
+      try {
+        await changeStoryboard(list => { if (replace) list.length = 0; list.push(...shots) }, { resolvedCandidateId: applying.draftId })
+      } finally { if (editor?.isConnected) editor.readOnly = false }
+      if (candidate === applying) candidate = null
+      // The commit already resolved this draft with the storyboard. A UI callback
+      // failure must never turn a successful commit into a retryable append.
+      try { await onCandidateResolved?.(applying.draftId, { committed: true }) }
+      catch (problem) { notify(`分镜已保存，待审稿显示刷新失败：${String(problem?.message || problem)}`) }
+      if (data.projectId === context().projectId) { selectedShotId = shots[0].id; renderCandidate(); renderShots() }
+      notify('分镜已采纳，剧本没有变化')
     })
   }
   function prepareShotRequest(id, capability) {
@@ -522,6 +562,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   async function refresh() {
     const data = context(), sequence = ++requestSequence
     if (data.projectId !== projectId) { projectId = data.projectId; assets = []; jobs = []; recoveryIssues = []; selectedShotId = null; selectedAssetId = null; candidate = null; selectedSourceId = ''; batchSelection.clear(); invalidateBatchPlan(); batchDialog.close() }
+    if (!candidate && !operationBusy) restoreSavedCandidate()
     renderEndpoints(); renderSources(); renderShots({ detail: !shotDetail.contains(document.activeElement) && ![...shotDetail.querySelectorAll('video')].some(video => !video.paused) }); if (!candidateHost.contains(document.activeElement)) renderCandidate(); renderAssets()
     if (!invoke || !data.projectId) { error = ''; renderAssets(); return }
     loading = true; renderAssets()
@@ -672,5 +713,5 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     const found = context().projectId === projectId && findMediaVersion(assets, versionId)
     return preview(found?.version, found?.asset.name || '所选媒体版本')
   }
-  return { refresh, renderEndpoints, receiveCandidate, applyCandidate, showJobs, generateStoryboard, restorePackage, showPendingImports, contextObjects, operationContext, previewVersion, openBatchPlan, hasCandidate: () => Boolean(candidate) }
+  return { refresh, renderEndpoints, receiveCandidate, clearCandidate, applyCandidate, showJobs, generateStoryboard, restorePackage, showPendingImports, contextObjects, operationContext, previewVersion, openBatchPlan, hasCandidate: () => Boolean(candidate) }
 }

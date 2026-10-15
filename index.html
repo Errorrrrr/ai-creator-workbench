@@ -10,6 +10,8 @@
     />
     <title>AI 创作工作台</title>
     <link rel="stylesheet" href="./src/styles.css" />
+    <link rel="stylesheet" href="./src/review-diff.css" />
+    <link rel="stylesheet" href="./src/candidate-drafts-ui.css" />
   </head>
   <body>
     <a class="skip-link" href="#workspaceMain">跳到正文编辑区</a>
@@ -285,7 +287,7 @@
               <button type="button" class="secondary-button compact-button" data-workflow-next>下一步</button>
             </div>
             <details class="creation-step-details">
-              <summary>输入、执行端与输出</summary>
+              <summary title="查看当前步骤的输入、执行端与输出">步骤说明</summary>
               <p id="creationStepHint" class="creation-step-hint"></p>
               <dl><div><dt>可用输入</dt><dd id="creationStepInput"></dd></div><div><dt>执行端</dt><dd id="creationStepExecutor"></dd></div><div><dt>输出位置</dt><dd id="creationStepOutput"></dd></div></dl>
               <p>实际发送范围请查看助手上下文或媒体计划；步骤切换不会生成内容，序号不代表完成率。</p>
@@ -356,28 +358,29 @@
                 </div>
                 <button class="secondary-button compact-button" type="button" data-action="restore-version">恢复为新版本</button>
               </div>
-              <div class="scene-intent" id="sceneIntent">
-                <div class="scene-intent-mark"><svg class="icon"><use href="#icon-logo"></use></svg></div>
-                <div>
-                  <span class="eyebrow">创作目标</span>
+              <details class="scene-intent" id="sceneIntent">
+                <summary><svg class="icon icon-small" aria-hidden="true"><use href="#icon-logo"></use></svg><span>创作目标</span></summary>
+                <div class="scene-intent-content">
                   <p>先记录一个能持续生长的故事装置，再讨论人物与情节。</p>
+                  <div class="scene-meta">
+                    <span>短剧</span><span>待聚焦</span><span>前期创作</span>
+                  </div>
                 </div>
-                <div class="scene-meta">
-                  <span>短剧</span><span>待聚焦</span><span>前期创作</span>
-                </div>
-              </div>
+              </details>
 
               <article class="editor-paper">
                 <div class="editor-paper-header">
-                  <div>
-                    <span class="scene-kicker" id="sceneKicker">Idea · 01</span>
-                    <h2 id="sceneTitle"></h2>
+                  <div class="editor-paper-heading">
+                    <div class="editor-paper-caption">
+                      <label class="editor-label" for="scriptEditor">正文</label>
+                      <span class="scene-kicker" id="sceneKicker">Idea · 01</span>
+                    </div>
+                    <h2 id="sceneTitle" hidden></h2>
                   </div>
                   <button class="icon-button icon-button-compact" type="button" data-action="edit-document" aria-label="编辑当前内容信息" title="编辑当前内容信息">
                     <svg class="icon"><use href="#icon-more"></use></svg>
                   </button>
                 </div>
-                <label class="editor-label" for="scriptEditor">正文</label>
                 <textarea id="scriptEditor" spellcheck="true" aria-describedby="editorStats"></textarea>
                 <div class="editor-footer" id="editorStats">
                   <div class="editor-stats-left">
@@ -585,20 +588,23 @@
           </header>
 
           <div class="assistant-context">
-            <div class="context-heading">
-              <span>本次上下文</span>
-              <button class="text-button" type="button" data-view-target="knowledge">管理</button>
-            </div>
-            <div class="context-chips">
-              <button type="button" class="context-chip" aria-pressed="true"><svg class="icon"><use href="#icon-file"></use></svg>本集大纲<svg class="icon chip-check"><use href="#icon-check"></use></svg></button>
-              <button type="button" class="context-chip" aria-pressed="true"><svg class="icon"><use href="#icon-users"></use></svg>人物设定<svg class="icon chip-check"><use href="#icon-check"></use></svg></button>
-              <button type="button" class="context-chip context-chip-accent" id="knowledgeContextChip" aria-pressed="true"><svg class="icon"><use href="#icon-link"></use></svg>知识 0</button>
-            </div>
-            <div class="context-scope-controls">
-              <label><input id="includeCurrentContext" type="checkbox" checked>当前正文／大纲</label>
-              <label><input id="includeSelectionContext" type="checkbox">编辑器选区</label>
-              <button class="text-button" id="addContextObject" type="button" aria-controls="contextObjectPicker" aria-expanded="false">@ 添加对象</button>
-            </div>
+            <details class="assistant-context-settings">
+              <summary>本次上下文</summary>
+              <div class="context-heading">
+                <span>调整发送范围</span>
+                <button class="text-button" type="button" data-view-target="knowledge">管理资料</button>
+              </div>
+              <div class="context-chips">
+                <button type="button" class="context-chip" aria-pressed="true"><svg class="icon"><use href="#icon-file"></use></svg>本集大纲<svg class="icon chip-check"><use href="#icon-check"></use></svg></button>
+                <button type="button" class="context-chip" aria-pressed="true"><svg class="icon"><use href="#icon-users"></use></svg>人物设定<svg class="icon chip-check"><use href="#icon-check"></use></svg></button>
+                <button type="button" class="context-chip context-chip-accent" id="knowledgeContextChip" aria-pressed="true"><svg class="icon"><use href="#icon-link"></use></svg>知识 0</button>
+              </div>
+              <div class="context-scope-controls">
+                <label><input id="includeCurrentContext" type="checkbox" checked>当前正文／大纲</label>
+                <label><input id="includeSelectionContext" type="checkbox">编辑器选区</label>
+                <button class="text-button" id="addContextObject" type="button" aria-controls="contextObjectPicker" aria-expanded="false">@ 添加对象</button>
+              </div>
+            </details>
             <div id="contextObjectReferences" class="context-object-references" aria-label="主动引用的项目对象"></div>
             <details id="contextObjectPicker" class="context-object-picker">
               <summary>选择当前项目对象</summary>
@@ -657,11 +663,10 @@
               <select id="assistantRequestMode" aria-describedby="requestModeHelp"><option value="text">文字候选</option><option value="discussion">仅讨论</option><option value="project-plan">项目计划 · 编辑与任务查询</option></select>
               <button class="text-button" id="reviewExistingPlan" type="button" data-action="review-existing-plan" hidden>审阅已有计划</button>
             </div>
-            <p class="request-mode-help" id="requestModeHelp">讨论不改项目；文字采纳后写入；项目计划先审阅，任务查询只读本地摘要。</p>
-            <details class="context-preview"><summary id="contextPreviewSummary">发送范围</summary><ul id="contextPreviewList"></ul><div id="contextExcludedList"></div><button class="text-button" id="resetContextScope" type="button">恢复默认上下文</button><details><summary>查看完整文字请求</summary><pre id="contextPreviewMessages"></pre></details><p>仅发送列出的内容、项目标题与创作要求。超出预算的片段会标出截断；移除只影响下次请求，不改动原资料。</p></details>
+            <details class="context-preview"><summary id="contextPreviewSummary">发送范围</summary><p class="request-mode-help" id="requestModeHelp">讨论不改项目；文字采纳后写入；项目计划先审阅，任务查询只读本地摘要。</p><ul id="contextPreviewList"></ul><div id="contextExcludedList"></div><button class="text-button" id="resetContextScope" type="button">恢复默认上下文</button><details><summary>查看完整文字请求</summary><pre id="contextPreviewMessages"></pre></details><p>仅发送列出的内容、项目标题与创作要求。超出预算的片段会标出截断；移除只影响下次请求，不改动原资料。</p></details>
             <label class="prompt-box" for="promptInput">
               <span class="sr-only">告诉 AI 你想如何处理当前内容</span>
-              <textarea id="promptInput" rows="3" placeholder="描述你想怎么改，或输入下一步情节…"></textarea>
+              <textarea id="promptInput" rows="2" placeholder="描述你想怎么改，或输入下一步情节…"></textarea>
               <div class="prompt-toolbar">
                 <button class="prompt-tool" type="button" data-view-target="knowledge" aria-label="选择知识上下文" title="选择知识上下文">
                   <svg class="icon"><use href="#icon-link"></use></svg><span id="promptKnowledgeCount">0</span>

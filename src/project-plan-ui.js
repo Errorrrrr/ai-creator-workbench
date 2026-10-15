@@ -1,11 +1,12 @@
 import { materializeOperationPlan, operationTargetManifest, parseOperationPlan } from './project-operations.js'
+import { createReviewDiff } from './review-diff.js'
 
 export function initializeProjectPlanUI({ getContext, captureContext, commit, renderMedia, queryTasks, openMediaPlan, notify, openDialog }) {
   const dialog = document.querySelector('#projectPlanDialog'), input = document.querySelector('#projectPlanInput')
   const targets = document.querySelector('#projectPlanTargets'), preview = document.querySelector('#projectPlanPreview')
   const status = document.querySelector('#projectPlanStatus'), apply = document.querySelector('#projectPlanApply')
   const previewButton = document.querySelector('#projectPlanPreviewButton')
-  let base = null, reviewed = null, busy = false
+  let base = null, reviewed = null, busy = false, sourceCandidateId = null
   function invalidate() {
     reviewed = null; preview.hidden = true; preview.replaceChildren(); apply.disabled = true
     apply.textContent = '预览后继续'
@@ -31,18 +32,22 @@ export function initializeProjectPlanUI({ getContext, captureContext, commit, re
         change.after = JSON.stringify(queryResult, null, 2)
       }
       const canContinue = result.hasWorkspaceChanges || Boolean(result.mediaBatch)
-      reviewed = canContinue ? { plan, text, base: currentBase } : null
+      reviewed = canContinue ? { plan, text, base: currentBase, candidateId: sourceCandidateId } : null
       const title = document.createElement('h3'); title.textContent = plan.summary
       preview.append(title)
       for (const change of result.changes) {
         const card = document.createElement('article'); card.className = 'project-plan-change'
         const heading = document.createElement('h4'); heading.textContent = change.label; card.append(heading)
         if (change.versionId && renderMedia) card.append(renderMedia(change.versionId))
-        for (const [label, content] of [[change.kind === 'task-query' ? '查询范围与边界' : '改动前', change.before], [change.kind === 'task-query' ? '本地任务快照' : '改动后', change.after]]) {
-          const details = document.createElement('details'), summary = document.createElement('summary'), body = document.createElement('pre')
-          summary.textContent = `${label} · ${content.length} 字符`; body.textContent = content || '空白内容'
-          if (change.kind === 'task-query' && label === '本地任务快照') details.open = true
-          details.append(summary, body); card.append(details)
+        if (change.documentId) {
+          card.append(createReviewDiff({ before: change.before, after: change.after, title: `${change.label}修改差异` }))
+        } else {
+          for (const [label, content] of [[change.kind === 'task-query' ? '查询范围与边界' : '改动前', change.before], [change.kind === 'task-query' ? '本地任务快照' : '改动后', change.after]]) {
+            const details = document.createElement('details'), summary = document.createElement('summary'), body = document.createElement('pre')
+            summary.textContent = `${label} · ${content.length} 字符`; body.textContent = content || '空白内容'
+            if (change.kind === 'task-query' && label === '本地任务快照') details.open = true
+            details.append(summary, body); card.append(details)
+          }
         }
         preview.append(card)
       }
@@ -50,7 +55,7 @@ export function initializeProjectPlanUI({ getContext, captureContext, commit, re
       const count = result.changes.filter(change => !['media-batch', 'task-query'].includes(change.kind)).length
       apply.textContent = !canContinue ? '只读查询已完成，无需保存' : result.mediaBatch ? count ? `保存 ${count} 项改动并核对媒体计划` : `继续核对 ${result.mediaBatch.shotIds.length} 个媒体任务` : `采纳 ${count} 项改动并保存`
       const queryStatus = queryResult ? `${queryResult.jobs.length ? `已读取 ${queryResult.jobs.length} 项本地任务` : '所选镜头尚无本地任务'}${queryResult.hasMore ? '，仅显示最近 20 项' : ''}；这是本地阶段快照，不是远端实时状态。` : ''
-      status.textContent = queryStatus + (!canContinue ? '查询已完成，未保存项目或创建版本。' : result.mediaBatch ? `已校验 ${count} 项本地改动及 ${result.mediaBatch.shotIds.length} 个媒体目标。继续后打开媒体计划，预览实际输入后另行确认生成；此处不会提交。` : `已校验 ${count} 项实际改动。请展开核对；采纳只写本地项目，不启动媒体生成。`)
+      status.textContent = queryStatus + (!canContinue ? '查询已完成，未保存项目或创建版本。' : result.mediaBatch ? `已校验 ${count} 项本地改动及 ${result.mediaBatch.shotIds.length} 个媒体目标。继续后打开媒体计划，预览实际输入后另行确认生成；此处不会提交。` : `已校验 ${count} 项实际改动。请逐处审阅文字差异，必要时展开全文；全部采纳后写入本地项目，不启动媒体生成。`)
     } catch (error) { status.textContent = error.message || String(error); status.focus() }
     finally { busy = false; previewButton.disabled = false; dialog.removeAttribute('aria-busy') }
   })
@@ -61,7 +66,7 @@ export function initializeProjectPlanUI({ getContext, captureContext, commit, re
     try {
       if (input.value !== current.text || base !== current.base) throw new Error('计划已改变，请重新预览')
       materializeOperationPlan(current.plan, current.base, getContext())
-      const result = await commit(current.plan, current.base)
+      const result = await commit(current.plan, current.base, { candidateId: current.candidateId })
       dialog.close(); reviewed = null
       if (result?.mediaBatch) {
         try {
@@ -75,16 +80,17 @@ export function initializeProjectPlanUI({ getContext, captureContext, commit, re
     } finally { busy = false; dialog.removeAttribute('aria-busy') }
   })
   dialog.addEventListener('cancel', event => { if (busy) event.preventDefault() })
-  dialog.addEventListener('close', () => { reviewed = null; base = null })
+  dialog.addEventListener('close', () => { reviewed = null; base = null; sourceCandidateId = null })
   return {
-    open(text = '', context = null) {
+    open(text = '', context = null, { candidateId = null } = {}) {
       if (busy) return
       try {
         base = context || captureContext()
+        sourceCandidateId = candidateId
         targets.textContent = JSON.stringify(operationTargetManifest(base), null, 2)
         input.value = text; invalidate(); openDialog(dialog)
       } catch (error) { notify(error.message || String(error)) }
     },
-    reset() { reviewed = null; base = null; input.value = ''; if (dialog.open) dialog.close() }
+    reset() { reviewed = null; base = null; sourceCandidateId = null; input.value = ''; if (dialog.open) dialog.close() }
   }
 }
