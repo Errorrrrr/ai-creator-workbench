@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { parseReleaseTag, compareVersions, validateReleaseVersions, resolveReleaseRef, checkRelease } from '../scripts/check-release-version.mjs'
 import { createReleaseManifest, verifyReleaseArtifacts, releaseAssetNames } from '../scripts/release-artifacts.mjs'
 import { publishRelease, shouldBecomeLatest } from '../scripts/publish-release.mjs'
@@ -75,17 +75,28 @@ test('only a newer stable release can become Latest', () => {
 async function artifacts(t) {
   const directory = await mkdtemp(join(tmpdir(), 'workbench-release-assets-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
-  const release = { tag: 'v0.3.0', version: '0.3.0', commit }
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+  const keyId = Buffer.from('12345678')
+  const keyPacket = Buffer.concat([Buffer.from('Ed'), keyId, publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)])
+  const encodedKey = Buffer.from(`untrusted comment: test key\n${keyPacket.toString('base64')}`).toString('base64')
+  const release = { tag: 'v0.3.0', version: '0.3.0', commit, publicKey: encodedKey }
   const names = releaseAssetNames(release.version)
   await writeFile(join(directory, names[0]), 'synthetic DMG bytes')
   await writeFile(join(directory, names[1]), 'synthetic app ZIP bytes')
+  const bytes = Buffer.from('synthetic updater package')
+  const signature = sign(null, createHash('blake2b512').update(bytes).digest(), privateKey)
+  const packet = Buffer.concat([Buffer.from('ED'), keyId, signature])
+  const comment = 'timestamp:1\tfile:app.tar.gz\tversion:0.3.0'
+  const globalSignature = sign(null, Buffer.concat([signature, Buffer.from(comment)]), privateKey)
+  await writeFile(join(directory, names[2]), bytes)
+  await writeFile(join(directory, names[3]), Buffer.from(`untrusted comment: test\n${packet.toString('base64')}\ntrusted comment: ${comment}\n${globalSignature.toString('base64')}`).toString('base64'))
   const manifest = await createReleaseManifest(directory, release)
   return { directory, release, manifest, names }
 }
 
 test('release artifacts are complete, regular non-empty files and match their SHA256 manifest', async t => {
   const { directory, release, names } = await artifacts(t)
-  assert.equal((await verifyReleaseArtifacts(directory, release)).assets.length, 4)
+  assert.equal((await verifyReleaseArtifacts(directory, release)).assets.length, 6)
   await writeFile(join(directory, names[0]), 'tampered')
   await assert.rejects(verifyReleaseArtifacts(directory, release), /校验失败/)
 })
@@ -128,10 +139,10 @@ test('publication uploads and verifies all assets privately before making one fi
   assert.equal(fake.events[0].type, 'create')
   assert.equal(fake.events[0].args.draft, true)
   assert.equal(fake.events[0].args.make_latest, 'false')
-  assert.equal(fake.events.filter(event => event.type === 'upload').length, 4)
+  assert.equal(fake.events.filter(event => event.type === 'upload').length, 6)
   assert.equal(fake.events.at(-1).args.draft, false)
   assert.equal(fake.events.at(-1).args.make_latest, 'true')
-  assert.equal(result.assets.length, 4)
+  assert.equal(result.assets.length, 6)
 })
 
 test('failed uploads stay private and cannot replace Latest with a partial release', async t => {
@@ -160,4 +171,20 @@ test('release workflow only grants publish write permission and gates it on the 
   assert.ok(workflow.indexOf('cargo test --locked') < workflow.indexOf('Build the app and DMG'))
   assert.match(workflow, /workbench-release-publication/)
   assert.ok(!workflow.includes('${{ inputs.tag }}'), 'tag is passed as environment data, not directly interpolated into shell code')
+})
+
+test('signed updater rejects a tampered package even if the checksum manifest is regenerated', async t => {
+  const { directory, release, names } = await artifacts(t)
+  await writeFile(join(directory, names[2]), 'tampered update bytes')
+  await createReleaseManifest(directory, release)
+  await assert.rejects(verifyReleaseArtifacts(directory, release), /签名/)
+})
+test('signed updater rejects relabelled versions and altered trusted comments', async t => {
+  const { verifyUpdaterSignature } = await import('../scripts/verify-updater-signature.mjs')
+  const { directory, release, names } = await artifacts(t)
+  const bytes = await readFile(join(directory, names[2]))
+  const signature = await readFile(join(directory, names[3]), 'utf8')
+  assert.throws(() => verifyUpdaterSignature(bytes, signature, release.publicKey, '0.4.0'), /签名/)
+  const edited = Buffer.from(Buffer.from(signature, 'base64').toString().replace('version:0.3.0', 'version:0.4.0')).toString('base64')
+  assert.throws(() => verifyUpdaterSignature(bytes, edited, release.publicKey, '0.4.0'), /签名/)
 })

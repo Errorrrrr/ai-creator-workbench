@@ -7,7 +7,7 @@ const CURRENT = '17.4.8'
 const LATEST = '17.5.0'
 const RELEASE = `https://github.com/Errorrrrr/ai-creator-workbench/releases/tag/v${LATEST}`
 const DOWNLOAD = `https://github.com/Errorrrrr/ai-creator-workbench/releases/download/v${LATEST}/Workbench_aarch64.dmg`
-const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton']
+const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton', 'updateInstallButton', 'updateCancelButton']
 
 class Element extends EventTarget {
   textContent = ''

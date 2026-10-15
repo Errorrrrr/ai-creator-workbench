@@ -75,6 +75,7 @@ try {
   projectBoot = await recoverStartup(error)
 }
 let activeProjectId = projectBoot.id
+let updateInstalling = false
 let projectTransition = false
 const projectTransitionNodes = new Map()
 
@@ -105,7 +106,7 @@ function setProjectTransition(value) {
 }
 
 function blockProjectTransitionInput(event) {
-  if (!projectTransition) return
+  if (!projectTransition || (updateInstalling && event.target?.closest?.('#updateDialog'))) return
   event.preventDefault()
   event.stopImmediatePropagation()
 }
@@ -4685,7 +4686,23 @@ const inspirationUI = initializeInspirations({
   }
 })
 
-const updatesUI = initializeUpdates({ invoke: isDesktopRuntime ? invokeDesktop : null, openDialog })
+const updatesUI = initializeUpdates({
+  invoke: isDesktopRuntime ? invokeDesktop : null, openDialog,
+  beforeInstall: async () => {
+    if (projectTransition || state.isGenerating || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy() || mediaWorkbench?.hasPendingWork()) {
+      throw new Error('请先等待当前生成、导入或保存任务结束')
+    }
+    updateInstalling = true
+    setProjectTransition(true)
+    document.getElementById('updateDialog').inert = false
+    const unlock = () => { updateInstalling = false; setProjectTransition(false) }
+    try {
+      if (inspirationUI.dirty() && !await inspirationUI.save()) throw new Error('灵感尚未保存成功')
+      if (!await saveImmediately({ announce: false }) || unsavedEdits || pendingSaves || inspirationUI.dirty()) throw new Error('创作内容尚未保存成功')
+      return unlock
+    } catch (error) { unlock(); throw error }
+  }
+})
 mediaWorkbench = initializeProjectMediaWorkbench()
 mediaWorkbench.refresh()
 creationNavigation = initializeCreationNavigation({

@@ -9,12 +9,15 @@ mod media_video;
 mod project_deletion;
 mod runtime;
 mod storage;
+mod updater;
 mod updates;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updater::UpdateRuntime::default())
         .register_uri_scheme_protocol("workbench-media", |context, request| {
             media::protocol(context.app_handle(), request)
         })
@@ -25,6 +28,10 @@ pub fn run() {
             updates::app_version,
             updates::check_for_updates,
             updates::open_update_link,
+            updater::download_update,
+            updater::cancel_update,
+            updater::install_update,
+            updater::restart_after_update,
             runtime::runtime_snapshot,
             runtime::connection_test,
             runtime::generate_text,

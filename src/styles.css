@@ -5033,3 +5033,9 @@ pre.context-preview {
     transition-duration: 0.01ms !important;
   }
 }
+
+.update-status[data-state="downloading"], .update-status[data-state="installing"] {
+  color: var(--text-primary);
+  background: var(--surface-raised);
+}
+.update-actions { flex-wrap: wrap; }

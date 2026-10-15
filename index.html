@@ -919,7 +919,7 @@
         <div><span class="eyebrow">应用更新</span><h2 id="updateDialogTitle">保持创作工具常新</h2></div>
         <button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭更新检查"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button>
       </div>
-      <p class="dialog-description" id="updateDialogDescription">手动检查 GitHub 上的公开稳定版本，查看说明后选择下载。</p>
+      <p class="dialog-description" id="updateDialogDescription">检查公开稳定版本，选择“更新并重启”后在应用内完成升级。</p>
       <div class="update-version-grid">
         <div><span>当前版本</span><strong id="updateCurrentVersion">待读取</strong></div>
         <div><span>最新稳定版</span><strong id="updateLatestVersion">尚未确认</strong></div>
@@ -931,11 +931,13 @@
         <pre class="update-notes" id="updateNotes"></pre>
       </section>
       <p class="update-asset" id="updateAsset"></p>
-      <p class="update-install-note">只检查版本并打开官方发布链接，不会自动下载或安装。建议安装前先备份创作内容。</p>
+      <p class="update-install-note">桌面版会下载并验证更新包，保存创作内容后安装并重启。生成任务未结束或保存失败时不会安装。浏览器版请下载安装包。</p>
       <div class="dialog-actions update-actions">
         <button class="text-button" type="button" id="updateCheckButton">重新检查</button>
         <button class="secondary-button" type="button" id="updateReleaseButton" disabled>打开发布页</button>
-        <button class="primary-button" type="button" id="updateDownloadButton" disabled>下载对应安装包</button>
+        <button class="secondary-button" type="button" id="updateCancelButton" hidden>取消更新</button>
+        <button class="primary-button" type="button" id="updateInstallButton" hidden>更新并重启</button>
+        <button class="secondary-button" type="button" id="updateDownloadButton" disabled>下载对应安装包</button>
       </div>
     </dialog>
 

@@ -60,6 +60,9 @@ jobs:
       - name: Run locked Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Build the app and DMG from locked dependencies
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: node scripts/run-tauri.mjs build --target aarch64-apple-darwin --bundles app,dmg --ci -- --locked
       - name: Validate bundles and generate release checksums
         run: node scripts/release-artifacts.mjs --tag "$RELEASE_TAG"

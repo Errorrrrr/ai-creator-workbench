@@ -2,7 +2,7 @@
 
 面向灵感、故事设定、短剧与漫剧剧本的本地优先写作工具。支持多项目、独立灵感库、知识检索和可切换的 AI 执行端。没有配置 AI 时，仍可创建、编辑、备份和恢复内容。
 
-工程名：`ai-creator-workbench`，当前源码版本：`0.5.0`。浏览器模式使用 IndexedDB，Tauri 2 桌面模式使用 SQLite。首次启动为空白工作台，新项目不预填示例正文、分集或分场。
+工程名：`ai-creator-workbench`，当前源码版本：`0.6.0`。浏览器模式使用 IndexedDB，Tauri 2 桌面模式使用 SQLite。首次启动为空白工作台，新项目不预填示例正文、分集或分场。
 
 v0.4.0 的 P0 文字闭环和 P1 分镜／图片主路径已在 macOS 隔离桌面环境完成验收：现有 Codex CLI 生成六镜头及带固定参考的真实图片，候选明确选用、重启保存和完整项目包恢复通过。视频阶段目前按用户选择先提供通用接入框架，真实视频生成尚未验收。公开发布结果以 [GitHub Releases](https://github.com/Errorrrrr/ai-creator-workbench/releases) 为准。范围和逐项证据见 [多模态实施契约](specs/多模态实现契约.md)，更新要点见 [v0.4.0 发布说明](specs/发布说明-v0.4.0.md)。
 
@@ -32,7 +32,7 @@ npm run dev
 - **差异审阅**：文字候选的“审阅替换差异”和项目计划预览提供逐行增删高亮、变更统计、前后跳转及全文查看。候选与生成时原文对比；正文后来有修改时显示提示并继续阻止覆盖。项目计划仍整批校验、原子采纳，手工计划不会移除其他 AI 待审稿。
 - **分镜与图片**：项目内切换创作／分镜／素材，按文字、拆镜、图片和视频选择已有资源；结构化项目计划先审阅再采纳。镜头可编辑运镜、起止状态并固定参考版本，真实图片先自动收录为候选，再由用户明确选用。Codex 图片适配为版本相关的个人实验性接入，不保证任意账号或 CLI 版本可用。
 - **知识检索**：只读导入 Markdown/TXT，查看导入报告、搜索片段、选择本次引用、重新选择目录同步；可选本机 Ollama 语义索引及覆盖率提示。
-- **检查更新**：底栏“检查更新”按需下载 GitHub Releases 中的静态 `latest.json` 更新清单，展示当前/最新版本、平台、日期与发布说明；可打开发布页或匹配的安装包链接。启动时不自动联网，不自动安装或替换应用。
+- **检查更新**：底栏“检查更新”按需下载 GitHub Releases 中的静态 `latest.json` 更新清单，展示当前/最新版本、平台、日期与发布说明；桌面版可选择“更新并重启”，在应用内完成签名下载、保存、安装和重启；仍保留安装包链接。启动时不自动联网。
 - **界面**：暖纸、墨色、琥珀配色，浅色/深色主题；编辑器主导布局、专注模式、命令面板、可见键盘焦点、减少动效支持及窄屏抽屉。项目列表、灵感、知识来源和连接中心使用统一组件。
 
 v0.5.0 的候选稿保留、修改差异审阅和写作区空间优化已完成浏览器回归及 macOS 隔离原生应用验收：使用本机固定响应验证文字稿保留、差异跳转、生成中正常退出后的 SQLite 恢复，以及文字与项目计划采纳；本轮没有调用真实供应商。更新内容见 [v0.5.0 发布说明](specs/发布说明-v0.5.0.md)，逐项证据见 [2026-10-15 优化验收](specs/优化验收-2026-10-15.md)，公开安装包以 [GitHub Releases](https://github.com/Errorrrrr/ai-creator-workbench/releases) 的实际附件为准。创作目标、步骤说明和助手上下文可按需展开，重复纸面标题隐藏，保留原有配色与写作字体。
@@ -172,24 +172,28 @@ npm run desktop:build:mac
 
 这些是本机构建的预期路径；公开安装包以 [GitHub Releases](https://github.com/Errorrrrr/ai-creator-workbench/releases) 中已发布的附件为准。当前只交付 macOS 12.3+ 的 Apple Silicon 版本，为 ad-hoc 签名，尚无 Apple Developer ID 签名或公证。
 
+v0.6.0 的签名更新、取消、失败重试和原生安装重启已在隔离应用中验收，详见 [应用内更新验收](specs/应用内更新验收-2026-10-15.md)。
+
 ## 更新与 GitHub Actions 发布
 
 点击底栏“检查更新”，应用读取 `https://github.com/Errorrrrr/ai-creator-workbench/releases/latest/download/latest.json`，可查看版本、发布说明及适合当前平台的下载入口，也可以手动“重新检查”或“打开发布页”。检查只在主动点击时联网。不调用 GitHub REST API，不占用匿名 API 每小时 60 次额度，也不需要用户 Token。网络失败、没有已发布更新清单或下载服务暂时拒绝请求时会显示结果，不影响本地创作。
 
 `latest.json` 随每个版本自动生成、校验并上传，与安装包和 SHA256SUMS 同属一份 Release；只有所有附件校验完成后才公开发布。它保留版本标签、发布页、说明、日期与安装包链接，客户端仍校验稳定版本、平台架构和本仓库 HTTPS 下载路径；清单请求只允许跟随本仓库附件与 GitHub 官方附件域名的有限重定向，保留超时和 1 MiB 大小限制。清单缺失时显示未找到更新清单，不回退 GitHub API。
 
-更新使用当前仓库 `Errorrrrr/ai-creator-workbench` 的 Releases。匿名检查要求仓库和目标 Release 公开；草稿或私有仓库不会被当作公开更新。界面的“下载匹配安装包”打开浏览器下载地址，安装仍由用户完成。升级前建议导出完整备份，关闭旧应用后再替换应用；项目数据库保存在独立的应用数据目录中。
+更新使用当前仓库 `Errorrrrr/ai-creator-workbench` 的 Releases。匿名检查要求仓库和目标 Release 公开；草稿或私有仓库不会被当作公开更新。0.6.0 起可直接“更新并重启”：下载显示进度、支持取消，校验签名及其绑定版本；保存正文、候选和灵感后锁定编辑，再安装并重启。有任务未结束或保存失败则不安装。失败可重试。0.5.0 及更早版本首次升级仍需安装 DMG；数据库位于独立应用数据目录，正常升级不额外保留旧应用。
 
-推送已有版本 tag（如 `v0.5.0`）触发 [Release macOS 工作流](.github/workflows/release.yml)。流程先核对 tag 与所有版本文件，执行 JavaScript 检查、测试、前端构建和锁定依赖的 Rust 测试，再构建 Apple Silicon `.app` 与 `.dmg`。安装包、签名结构、架构和 SHA-256 校验通过后，才发布完整 GitHub Release。
+推送已有版本 tag（如 `v0.6.0`）触发 [Release macOS 工作流](.github/workflows/release.yml)。流程先核对 tag 与所有版本文件，执行 JavaScript 检查、测试、前端构建和锁定依赖的 Rust 测试，再构建 Apple Silicon `.app` 与 `.dmg`。安装包、签名结构、架构和 SHA-256 校验通过后，才发布完整 GitHub Release。
 
-以 v0.5.0 为例，发布附件名称为：
+以 v0.6.0 为例，发布附件名称为：
 
-- `ai-creator-workbench_0.5.0_aarch64.dmg`
-- `ai-creator-workbench_0.5.0_aarch64.app.zip`
+- `ai-creator-workbench_0.6.0_aarch64.dmg`
+- `ai-creator-workbench_0.6.0_aarch64.app.zip`
+- `ai-creator-workbench_0.6.0_aarch64.app.tar.gz`
+- `ai-creator-workbench_0.6.0_aarch64.app.tar.gz.sig`
 - `latest.json`
 - `SHA256SUMS`
 
-构建 job 只有仓库读取权限，发布 job 使用 GitHub 自带 `GITHUB_TOKEN` 的 `contents: write`，不需要在源码中放置发布 token 或自动更新签名密钥。失败的上传只会留下未公开的草稿；已经公开的版本不会被工作流覆盖。预发布与旧版本不会抢占 Latest。
+构建 job 只有仓库读取权限，发布 job 使用 GitHub 自带 `GITHUB_TOKEN` 的 `contents: write`，不需要在源码中放置发布 token 或自动更新签名密钥。构建 job 从 `TAURI_SIGNING_PRIVATE_KEY` Secret 读取独立的更新签名私钥，应用内只包含公钥；发布前另行验证更新包签名和绑定版本。失败的上传只会留下未公开的草稿；已经公开的版本不会被工作流覆盖。预发布与旧版本不会抢占 Latest。
 
 具体版本步骤、手动重试、校验和当前签名边界见 [GitHub Actions 发布说明](specs/GitHub-Actions发布.md)。
 
@@ -200,6 +204,6 @@ npm run desktop:build:mac
 - `⌘/Ctrl + Enter`：执行 AI 请求。
 - `Esc`：关闭弹层、抽屉或停止生成。
 
-浏览器布局覆盖窄屏使用；原生窗口当前最小为 1024 × 700。已有资源的文字、六镜头、参考图片与备份恢复主路径，以及本机隔离原生应用的候选保留、SQLite 退出恢复和计划采纳已验收；不保证其他账号、CLI 版本或模型同样可用，也不代表跨镜头人物身份一致性通过。真实视频生成仍未验收。尚未提供应用内成片渲染、多人协作、云同步、后台文件监听、Obsidian 双向写回、Gemini 创作执行、自动下载安装更新或正式 Windows 发布；其他供应商、Embedding 资源、正式签名，以及其他设备与旧版本的升级组合仍需按实际环境验证。具体安装记录以交付回执为准。
+浏览器布局覆盖窄屏使用；原生窗口当前最小为 1024 × 700。已有资源的文字、六镜头、参考图片与备份恢复主路径，以及本机隔离原生应用的候选保留、SQLite 退出恢复和计划采纳已验收；不保证其他账号、CLI 版本或模型同样可用，也不代表跨镜头人物身份一致性通过。真实视频生成仍未验收。尚未提供应用内成片渲染、多人协作、云同步、后台文件监听、Obsidian 双向写回、Gemini 创作执行或正式 Windows 发布；其他供应商、Embedding 资源、正式签名，以及其他设备与旧版本的升级组合仍需按实际环境验证。具体安装记录以交付回执为准。
 
 更完整的交互规则见 [交互说明](specs/交互说明.md)，视觉规范见 [设计系统](design-system/ai-creator-workbench/MASTER.md)。

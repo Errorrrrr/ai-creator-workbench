@@ -39,6 +39,7 @@ pub(crate) struct UpdateCheck {
     download_url: Option<String>,
     asset_name: Option<String>,
     platform: String,
+    auto_install_available: bool,
 }
 
 fn decode_segment(value: &str) -> Result<String, String> {
@@ -141,6 +142,7 @@ fn empty_result(
         download_url: None,
         asset_name: None,
         platform: format!("{os}-{arch}"),
+        auto_install_available: false,
     })
 }
 
@@ -282,12 +284,11 @@ fn status_error(status: u16) -> String {
 }
 
 #[tauri::command]
-pub(crate) fn app_version() -> String {
-    env!("CARGO_PKG_VERSION").into()
+pub(crate) fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
 }
 
-#[tauri::command]
-pub(crate) async fn check_for_updates() -> Result<UpdateCheck, String> {
+pub(crate) async fn fetch_manifest(app: &tauri::AppHandle) -> Result<Option<Value>, String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(CHECK_TIMEOUT)
@@ -301,11 +302,11 @@ pub(crate) async fn check_for_updates() -> Result<UpdateCheck, String> {
         .build()
         .map_err(|_| "无法初始化更新检查")?;
     let response = client
-        .get(UPDATE_MANIFEST_URL)
+        .get(manifest_url(app))
         .header(reqwest::header::ACCEPT, "application/json")
         .header(
             reqwest::header::USER_AGENT,
-            format!("AI-Creator-Workbench/{}", app_version()),
+            format!("AI-Creator-Workbench/{}", app.package_info().version),
         )
         .send()
         .await
@@ -317,7 +318,7 @@ pub(crate) async fn check_for_updates() -> Result<UpdateCheck, String> {
             }
         })?;
     if response.status().as_u16() == 404 {
-        return empty_result(&app_version(), std::env::consts::OS, std::env::consts::ARCH);
+        return Ok(None);
     }
     if !response.status().is_success() {
         return Err(status_error(response.status().as_u16()));
@@ -345,12 +346,74 @@ pub(crate) async fn check_for_updates() -> Result<UpdateCheck, String> {
     }
     let payload: Value =
         serde_json::from_slice(&body).map_err(|_| "GitHub 返回了无法解析的发布信息")?;
-    parse_release(
+    Ok(Some(payload))
+}
+
+// Local fixtures exist only in debug builds and only for a separate QA application ID.
+fn manifest_url(app: &tauri::AppHandle) -> String {
+    #[cfg(debug_assertions)]
+    if app
+        .config()
+        .identifier
+        .starts_with("com.aicreator.workbench.qa-")
+    {
+        if let Some(value) = option_env!("ACW_QA_UPDATE_URL") {
+            if Url::parse(&value)
+                .is_ok_and(|url| url.scheme() == "http" && url.host_str() == Some("127.0.0.1"))
+            {
+                return value.into();
+            }
+        }
+    }
+    let _ = app;
+    UPDATE_MANIFEST_URL.into()
+}
+
+pub(crate) fn updater_metadata(payload: &Value) -> Result<(), String> {
+    let version = payload["version"].as_str().ok_or("缺少签名更新版本")?;
+    if payload["tag_name"].as_str() != Some(&format!("v{version}")) {
+        return Err("更新包版本与发布版本不一致".into());
+    }
+    if !Version::parse(version)
+        .map_err(|_| "更新版本无效")?
+        .pre
+        .is_empty()
+    {
+        return Err("不允许安装预发布版本".into());
+    }
+    let platform = &payload["platforms"]["darwin-aarch64"];
+    let (url, segments) =
+        validated_update_url(platform["url"].as_str().ok_or("缺少当前平台更新包")?)?;
+    if segments.len() != 6
+        || segments[3] != "download"
+        || segments[4] != format!("v{version}")
+        || segments[5] != format!("ai-creator-workbench_{version}_aarch64.app.tar.gz")
+        || platform["signature"]
+            .as_str()
+            .is_none_or(|s| s.is_empty() || s.len() > 8192)
+    {
+        return Err("签名更新包信息无效".into());
+    }
+    let _ = url;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateCheck, String> {
+    let current = app.package_info().version.to_string();
+    let Some(payload) = fetch_manifest(&app).await? else {
+        return empty_result(&current, std::env::consts::OS, std::env::consts::ARCH);
+    };
+    let mut result = parse_release(
         &payload,
-        &app_version(),
+        &current,
         std::env::consts::OS,
         std::env::consts::ARCH,
-    )
+    )?;
+    result.auto_install_available = cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && result.status == "update_available"
+        && updater_metadata(&payload).is_ok();
+    Ok(result)
 }
 
 #[tauri::command]
@@ -383,6 +446,20 @@ mod tests {
 
     fn release(tag: &str) -> Value {
         json!({"draft": false, "prerelease": false, "tag_name": tag, "html_url": format!("{RELEASES_URL}/tag/{tag}"), "body": "发布说明", "published_at": "2026-10-05T10:00:00Z", "assets": []})
+    }
+
+    #[test]
+    fn signed_metadata_must_match_stable_tag_platform_and_exact_package() {
+        let mut value = release("v0.6.0");
+        value["version"] = json!("0.6.0");
+        value["platforms"] = json!({"darwin-aarch64":{"url":format!("{RELEASES_URL}/download/v0.6.0/ai-creator-workbench_0.6.0_aarch64.app.tar.gz"),"signature":"signed-data"}});
+        assert!(updater_metadata(&value).is_ok());
+        for bad in ["https://evil.example/app.tar.gz", "https://github.com/Errorrrrr/ai-creator-workbench/releases/download/v0.5.0/ai-creator-workbench_0.5.0_aarch64.app.tar.gz"] {
+            let mut changed = value.clone(); changed["platforms"]["darwin-aarch64"]["url"] = json!(bad);
+            assert!(updater_metadata(&changed).is_err());
+        }
+        value["version"] = json!("0.7.0");
+        assert!(updater_metadata(&value).is_err());
     }
 
     #[test]

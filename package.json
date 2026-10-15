@@ -1,6 +1,6 @@
 {
   "name": "ai-creator-workbench",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,6 +15,6 @@
     "node": ">=18"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.4"
+    "@tauri-apps/cli": "2.12.3"
   }
 }

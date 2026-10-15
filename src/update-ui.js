@@ -1,3 +1,4 @@
+import { createUpdateInstaller } from './update-installer.js'
 import { validateUpdateUrl } from './updates.js'
 
 const RELEASE_STATES = new Set(['no_release', 'up_to_date', 'update_available', 'ahead'])
@@ -59,8 +60,10 @@ export function initializeUpdates({
   openDialog = dialog => dialog.showModal(),
   openExternal = url => globalThis.window.open(url, '_blank', 'noopener,noreferrer'),
   timeoutMs = 20000,
+  beforeInstall = async () => { throw new Error("保存保护尚未就绪") },
+  createChannel = () => new globalThis.window.__TAURI__.core.Channel(),
 } = {}) {
-  const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton']
+  const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton', 'updateInstallButton', 'updateCancelButton']
   const elements = Object.fromEntries(ids.map(id => {
     const element = documentRef.getElementById(id)
     if (!element) throw new Error(`缺少更新界面控件：${id}`)
@@ -72,16 +75,23 @@ export function initializeUpdates({
   let openingLink = false
   let result = null
 
+  const installer = invoke ? createUpdateInstaller({ invoke, createChannel, beforeInstall, status: setStatus, changed: syncButtons }) : null
   const current = id => id === sequence && elements.updateDialog.open
   function setStatus(message, state) {
     elements.updateStatus.textContent = message
     elements.updateStatus.dataset.state = state
   }
   function syncButtons() {
-    elements.updateCheckButton.disabled = checking || openingLink
+    const busy = Boolean(installer?.busy || installer?.locked)
+    elements.updateInstallButton.hidden = !invoke || (!result?.autoInstallAvailable && installer?.phase !== 'installed')
+    elements.updateInstallButton.disabled = checking || openingLink || Boolean(installer?.busy)
+    elements.updateInstallButton.textContent = installer?.phase === 'installed' ? '重启应用' : installer?.phase === 'ready' ? '保存并安装重启' : '更新并重启'
+    elements.updateCancelButton.hidden = !['downloading', 'ready', 'cancelling'].includes(installer?.phase)
+    elements.updateCancelButton.disabled = installer?.phase === 'cancelling'
+    elements.updateCheckButton.disabled = busy || installer?.phase === 'ready' || checking || openingLink
     elements.updateCheckButton.textContent = checking ? '正在检查…' : '重新检查'
-    elements.updateReleaseButton.disabled = checking || openingLink || !result?.releaseUrl
-    elements.updateDownloadButton.disabled = checking || openingLink || !result?.downloadUrl
+    elements.updateReleaseButton.disabled = busy || checking || openingLink || !result?.releaseUrl
+    elements.updateDownloadButton.disabled = busy || checking || openingLink || !result?.downloadUrl
     elements.updateDialog.setAttribute('aria-busy', String(checking))
   }
   function clearRelease() {
@@ -118,20 +128,20 @@ export function initializeUpdates({
     elements.updatePublished.textContent = published && Number.isFinite(published.getTime()) ? `发布于 ${published.toLocaleDateString('zh-CN')}` : ''
     elements.updateNotes.textContent = next.notes || '此版本未提供更新说明。'
     elements.updateNotesSection.hidden = next.status === 'no_release' && !next.notes
-    elements.updateAsset.textContent = next.downloadUrl
+    elements.updateAsset.textContent = invoke && next.autoInstallAvailable ? '已提供当前平台的签名更新包，可直接在应用内更新。' : next.downloadUrl
       ? `下载文件：${typeof next.assetName === 'string' ? next.assetName : '对应当前平台的安装包'}`
       : next.status === 'no_release' ? '' : '没有匹配当前平台与架构的安装包，可到发布页查看其他文件。'
     elements.updateDownloadButton.textContent = next.status === 'ahead' ? '下载稳定版本' : '下载对应安装包'
     const messages = {
       no_release: '未找到可访问的稳定更新清单；可能尚未发布更新清单，或仓库目前不可访问。',
       up_to_date: '当前版本已是最新公开稳定版。',
-      update_available: `发现新版本 ${next.latestVersion}，可查看说明后选择下载。`,
+      update_available: `发现新版本 ${next.latestVersion}，可查看说明后更新；桌面版支持保存并重启。`,
       ahead: '当前版本高于最新公开稳定版，无需更新。',
     }
     setStatus(messages[next.status], next.status)
   }
   async function check() {
-    if (checking || openingLink || !elements.updateDialog.open) return
+    if (installer?.busy || installer?.locked || installer?.phase === 'ready' || checking || openingLink || !elements.updateDialog.open) return
     const id = ++sequence
     const request = new AbortController()
     controller = request
@@ -166,6 +176,8 @@ export function initializeUpdates({
     }
   }
   function cancel() {
+    if (installer?.locked) return
+    void installer?.cancel()
     sequence += 1
     controller?.abort()
     controller = null
@@ -175,7 +187,7 @@ export function initializeUpdates({
     setStatus('检查已结束，点击“重新检查”获取发布信息。', 'idle')
   }
   async function openLink(kind) {
-    if (checking || openingLink || !elements.updateDialog.open) return
+    if (installer?.busy || installer?.locked || installer?.phase === 'ready' || checking || openingLink || !elements.updateDialog.open) return
     const raw = kind === 'download' ? result?.downloadUrl : result?.releaseUrl
     if (!raw) return
     const id = sequence
@@ -192,13 +204,19 @@ export function initializeUpdates({
       if (current(id)) { openingLink = false; syncButtons() }
     }
   }
+  elements.updateInstallButton.addEventListener('click', () => { if (result?.autoInstallAvailable || installer?.phase === 'installed') void installer?.run(result?.latestVersion) })
+  elements.updateCancelButton.addEventListener('click', () => { void installer?.cancel() })
+  elements.updateDialog.addEventListener('click', event => {
+    if (installer?.locked && event.target?.closest?.('[data-action="close-dialog"]')) { event.preventDefault(); event.stopImmediatePropagation() }
+  }, true)
+  elements.updateDialog.addEventListener('cancel', event => { if (installer?.locked) { event.preventDefault(); event.stopImmediatePropagation() } })
   elements.updateCheckButton.addEventListener('click', () => { void check() })
   elements.updateReleaseButton.addEventListener('click', () => { void openLink('release') })
   elements.updateDownloadButton.addEventListener('click', () => { void openLink('download') })
   elements.updateDialog.addEventListener('close', cancel)
   elements.updateDialog.addEventListener('cancel', cancel)
   return {
-    open() { openDialog(elements.updateDialog); return check() },
+    open() { openDialog(elements.updateDialog); if (installer?.busy || installer?.locked || installer?.phase === 'ready') return; return check() },
     check,
     cancel,
   }

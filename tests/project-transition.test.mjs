@@ -28,7 +28,7 @@ function harness({ inspirationBusy = false } = {}) {
   const calls = { save: 0, loaded: 0, selected: 0, timers: [], toasts: [] }
   const state = { candidateApplying: false, knowledgeBusy: false, storageFailed: false, currentView: 'workspace', currentDocId: 'idea', activeTab: 'script', documents: { idea: { content: stored.a }, oldScene: { content: 'A 独有的分场' } } }
   const context = vm.createContext({
-    state, elements: { scriptEditor: { value: stored.a, focus() {} } }, activeProjectId: 'a', projectTransition: false, projectTransitionNodes: new Map(), unsavedEdits: false,
+    state, elements: { scriptEditor: { value: stored.a, focus() {} } }, activeProjectId: 'a', projectTransition: false, updateInstalling: false, projectTransitionNodes: new Map(), unsavedEdits: false,
     inspirationUI: { isBusy: () => inspirationBusy, reset() {} },
     document: { querySelectorAll: () => nodes, querySelector: () => ({ close() {}, focus() {} }), addEventListener(type, handler, capture) { handlers.set(type, { handler, capture }) } },
     window: { clearTimeout() {}, setTimeout(callback, delay) { calls.timers.push({ callback, delay }); return calls.timers.length }, confirm: () => false },

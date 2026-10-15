@@ -47,6 +47,16 @@ pub(crate) struct RuntimeState {
 }
 
 impl RuntimeState {
+    pub(crate) fn has_active_tasks(&self) -> Result<bool, String> {
+        Ok(!self
+            .tasks
+            .lock()
+            .map_err(|_| "运行状态不可用")?
+            .running
+            .is_empty()
+            || self.cli_running.load(Ordering::SeqCst))
+    }
+
     fn register(&self, task_id: &str) -> Result<Arc<CancellationToken>, String> {
         if task_id.is_empty() || task_id.len() > 96 {
             return Err("生成任务 ID 无效".into());

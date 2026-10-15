@@ -40,6 +40,19 @@ impl Default for MediaRuntime {
 }
 
 impl MediaRuntime {
+    pub(crate) fn has_active_tasks(&self) -> Result<bool, String> {
+        Ok(!self
+            .running
+            .lock()
+            .map_err(|_| "媒体状态不可用")?
+            .is_empty()
+            || !self
+                .cli_processes
+                .lock()
+                .map_err(|_| "媒体进程状态不可用")?
+                .is_empty())
+    }
+
     pub(crate) fn guard_project_deletion<'a>(
         &'a self,
         db: &rusqlite::Connection,

@@ -713,5 +713,5 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     const found = context().projectId === projectId && findMediaVersion(assets, versionId)
     return preview(found?.version, found?.asset.name || '所选媒体版本')
   }
-  return { refresh, renderEndpoints, receiveCandidate, clearCandidate, applyCandidate, showJobs, generateStoryboard, restorePackage, showPendingImports, contextObjects, operationContext, previewVersion, openBatchPlan, hasCandidate: () => Boolean(candidate) }
+  return { hasPendingWork: () => operationBusy, refresh, renderEndpoints, receiveCandidate, clearCandidate, applyCandidate, showJobs, generateStoryboard, restorePackage, showPendingImports, contextObjects, operationContext, previewVersion, openBatchPlan, hasCandidate: () => Boolean(candidate) }
 }

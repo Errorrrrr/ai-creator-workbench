@@ -27,6 +27,10 @@ struct FileChooserState {
 }
 
 impl FileChooserRuntime {
+    pub(crate) fn has_active_tasks(&self) -> Result<bool, String> {
+        Ok(self.state.lock().map_err(|_| "文件选择器状态不可用")?.open)
+    }
+
     pub(crate) fn stop_all(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.closing = true;

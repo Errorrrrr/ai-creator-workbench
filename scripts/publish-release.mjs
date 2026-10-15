@@ -18,9 +18,9 @@ export function shouldBecomeLatest(tag, latestTag = null) {
 }
 
 /** Publish only after every local and uploaded asset has passed validation. */
-export async function publishRelease({ github, context, directory, tag, commit }) {
+export async function publishRelease({ github, context, directory, tag, commit, publicKey }) {
   const release = parseReleaseTag(tag)
-  const manifest = await verifyReleaseArtifacts(directory, { tag, commit })
+  const manifest = await verifyReleaseArtifacts(directory, { tag, commit, publicKey })
   const repo = { owner: context.repo.owner, repo: context.repo.repo }
   if (await resolveRemoteCommit(github, repo, tag) !== commit) throw new Error('远程 tag 在构建后发生变化，已拒绝发布')
   const releases = await github.paginate(github.rest.repos.listReleases, { ...repo, per_page: 100 })
@@ -32,7 +32,7 @@ export async function publishRelease({ github, context, directory, tag, commit }
   catch (error) { if (error.status !== 404) throw error }
   const makeLatest = shouldBecomeLatest(tag, latestTag)
   const generated = await github.rest.repos.generateReleaseNotes({ ...repo, tag_name: tag, target_commitish: commit })
-  const body = `${MANAGED_MARKER}\n${generated.data.body || ''}\n\n### macOS Apple Silicon\n\n要求 macOS 12.3 或更新版本，Apple Silicon（M 系列）处理器。下载 DMG 安装；也提供压缩后的 app 与 SHA256SUMS 校验文件。\n\n当前为 ad-hoc 签名，未进行 Apple Developer ID 签名或公证。应用内检查更新只打开发布页或安装包链接，不自动下载替换正在运行的应用。升级前建议导出完整备份。\n\n构建提交：\`${commit}\`。`
+  const body = `${MANAGED_MARKER}\n${generated.data.body || ''}\n\n### macOS Apple Silicon\n\n要求 macOS 12.3 或更新版本，Apple Silicon（M 系列）处理器。下载 DMG 安装；也提供压缩后的 app 与 SHA256SUMS 校验文件。\n\n当前为 ad-hoc 签名，未进行 Apple Developer ID 签名或公证。0.6.0 起支持应用内签名更新：下载并校验更新包，保存创作后安装并重启。旧版本首次升级请使用 DMG。更新签名独立于 Apple 签名。\n\n构建提交：\`${commit}\`。`
   if (!existing) {
     existing = (await github.rest.repos.createRelease({ ...repo, tag_name: tag, target_commitish: commit, name: `AI 创作工作台 ${tag}`, body, draft: true, prerelease: release.prerelease.length > 0, make_latest: 'false' })).data
   } else {

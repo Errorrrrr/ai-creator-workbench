@@ -5,12 +5,13 @@ import { execFileSync } from 'node:child_process'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { checkRelease, parseReleaseTag } from './check-release-version.mjs'
+import { verifyUpdaterSignature } from './verify-updater-signature.mjs'
 import { RELEASES_URL, parseRelease } from '../src/updates.js'
 
 export const RELEASE_TARGET = 'aarch64-apple-darwin'
 export function releaseAssetNames(version) {
   parseReleaseTag(`v${version}`)
-  return [`ai-creator-workbench_${version}_aarch64.dmg`, `ai-creator-workbench_${version}_aarch64.app.zip`, 'latest.json', 'SHA256SUMS']
+  return [`ai-creator-workbench_${version}_aarch64.dmg`, `ai-creator-workbench_${version}_aarch64.app.zip`, `ai-creator-workbench_${version}_aarch64.app.tar.gz`, `ai-creator-workbench_${version}_aarch64.app.tar.gz.sig`, 'latest.json', 'SHA256SUMS']
 }
 export async function sha256(path) {
   const hash = createHash('sha256')
@@ -26,14 +27,18 @@ async function fileRecord(directory, name) {
 export async function createReleaseManifest(directory, release) {
   const names = releaseAssetNames(release.version)
   const assets = []
-  for (const name of names.slice(0, 2)) assets.push(await fileRecord(directory, name))
+  for (const name of names.slice(0, 4)) assets.push(await fileRecord(directory, name))
+  const signature = (await readFile(join(directory, names[3]), 'utf8')).trim()
   const update = {
+    version: release.version, notes: release.notes || `AI 创作工作台 ${release.tag}`, pub_date: new Date().toISOString(),
+    platforms: { 'darwin-aarch64': { url: `${RELEASES_URL}/download/${release.tag}/${names[2]}`, signature } },
     tag_name: release.tag, draft: false, prerelease: parseReleaseTag(release.tag).prerelease.length > 0,
     html_url: `${RELEASES_URL}/tag/${release.tag}`,
     body: release.notes || `AI 创作工作台 ${release.tag}`,
     published_at: new Date().toISOString(),
     assets: assets.map(asset => ({ name: asset.name, state: 'uploaded', browser_download_url: `${RELEASES_URL}/download/${release.tag}/${asset.name}` }))
   }
+  update.pub_date = update.published_at
   await writeFile(join(directory, 'latest.json'), `${JSON.stringify(update, null, 2)}\n`)
   assets.push(await fileRecord(directory, 'latest.json'))
   await writeFile(join(directory, 'SHA256SUMS'), assets.map(asset => `${asset.sha256}  ${asset.name}\n`).join(''))
@@ -42,7 +47,7 @@ export async function createReleaseManifest(directory, release) {
   await writeFile(join(directory, 'release-metadata.json'), `${JSON.stringify(manifest, null, 2)}\n`)
   return manifest
 }
-export async function verifyReleaseArtifacts(directory, { tag, commit }) {
+export async function verifyReleaseArtifacts(directory, { tag, commit, publicKey }) {
   const release = parseReleaseTag(tag)
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('发布 commit 无效')
   const manifest = JSON.parse(await readFile(join(directory, 'release-metadata.json'), 'utf8'))
@@ -58,9 +63,13 @@ export async function verifyReleaseArtifacts(directory, { tag, commit }) {
   const update = JSON.parse(await readFile(join(directory, 'latest.json'), 'utf8'))
   if (update.tag_name !== tag || update.draft !== false || update.prerelease !== (release.prerelease.length > 0)
     || update.html_url !== `${RELEASES_URL}/tag/${tag}`
-    || JSON.stringify(update.assets) !== JSON.stringify(manifest.assets.slice(0, 2).map(asset => ({ name: asset.name, state: 'uploaded', browser_download_url: `${RELEASES_URL}/download/${tag}/${asset.name}` })))) throw new Error('更新清单与发布版本或安装包不一致')
+    || JSON.stringify(update.assets) !== JSON.stringify(manifest.assets.slice(0, 4).map(asset => ({ name: asset.name, state: 'uploaded', browser_download_url: `${RELEASES_URL}/download/${tag}/${asset.name}` })))) throw new Error('更新清单与发布版本或安装包不一致')
+  if (update.version !== release.version || update.notes !== update.body || update.pub_date !== update.published_at
+    || JSON.stringify(update.platforms) !== JSON.stringify({ 'darwin-aarch64': { url: `${RELEASES_URL}/download/${tag}/${expected[2]}`, signature: (await readFile(join(directory, expected[3]), 'utf8')).trim() } })) throw new Error('签名更新清单不一致')
+  publicKey ||= JSON.parse(await readFile(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8')).plugins.updater.pubkey
+  verifyUpdaterSignature(await readFile(join(directory, expected[2])), update.platforms['darwin-aarch64'].signature, publicKey, release.version)
   if (!release.prerelease.length) parseRelease(update, { currentVersion: release.version, platform: 'macos', architecture: 'aarch64' })
-  const expectedChecksums = manifest.assets.slice(0, 3).map(asset => `${asset.sha256}  ${asset.name}\n`).join('')
+  const expectedChecksums = manifest.assets.slice(0, -1).map(asset => `${asset.sha256}  ${asset.name}\n`).join('')
   if (await readFile(join(directory, 'SHA256SUMS'), 'utf8') !== expectedChecksums) throw new Error('SHA256SUMS 内容与发布文件不一致')
   return manifest
 }
@@ -88,6 +97,8 @@ export async function prepareReleaseArtifacts(tag, { root = process.cwd() } = {}
   const names = releaseAssetNames(release.version)
   await copyFile(dmg, join(output, names[0]))
   execFileSync('/usr/bin/ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', app, join(output, names[1])], { stdio: 'inherit' })
+  await copyFile(join(bundle, 'macos', `${release.productName}.app.tar.gz`), join(output, names[2]))
+  await copyFile(join(bundle, 'macos', `${release.productName}.app.tar.gz.sig`), join(output, names[3]))
   let notes
   try { notes = await readFile(join(root, 'specs', `发布说明-${tag}.md`), 'utf8') }
   catch (error) { if (error.code !== 'ENOENT') throw error }
