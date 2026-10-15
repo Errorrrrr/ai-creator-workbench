@@ -7,7 +7,7 @@ const CURRENT = '17.4.8'
 const LATEST = '17.5.0'
 const RELEASE = `https://github.com/Errorrrrr/ai-creator-workbench/releases/tag/v${LATEST}`
 const DOWNLOAD = `https://github.com/Errorrrrr/ai-creator-workbench/releases/download/v${LATEST}/Workbench_aarch64.dmg`
-const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton', 'updateInstallButton', 'updateCancelButton']
+const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateInstallNote', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton', 'updateInstallButton', 'updateCancelButton']
 
 class Element extends EventTarget {
   textContent = ''
@@ -274,3 +274,29 @@ test('桌面打开链接期间防重复操作，关闭后迟到错误不污染�
   assert.doesNotMatch(h.elements.updateStatus.textContent, /旧操作失败/)
   assert.equal(h.elements.updateCheckButton.disabled, false)
 })
+
+for (const native of [false, true]) {
+  test(`${native ? '桌面' : '浏览器'}最新版本隐藏下载及安装提示，重新检查不会残留旧操作`, async () => {
+    let latest = false
+    const getRelease = () => release(latest ? { status: 'up_to_date', latestVersion: CURRENT, autoInstallAvailable: false } : { autoInstallAvailable: native })
+    const h = harness(native ? { invoke: async command => command === 'app_version' ? CURRENT : getRelease() } : { fetcher: path => response(path.endsWith('/version') ? { version: CURRENT } : getRelease()) })
+    await h.ui.open()
+    assert.equal(h.elements.updateInstallButton.hidden, !native)
+    assert.equal(h.elements.updateDownloadButton.hidden, native)
+    assert.equal(h.elements.updateInstallNote.hidden, false)
+    if (native) {
+      assert.equal(h.elements.updateInstallButton.textContent, '更新并重启')
+      assert.equal(h.elements.updateInstallButton.disabled, false)
+      assert.match(h.elements.updateStatus.textContent, /点击“更新并重启”/)
+    }
+    latest = true
+    await h.ui.check()
+    assert.match(h.elements.updateStatus.textContent, /已是最新版本/)
+    assert.equal(h.elements.updateDownloadButton.hidden, true)
+    assert.equal(h.elements.updateDownloadButton.disabled, true)
+    assert.equal(h.elements.updateInstallButton.hidden, true)
+    assert.equal(h.elements.updateInstallNote.hidden, true)
+    assert.equal(h.elements.updateAsset.textContent, '')
+    assert.equal(h.elements.updateReleaseButton.disabled, false)
+  })
+}

@@ -63,7 +63,7 @@ export function initializeUpdates({
   beforeInstall = async () => { throw new Error("保存保护尚未就绪") },
   createChannel = () => new globalThis.window.__TAURI__.core.Channel(),
 } = {}) {
-  const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton', 'updateInstallButton', 'updateCancelButton']
+  const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateInstallNote', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton', 'updateInstallButton', 'updateCancelButton']
   const elements = Object.fromEntries(ids.map(id => {
     const element = documentRef.getElementById(id)
     if (!element) throw new Error(`缺少更新界面控件：${id}`)
@@ -91,7 +91,8 @@ export function initializeUpdates({
     elements.updateCheckButton.disabled = busy || installer?.phase === 'ready' || checking || openingLink
     elements.updateCheckButton.textContent = checking ? '正在检查…' : '重新检查'
     elements.updateReleaseButton.disabled = busy || checking || openingLink || !result?.releaseUrl
-    elements.updateDownloadButton.disabled = busy || checking || openingLink || !result?.downloadUrl
+    elements.updateDownloadButton.hidden = !result?.downloadUrl || !['update_available', 'ahead'].includes(result?.status) || Boolean(invoke && result?.autoInstallAvailable)
+    elements.updateDownloadButton.disabled = elements.updateDownloadButton.hidden || busy || checking || openingLink
     elements.updateDialog.setAttribute('aria-busy', String(checking))
   }
   function clearRelease() {
@@ -100,6 +101,7 @@ export function initializeUpdates({
     elements.updatePlatform.textContent = '等待检查'
     elements.updatePublished.textContent = ''
     elements.updateAsset.textContent = ''
+    elements.updateInstallNote.hidden = true
     elements.updateNotes.textContent = ''
     elements.updateNotesSection.hidden = true
     syncButtons()
@@ -128,14 +130,22 @@ export function initializeUpdates({
     elements.updatePublished.textContent = published && Number.isFinite(published.getTime()) ? `发布于 ${published.toLocaleDateString('zh-CN')}` : ''
     elements.updateNotes.textContent = next.notes || '此版本未提供更新说明。'
     elements.updateNotesSection.hidden = next.status === 'no_release' && !next.notes
-    elements.updateAsset.textContent = invoke && next.autoInstallAvailable ? '已提供当前平台的签名更新包，可直接在应用内更新。' : next.downloadUrl
+    const needsUpdate = next.status === 'update_available'
+    const canInstall = needsUpdate && invoke && next.autoInstallAvailable
+    elements.updateInstallNote.hidden = !needsUpdate
+    elements.updateInstallNote.textContent = canInstall
+      ? '更新前会保存创作内容，完成安装后自动重启。生成任务未结束或保存失败时会暂停安装。'
+      : '下载对应平台的安装包后手动安装；安装前请保存创作内容。'
+    elements.updateAsset.textContent = ['up_to_date', 'ahead'].includes(next.status) ? '' : canInstall ? '已提供当前平台的签名更新包，可直接在应用内更新。' : next.downloadUrl
       ? `下载文件：${typeof next.assetName === 'string' ? next.assetName : '对应当前平台的安装包'}`
       : next.status === 'no_release' ? '' : '没有匹配当前平台与架构的安装包，可到发布页查看其他文件。'
     elements.updateDownloadButton.textContent = next.status === 'ahead' ? '下载稳定版本' : '下载对应安装包'
     const messages = {
       no_release: '未找到可访问的稳定更新清单；可能尚未发布更新清单，或仓库目前不可访问。',
-      up_to_date: '当前版本已是最新公开稳定版。',
-      update_available: `发现新版本 ${next.latestVersion}，可查看说明后更新；桌面版支持保存并重启。`,
+      up_to_date: '已是最新版本，无需更新。',
+      update_available: canInstall
+        ? `发现新版本 ${next.latestVersion}，点击“更新并重启”即可升级。`
+        : `发现新版本 ${next.latestVersion}，可下载安装包进行更新。`,
       ahead: '当前版本高于最新公开稳定版，无需更新。',
     }
     setStatus(messages[next.status], next.status)
@@ -189,7 +199,7 @@ export function initializeUpdates({
   async function openLink(kind) {
     if (installer?.busy || installer?.locked || installer?.phase === 'ready' || checking || openingLink || !elements.updateDialog.open) return
     const raw = kind === 'download' ? result?.downloadUrl : result?.releaseUrl
-    if (!raw) return
+    if (!raw || (kind === 'download' && elements.updateDownloadButton.hidden)) return
     const id = sequence
     openingLink = true
     syncButtons()
