@@ -926,6 +926,13 @@
       </div>
       <div class="update-release-meta"><span id="updatePlatform">等待检查</span><span id="updatePublished"></span></div>
       <p class="update-status" id="updateStatus" role="status" aria-live="polite" aria-atomic="true" data-state="idle">点击检查获取发布信息。</p>
+      <div class="update-progress" id="updateProgress" hidden>
+        <div class="update-progress-meta">
+          <label id="updateProgressLabel" for="updateProgressBar">下载更新包</label>
+          <span id="updateProgressDetail"></span>
+        </div>
+        <progress id="updateProgressBar" max="100" aria-labelledby="updateProgressLabel" aria-describedby="updateProgressDetail"></progress>
+      </div>
       <section class="update-notes-section" id="updateNotesSection" aria-labelledby="updateNotesTitle" hidden>
         <h3 id="updateNotesTitle">更新说明</h3>
         <pre class="update-notes" id="updateNotes"></pre>

@@ -63,7 +63,7 @@ export function initializeUpdates({
   beforeInstall = async () => { throw new Error("保存保护尚未就绪") },
   createChannel = () => new globalThis.window.__TAURI__.core.Channel(),
 } = {}) {
-  const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateInstallNote', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton', 'updateInstallButton', 'updateCancelButton']
+  const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateInstallNote', 'updateProgress', 'updateProgressBar', 'updateProgressLabel', 'updateProgressDetail', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton', 'updateInstallButton', 'updateCancelButton']
   const elements = Object.fromEntries(ids.map(id => {
     const element = documentRef.getElementById(id)
     if (!element) throw new Error(`缺少更新界面控件：${id}`)
@@ -81,7 +81,40 @@ export function initializeUpdates({
     elements.updateStatus.textContent = message
     elements.updateStatus.dataset.state = state
   }
+  function renderProgress() {
+    const phase = installer?.phase || 'idle'
+    const labels = {
+      downloading: '下载更新包', cancelling: '正在取消下载', ready: '更新包已验证',
+      saving: '保存创作内容', installing: '安装更新', installed: '安装完成', restarting: '正在重启',
+    }
+    elements.updateProgress.hidden = !labels[phase]
+    elements.updateProgressBar.removeAttribute('value')
+    elements.updateProgressBar.removeAttribute('aria-valuetext')
+    elements.updateProgressLabel.textContent = labels[phase] || ''
+    elements.updateProgressDetail.textContent = ''
+    if (!labels[phase]) return
+    const details = {
+      ready: '等待保存并安装', saving: '请稍候…', installing: '完成后将自动重启',
+      installed: '等待重启应用', restarting: '即将打开新版本',
+    }
+    let detail = details[phase] || ''
+    if (phase === 'downloading' || phase === 'cancelling') {
+      const { received = 0, total } = installer.progress || {}
+      const mb = value => (value / 1024 / 1024).toFixed(1)
+      if (total) {
+        const percent = Math.min(100, Math.floor(received / total * 100))
+        elements.updateProgressBar.setAttribute('value', String(percent))
+        detail = `${percent}% · ${mb(received)} / ${mb(total)} MB`
+        if (percent === 100 && phase === 'downloading') elements.updateProgressLabel.textContent = '下载完成，等待校验结果'
+      } else detail = received ? `已下载 ${mb(received)} MB` : '正在连接…'
+    } else if (phase === 'ready' || phase === 'installed') {
+      elements.updateProgressBar.setAttribute('value', '100')
+    }
+    elements.updateProgressDetail.textContent = detail
+    elements.updateProgressBar.setAttribute('aria-valuetext', `${elements.updateProgressLabel.textContent}，${detail}`)
+  }
   function syncButtons() {
+    renderProgress()
     const busy = Boolean(installer?.busy || installer?.locked)
     elements.updateInstallButton.hidden = !invoke || (!result?.autoInstallAvailable && installer?.phase !== 'installed')
     elements.updateInstallButton.disabled = checking || openingLink || Boolean(installer?.busy)

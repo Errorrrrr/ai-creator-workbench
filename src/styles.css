@@ -3957,7 +3957,7 @@ pre.context-preview {
   content: "";
 }
 
-/* Updates: manual checks and explicit download links only. */
+/* Updates: version checks and signed in-app installation. */
 .update-dialog {
   width: min(calc(100vw - 32px), 660px);
   padding: 28px;
@@ -4037,6 +4037,70 @@ pre.context-preview {
 .update-status[data-state="up_to_date"] {
   background: var(--success-soft);
   color: var(--success);
+}
+
+.update-progress {
+  margin-top: 16px;
+}
+
+.update-progress-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-bottom: 8px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.update-progress-meta label {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.update-progress progress {
+  display: block;
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 99px;
+  appearance: none;
+  background: var(--line);
+  accent-color: var(--accent);
+}
+
+.update-progress progress::-webkit-progress-bar {
+  background: var(--line);
+  border-radius: 99px;
+}
+
+.update-progress progress::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 99px;
+}
+
+.update-progress progress::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: 99px;
+}
+
+.update-progress progress:indeterminate {
+  animation: update-progress-pulse 1.4s ease-in-out infinite alternate;
+}
+
+.update-progress progress:indeterminate::-webkit-progress-bar {
+  background: linear-gradient(90deg, var(--line), var(--accent), var(--line));
+}
+
+@keyframes update-progress-pulse {
+  from { opacity: 0.45; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-progress progress:indeterminate { animation: none; }
 }
 
 .update-notes-section {

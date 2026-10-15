@@ -7,7 +7,7 @@ const CURRENT = '17.4.8'
 const LATEST = '17.5.0'
 const RELEASE = `https://github.com/Errorrrrr/ai-creator-workbench/releases/tag/v${LATEST}`
 const DOWNLOAD = `https://github.com/Errorrrrr/ai-creator-workbench/releases/download/v${LATEST}/Workbench_aarch64.dmg`
-const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateInstallNote', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton', 'updateInstallButton', 'updateCancelButton']
+const ids = ['updateDialog', 'updateStatus', 'updateCurrentVersion', 'updateLatestVersion', 'updatePlatform', 'updatePublished', 'updateNotes', 'updateNotesSection', 'updateAsset', 'updateInstallNote', 'updateProgress', 'updateProgressBar', 'updateProgressLabel', 'updateProgressDetail', 'updateCheckButton', 'updateReleaseButton', 'updateDownloadButton', 'updateInstallButton', 'updateCancelButton']
 
 class Element extends EventTarget {
   textContent = ''
@@ -18,6 +18,7 @@ class Element extends EventTarget {
   attributes = new Map()
   set innerHTML(_value) { throw new Error('Update content must never use innerHTML') }
   setAttribute(name, value) { this.attributes.set(name, value) }
+  removeAttribute(name) { this.attributes.delete(name) }
   showModal() { this.open = true }
   close() { this.open = false; this.dispatchEvent(new Event('close')) }
   click() { if (!this.disabled) this.dispatchEvent(new Event('click')) }
@@ -42,7 +43,7 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
-function harness({ fetcher, invoke, timeoutMs = 20000, defaultBrowserOpen = false } = {}) {
+function harness({ fetcher, invoke, beforeInstall, createChannel, timeoutMs = 20000, defaultBrowserOpen = false } = {}) {
   const elements = Object.fromEntries(ids.map(id => [id, new Element()]))
   const requests = []
   const opened = []
@@ -53,6 +54,8 @@ function harness({ fetcher, invoke, timeoutMs = 20000, defaultBrowserOpen = fals
       return fetcher ? fetcher(url, options) : response(url.endsWith('/version') ? { version: CURRENT } : release())
     },
     invoke,
+    ...(beforeInstall ? { beforeInstall } : {}),
+    ...(createChannel ? { createChannel } : {}),
     ...(defaultBrowserOpen ? {} : { openExternal: url => opened.push(url) }),
     timeoutMs,
   })
@@ -300,3 +303,79 @@ for (const native of [false, true]) {
     assert.equal(h.elements.updateReleaseButton.disabled, false)
   })
 }
+
+test('真实字节驱动进度，未知大小及保存安装阶段不伪造百分比，完成后可重试重启', async () => {
+  const download = deferred(), save = deferred(), install = deferred()
+  const channel = {}
+  let restarts = 0
+  const h = harness({
+    createChannel: () => channel,
+    beforeInstall: () => save.promise,
+    invoke: async command => {
+      if (command === 'app_version') return CURRENT
+      if (command === 'check_for_updates') return release({ autoInstallAvailable: true })
+      if (command === 'download_update') return download.promise
+      if (command === 'install_update') return install.promise
+      if (command === 'restart_after_update') { restarts++; throw new Error('restart unavailable') }
+    },
+  })
+  await h.ui.open()
+  assert.equal(h.elements.updateProgress.hidden, true)
+  h.elements.updateInstallButton.click()
+  assert.equal(h.elements.updateProgress.hidden, false)
+  assert.equal(h.elements.updateProgressBar.attributes.has('value'), false)
+  channel.onmessage({ received: 1048576, total: 4194304 })
+  assert.equal(h.elements.updateProgressBar.attributes.get('value'), '25')
+  assert.equal(h.elements.updateProgressDetail.textContent, '25% · 1.0 / 4.0 MB')
+  assert.match(h.elements.updateProgressBar.attributes.get('aria-valuetext'), /25%/)
+  channel.onmessage({ received: 2097152, total: null })
+  assert.equal(h.elements.updateProgressBar.attributes.has('value'), false)
+  assert.equal(h.elements.updateProgressDetail.textContent, '已下载 2.0 MB')
+  channel.onmessage({ received: -1, total: 100 })
+  assert.equal(h.elements.updateProgressDetail.textContent, '已下载 2.0 MB')
+  channel.onmessage({ received: 4194304, total: 4194304 })
+  assert.equal(h.elements.updateProgressBar.attributes.get('value'), '100')
+  assert.match(h.elements.updateProgressLabel.textContent, /等待校验/)
+  download.resolve(); await tick()
+  assert.equal(h.elements.updateProgressLabel.textContent, '保存创作内容')
+  assert.equal(h.elements.updateProgressBar.attributes.has('value'), false)
+  save.resolve(() => {}); await tick()
+  assert.equal(h.elements.updateProgressLabel.textContent, '安装更新')
+  assert.equal(h.elements.updateProgressBar.attributes.has('value'), false)
+  install.resolve(); await tick()
+  assert.equal(h.elements.updateProgressLabel.textContent, '安装完成')
+  assert.equal(h.elements.updateProgressBar.attributes.get('value'), '100')
+  assert.equal(h.elements.updateInstallButton.textContent, '重启应用')
+  h.elements.updateInstallButton.click(); await tick()
+  assert.equal(restarts, 2)
+})
+
+test('取消和失败清空进度，重新下载不接收上次通道的迟到进度', async () => {
+  const channels = [], downloads = [deferred(), deferred()]
+  let attempt = 0
+  const h = harness({
+    createChannel: () => { const channel = {}; channels.push(channel); return channel },
+    invoke: async command => {
+      if (command === 'app_version') return CURRENT
+      if (command === 'check_for_updates') return release({ autoInstallAvailable: true })
+      if (command === 'download_update') return downloads[attempt++].promise
+    },
+  })
+  await h.ui.open(); h.elements.updateInstallButton.click()
+  channels[0].onmessage({ received: 40, total: 100 })
+  h.elements.updateCancelButton.click(); await tick()
+  assert.equal(h.elements.updateProgressLabel.textContent, '正在取消下载')
+  channels[0].onmessage({ received: 90, total: 100 })
+  assert.equal(h.elements.updateProgressBar.attributes.get('value'), '40')
+  downloads[0].reject(new Error('cancelled')); await tick()
+  assert.equal(h.elements.updateProgress.hidden, true)
+  assert.equal(h.elements.updateProgressBar.attributes.has('value'), false)
+  h.elements.updateInstallButton.click()
+  assert.equal(h.elements.updateProgressBar.attributes.has('value'), false)
+  channels[1].onmessage({ received: 10, total: 100 })
+  channels[0].onmessage({ received: 100, total: 100 })
+  assert.equal(h.elements.updateProgressBar.attributes.get('value'), '10')
+  downloads[1].reject(new Error('network failed')); await tick()
+  assert.equal(h.elements.updateProgress.hidden, true)
+  assert.equal(h.elements.updateStatus.dataset.state, 'error')
+})

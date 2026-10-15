@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ai-creator-workbench"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "futures-util",
  "libc",
