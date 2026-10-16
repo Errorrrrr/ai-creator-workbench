@@ -657,10 +657,12 @@ fn stage_import(app: &tauri::AppHandle, project_id: &str, path: &Path) -> Result
         }
         job.id = mapping[&job.id].clone();
         job.project_id = project_id.into();
+        // Character jobs may share a target outside the storyboard. Keep all
+        // versions attached to that same target when restoring a project pack.
         job.target_id = mapping
-            .get(&job.target_id)
-            .cloned()
-            .unwrap_or_else(media::new_id);
+            .entry(job.target_id.clone())
+            .or_insert_with(media::new_id)
+            .clone();
         job.asset_id = job
             .asset_id
             .as_ref()

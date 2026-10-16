@@ -1,5 +1,6 @@
 import { ASSET_ROLES, JOB_STATUSES, SHOT_LIMIT, contentFingerprint, createShot, findMediaVersion, mediaPrompt, parseStoryboardCandidate, resolveConnectionRoute, shotIsStale, storyboardPrompt, supportsCapability } from './storyboard.js'
 import { mediaAdapterFor, useMediaAdapterCatalog } from './media-adapters.js'
+import { biographyCharacters, characterImagePrompt, characterTargetId, prepareCharacterRequest } from './character-images.js'
 
 const $ = selector => document.querySelector(selector)
 const el = (tag, className = '', text = '') => {
@@ -74,7 +75,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   roleFilter.append(new Option('全部素材', ''))
   Object.entries(ASSET_ROLES).forEach(([value, text]) => roleFilter.append(new Option(text, value)))
   roleFilter.addEventListener('change', renderAssets)
-  assetToolbar.append(field('素材用途', roleFilter), button('导入图片／视频', chooseImport, 'primary-button'), button('导出完整项目包', exportPackage), button('导入项目包', restorePackage), button('恢复待完成导入', showPendingImports), button('任务中心', showJobs))
+  assetToolbar.append(field('素材用途', roleFilter), button('从人物小传生成角色图', openCharacterImages, 'primary-button'), button('导入图片／视频', chooseImport), button('导出完整项目包', exportPackage), button('导入项目包', restorePackage), button('恢复待完成导入', showPendingImports), button('任务中心', showJobs))
   const pendingHost = el('section', 'media-pending-imports'); pendingHost.hidden = true
   const assetNotice = el('p', 'media-notice'), assetGrid = el('div', 'asset-grid'), assetDetail = el('section', 'asset-detail')
   assetNotice.setAttribute('role', 'status')
@@ -82,6 +83,100 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   const jobsList = jobsDialog.querySelector('.media-jobs-list')
   jobsDialog.querySelector('[data-media-refresh]').addEventListener('click', () => refresh())
   jobsDialog.querySelector('[data-media-close]').addEventListener('click', () => jobsDialog.close())
+
+  const characterDialog = el('dialog', 'app-dialog character-image-dialog')
+  characterDialog.id = 'characterImageDialog'
+  characterDialog.setAttribute('aria-labelledby', 'characterImageTitle')
+  const characterHeading = el('h2', '', '从人物小传生成角色图'); characterHeading.id = 'characterImageTitle'
+  const characterPicker = el('select'), characterName = el('input'), characterBiography = el('textarea'), characterAppearance = el('textarea'), characterStyle = el('input'), characterReference = el('select')
+  characterName.maxLength = 80; characterBiography.maxLength = 12000; characterAppearance.maxLength = 4000; characterStyle.maxLength = 1000
+  characterBiography.rows = 7; characterAppearance.rows = 3
+  characterAppearance.placeholder = '可补充年龄、脸型、发型、服装和配饰；不修改人物小传原文'
+  const characterResource = el('p', 'media-notice'), characterStatus = el('p', 'media-notice'), characterPrompt = el('pre', 'media-job-snapshot')
+  characterStatus.setAttribute('role', 'status')
+  const characterPreview = el('details'); characterPreview.append(el('summary', '', '查看实际图片提示词'), characterPrompt)
+  const characterSubmit = button('生成并保存到角色素材', submitCharacterImages, 'primary-button')
+  const characterClose = button('取消', () => characterDialog.close()); characterClose.dataset.characterClose = ''
+  const characterConfigure = button('配置图片执行端', () => { characterDialog.close(); navigate('connections') })
+  const characterActions = el('div', 'dialog-actions'); characterActions.append(characterClose, characterConfigure, characterSubmit)
+  characterDialog.append(characterHeading, el('p', 'dialog-description', '生成一张角色设定图：左侧正脸特写，右侧正面、90 度侧面、背面三视图。完成后自动存入角色素材；同名角色再次生成保留为独立版本。'), field('选择人物小传中的角色', characterPicker), field('角色名称', characterName), field('该角色的人物小传（可调整本次发送内容）', characterBiography), field('外观补充（可选）', characterAppearance), field('视觉风格', characterStyle), field('现有角色参考（可选）', characterReference), characterResource, characterPreview, characterStatus, characterActions)
+  document.body.append(characterDialog)
+  let characterOwner = null, characterSourceFingerprint = '', characterOptions = []
+  characterPicker.addEventListener('change', () => {
+    const selected = characterOptions[Number(characterPicker.value)]
+    characterName.value = selected?.name || ''; characterBiography.value = selected?.biography || ''
+    characterAppearance.value = ''; selectCharacterReference(); renderCharacterPreview()
+  })
+  for (const input of [characterName, characterBiography, characterAppearance, characterStyle, characterReference]) input.addEventListener('input', renderCharacterPreview)
+
+  function selectCharacterReference() {
+    const asset = assets.find(item => item.role === 'character' && item.name === `${characterName.value.trim()} · 正脸与三视图`)
+    characterReference.value = asset?.selectedVersionId || ''
+  }
+  function characterInput() {
+    return { name: characterName.value, biography: characterBiography.value, appearance: characterAppearance.value, style: characterStyle.value, referenceVersionId: characterReference.value }
+  }
+  function renderCharacterPreview() {
+    const route = resolveConnectionRoute(context(), 'image')
+    characterResource.textContent = `图片执行端：${route.connection?.name || route.error}。横向构图；生成会使用该执行端的账号额度。`
+    try {
+      characterPrompt.textContent = characterImagePrompt(characterInput())
+      characterStatus.textContent = !invoke ? '请在桌面版生成角色图片。' : !route.connection ? route.error : '请核对本次角色资料和外观，再生成。'
+      characterSubmit.disabled = !invoke || !route.connection || operationBusy
+    } catch (problem) { characterPrompt.textContent = ''; characterStatus.textContent = problem.message; characterSubmit.disabled = true }
+  }
+  async function openCharacterImages() {
+    await run(async () => {
+      requireProject()
+      const owner = context().projectId
+      await beforeSubmit?.()
+      if (context().projectId !== owner) throw new Error('项目已切换，请在目标项目中打开角色生成')
+      await refresh()
+      if (context().projectId !== owner) throw new Error('项目已切换，请重新打开角色生成')
+      characterOwner = owner
+      const source = context().documents.characters?.content || ''
+      characterSourceFingerprint = contentFingerprint(source)
+      characterOptions = biographyCharacters(source)
+      characterPicker.replaceChildren(...characterOptions.map((item, index) => new Option(item.name, String(index))), new Option('手动填写单个角色', 'manual'))
+      characterPicker.value = characterOptions.length ? '0' : 'manual'
+      characterName.value = characterOptions[0]?.name || ''
+      characterBiography.value = characterOptions[0]?.biography || (source.length <= 12000 ? source : '')
+      characterAppearance.value = ''
+      characterStyle.value = context().project.type === '漫剧' ? '漫画插画，清晰细致的角色设定' : '写实角色设定'
+      characterReference.replaceChildren(new Option('不使用现有参考 · 设计新形象', ''))
+      for (const asset of assets.filter(item => item.role === 'character' && item.kind === 'image')) for (const version of asset.versions || []) characterReference.append(new Option(`${asset.name} · ${version.id.slice(-8)}`, version.id))
+      selectCharacterReference(); renderCharacterPreview(); characterDialog.showModal()
+    })
+    renderCharacterPreview()
+  }
+  async function submitCharacterImages() {
+    await run(async () => {
+      desktop(); await requireAdapterCatalog()
+      const input = characterInput(), inputSignature = JSON.stringify(input), owner = characterOwner
+      const prior = jobs.find(job => job.request?.character?.name === input.name.trim())
+      input.targetId = prior?.targetId || await characterTargetId(input.name)
+      const request = prepareCharacterRequest(context(), input), signature = JSON.stringify(request)
+      const assertCurrent = () => {
+        if (!characterDialog.open || owner !== context().projectId || owner !== request.projectId || characterSourceFingerprint !== contentFingerprint(context().documents.characters?.content || '') || inputSignature !== JSON.stringify(characterInput()) || signature !== JSON.stringify(prepareCharacterRequest(context(), input))) throw new Error('项目、人物小传、角色输入或图片执行端已变化，请重新打开并核对；未提交生成')
+        if (loading || error) throw new Error('素材与任务尚未成功读取，请刷新后重试')
+        if (jobs.some(job => job.targetId === request.targetId && job.capability === 'image' && !terminal(job.status))) throw new Error('该角色正在生成，请等待或取消后再试')
+        if (request.references.some(ref => !findMediaVersion(assets, ref.versionId))) throw new Error('角色参考已不存在，请重新选择')
+      }
+      assertCurrent(); characterStatus.textContent = '正在保存创作并准备角色图片任务…'
+      await beforeSubmit?.(); assertCurrent()
+      const connection = connectionFor('image'), apiKey = connection.kind === 'cli' ? null : await secret(connection)
+      assertCurrent()
+      if (connection.kind !== 'cli' && !apiKey) throw new Error('请到连接中心配置图片执行端密钥')
+      const job = await invoke('media_submit', { request: { ...request, apiKey: apiKey || null } })
+      characterDialog.close()
+      if (owner === context().projectId) {
+        jobs = [job, ...jobs.filter(item => item.id !== job.id)]
+        roleFilter.value = 'character'; navigate('assets'); await refresh()
+      }
+      notify('角色图任务已提交，完成后自动保存到原项目的角色素材，可在任务中心查看进度')
+    })
+    if (characterDialog.open) renderCharacterPreview()
+  }
 
   function context() { return getContext() }
   async function loadAdapterCatalog() {
@@ -121,12 +216,12 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   async function run(action) {
     if (operationBusy) return notify('上一操作尚未完成，请稍候')
     operationBusy = true
-    const controls = [...document.querySelectorAll('#storyboardView button, #assetsView button, #mediaJobsDialog button, #mediaBatchDialog button')].filter(node => !node.disabled && !node.hasAttribute('data-media-close') && !node.hasAttribute('data-media-batch-close'))
+    const controls = [...document.querySelectorAll('#storyboardView button, #assetsView button, #mediaJobsDialog button, #mediaBatchDialog button, #characterImageDialog button')].filter(node => !node.disabled && !node.hasAttribute('data-media-close') && !node.hasAttribute('data-media-batch-close') && !node.hasAttribute('data-character-close'))
     controls.forEach(node => { node.disabled = true })
     storyboardView.setAttribute('aria-busy', 'true'); assetsView.setAttribute('aria-busy', 'true')
     try { return await action() }
     catch (problem) { notify(String(problem?.message || problem)) }
-    finally { operationBusy = false; controls.forEach(node => { if (node.isConnected) node.disabled = false }); updateBatchConfirmation(); storyboardView.removeAttribute('aria-busy'); assetsView.removeAttribute('aria-busy') }
+    finally { operationBusy = false; controls.forEach(node => { if (node.isConnected) node.disabled = false }); updateBatchConfirmation(); if (characterDialog.open) renderCharacterPreview(); storyboardView.removeAttribute('aria-busy'); assetsView.removeAttribute('aria-busy') }
   }
   function desktop() { if (!invoke) throw new Error('媒体文件、CLI 生成与项目包请在桌面版使用；分镜和文字仍可编辑') }
   async function requireAdapterCatalog() {
@@ -166,6 +261,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     }
     renderBatchConnection()
     renderShotResourceStatus()
+    if (characterDialog.open) renderCharacterPreview()
     if (batchPlan && !batchPlan.attempted) {
       try { assertBatchPlan(batchPlan) }
       catch { invalidateBatchPlan('镜头输入或执行端已变化，请重新预览；未提交生成') }
@@ -569,7 +665,12 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     try {
       const snapshot = await invoke('media_list', { projectId: data.projectId })
       if (sequence !== requestSequence || data.projectId !== context().projectId) return
+      const completedCharacters = (snapshot.jobs || []).filter(job => job.request?.character && job.status === 'completed' && jobs.some(prior => prior.id === job.id && prior.status !== 'completed'))
       assets = snapshot.assets || []; jobs = snapshot.jobs || []; recoveryIssues = snapshot.recoveryIssues || []; error = ''
+      if (completedCharacters.length) {
+        if (!assetsView.hidden && roleFilter.value === 'character') selectedAssetId = completedCharacters[0].assetId
+        notify(`${completedCharacters.map(job => job.request.character.name).join('、')}的正脸与三视图已保存到角色素材`)
+      }
     } catch (problem) { if (sequence === requestSequence) error = String(problem?.message || problem) }
     finally {
       if (sequence === requestSequence) { loading = false; renderShots({ detail: !shotDetail.contains(document.activeElement) && ![...shotDetail.querySelectorAll('video')].some(video => !video.paused) }); renderAssets(); renderJobs() }
@@ -589,7 +690,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       select.prepend(preview(version, asset.name))
       card.append(select, el('p', 'media-help', `${ASSET_ROLES[asset.role] || '素材'} · ${asset.versions?.length || 0} 个版本`)); assetGrid.append(card)
     }
-    if (!visible.length && !loading && !error) assetGrid.append(el('div', 'media-empty', '尚无素材。导入你的角色、场景或已有镜头，也可以在分镜中生成候选。'))
+    if (!visible.length && !loading && !error) assetGrid.append(el('div', 'media-empty', '尚无素材。可从人物小传生成角色图，导入角色／场景素材，或在分镜中生成候选。'))
     if (!assetDetail.contains(document.activeElement) && ![...assetDetail.querySelectorAll('video')].some(video => !video.paused)) renderAssetDetail()
   }
   function renderAssetDetail() {
@@ -669,7 +770,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       }
       for (const job of group) {
       const row = el('article', 'media-job')
-      const heading = el('div', 'media-job-heading'); heading.append(el('strong', '', context().storyboard.shots.find(shot => shot.id === job.targetId)?.title || job.targetId), el('span', '', JOB_STATUSES[job.status] || job.status))
+      const heading = el('div', 'media-job-heading'); heading.append(el('strong', '', job.request?.character ? `${job.request.character.name} · 正脸与三视图` : context().storyboard.shots.find(shot => shot.id === job.targetId)?.title || job.targetId), el('span', '', JOB_STATUSES[job.status] || job.status))
       row.append(heading, el('p', 'media-help', `${job.capability === 'video' ? '视频' : '图片'} · ${job.request?.connection?.id || '执行端'} · ${job.id.slice(-8)}`))
       if (job.error) row.append(el('p', 'media-warning', job.error))
       if (job.remoteId) row.append(el('p', 'media-help', `远端任务：${job.remoteId}`))
@@ -713,5 +814,5 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     const found = context().projectId === projectId && findMediaVersion(assets, versionId)
     return preview(found?.version, found?.asset.name || '所选媒体版本')
   }
-  return { hasPendingWork: () => operationBusy, refresh, renderEndpoints, receiveCandidate, clearCandidate, applyCandidate, showJobs, generateStoryboard, restorePackage, showPendingImports, contextObjects, operationContext, previewVersion, openBatchPlan, hasCandidate: () => Boolean(candidate) }
+  return { hasPendingWork: () => operationBusy, refresh, renderEndpoints, receiveCandidate, clearCandidate, applyCandidate, showJobs, generateStoryboard, restorePackage, showPendingImports, contextObjects, operationContext, previewVersion, openBatchPlan, openCharacterImages, hasCandidate: () => Boolean(candidate) }
 }

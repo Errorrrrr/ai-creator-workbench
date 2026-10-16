@@ -960,6 +960,8 @@ function updateDocumentView({ keepFocus = false } = {}) {
     })
   )
   const isReadOnly = state.activeTab === 'history'
+  const characterImageButton = document.querySelector('#characterImageButton')
+  if (characterImageButton) characterImageButton.hidden = state.currentDocId !== 'characters' || state.activeTab !== 'script'
   const historyEntry = renderHistoryControls()
   elements.scriptEditor.value = isReadOnly && historyEntry ? historyEntry.content : getCurrentContent()
   elements.scriptEditor.readOnly = isReadOnly
@@ -3630,6 +3632,7 @@ async function handleAction(button, action) {
     case 'toggle-explorer': toggleExplorer(); break
     case 'close-drawers': closeDrawers(); break
     case 'focus-assistant': focusAssistant(); break
+    case 'character-images': await mediaWorkbench?.openCharacterImages(); break
     case 'open-command': openCommandPalette(); break
     case 'new-project': {
       document.querySelector('#projectLibraryDialog').close()

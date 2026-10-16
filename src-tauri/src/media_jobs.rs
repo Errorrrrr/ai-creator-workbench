@@ -147,6 +147,14 @@ pub(crate) struct Parameters {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CharacterOutput {
+    pub name: String,
+    pub source_document_id: String,
+    pub source_fingerprint: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Request {
     pub project_id: String,
     pub target_id: String,
@@ -159,6 +167,41 @@ pub(crate) struct Request {
     pub api_key: Option<String>,
     #[serde(default)]
     pub allow_user_profile: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<CharacterOutput>,
+}
+
+impl Request {
+    fn validate_output(&self) -> Result<(), String> {
+        if let Some(character) = &self.character {
+            if self.capability != "image"
+                || character.name.trim().is_empty()
+                || character.name.chars().count() > 80
+                || character.name.chars().any(char::is_control)
+                || character.source_document_id != "characters"
+                || character.source_fingerprint.is_empty()
+                || character.source_fingerprint.len() > 128
+            {
+                return Err("角色图片的名称、来源或媒体类型无效".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn output_role(&self) -> &str {
+        if self.character.is_some() {
+            "character"
+        } else {
+            "shot"
+        }
+    }
+
+    fn output_name(&self, artifact: &str) -> String {
+        self.character.as_ref().map_or_else(
+            || artifact.to_owned(),
+            |character| format!("{} · 正脸与三视图", character.name.trim()),
+        )
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -322,6 +365,7 @@ pub(crate) fn atomic_file(directory: &Path, name: &str, bytes: &[u8]) -> Result<
 }
 
 fn validate(app: &tauri::AppHandle, request: &Request) -> Result<(), String> {
+    request.validate_output()?;
     media::valid_id(&request.project_id)?;
     media::valid_id(&request.target_id)?;
     media::valid_id(&request.connection.id)?;
@@ -359,8 +403,10 @@ fn validate(app: &tauri::AppHandle, request: &Request) -> Result<(), String> {
         }
     }
     crate::media_adapters::validate(app, request)?;
-    media::tool("ffprobe")?;
-    media::tool("ffmpeg")?;
+    if request.capability == "video" {
+        media::tool("ffprobe")?;
+        media::tool("ffmpeg")?;
+    }
     Ok(())
 }
 
@@ -471,7 +517,7 @@ fn submit_requests(
                 && ["queued", "submitting", "running", "downloading"]
                     .contains(&prior.status.as_str())
             {
-                return Err("所选镜头已有同类任务，请等待、取消或恢复核对后重新预览".into());
+                return Err("所选镜头或角色已有同类任务，请等待、取消或恢复核对后重新预览".into());
             }
         }
     }
@@ -711,6 +757,7 @@ async fn collect(
     job: &mut Job,
     token: &CancellationToken,
 ) -> Result<(), String> {
+    job.request.validate_output()?;
     job.status = "downloading".into();
     save(app, job)?;
     let task = directory(app, &job.id)?;
@@ -807,6 +854,9 @@ async fn collect(
             continue;
         }
         let mut provenance = json!({"source":job.request.connection.kind,"connectionId":job.request.connection.id,"model":job.request.connection.model,"jobId":job.id,"artifact":artifact,"remoteId":job.remote_id,"parameters":job.request.parameters,"references":job.request.references});
+        if let Some(character) = &job.request.character {
+            provenance["character"] = serde_json::to_value(character).map_err(|e| e.to_string())?;
+        }
         if let Some(receipt) = &native_receipt {
             provenance["toolVerified"] = json!(true);
             provenance["toolCallId"] = json!(receipt.tool_call_id);
@@ -818,8 +868,8 @@ async fn collect(
         let asset = media::import_path(
             app,
             &job.project_id,
-            artifact,
-            "shot",
+            &job.request.output_name(artifact),
+            job.request.output_role(),
             &path,
             Some(&job.target_id),
             provenance,
@@ -1096,4 +1146,69 @@ pub(crate) async fn generate_cli(
         paths.push(path);
     }
     crate::media_codex::generate(app, job, token, &paths).await
+}
+
+#[cfg(test)]
+mod character_tests {
+    use super::*;
+
+    fn request() -> Request {
+        serde_json::from_value(json!({
+            "projectId":"project-1", "targetId":"character-1", "capability":"image",
+            "prompt":"角色设定图", "references":[],
+            "connection":{"id":"image-1","kind":"api","driverId":null,"baseUrl":"https://example.com/v1","model":"image-model","adapter":"openai-images"},
+            "parameters":{"mode":"generate","aspectRatio":"16:9","duration":5,"size":"1536x1024","quality":"high"}
+        })).unwrap()
+    }
+
+    #[test]
+    fn legacy_jobs_keep_shot_destination_and_serialize_without_character() {
+        let request = request();
+        assert!(request.validate_output().is_ok());
+        assert_eq!(request.output_role(), "shot");
+        assert_eq!(request.output_name("image-output.bin"), "image-output.bin");
+        assert!(serde_json::to_value(request)
+            .unwrap()
+            .get("character")
+            .is_none());
+    }
+
+    #[test]
+    fn character_destination_survives_job_roundtrip_and_recovery() {
+        let mut request = request();
+        request.character = Some(CharacterOutput {
+            name: "陆骁".into(),
+            source_document_id: "characters".into(),
+            source_fingerprint: "100:abc".into(),
+        });
+        request.api_key = Some("fixture-key-not-for-storage".into());
+        assert!(request.validate_output().is_ok());
+        let saved = serde_json::to_value(&request).unwrap();
+        assert!(saved.get("apiKey").is_none());
+        let recovered: Request = serde_json::from_value(saved).unwrap();
+        assert_eq!(recovered.output_role(), "character");
+        assert_eq!(
+            recovered.output_name("image-output.bin"),
+            "陆骁 · 正脸与三视图"
+        );
+        assert_eq!(recovered.character.unwrap().source_fingerprint, "100:abc");
+    }
+
+    #[test]
+    fn rejects_character_video_and_invalid_character_metadata() {
+        let mut request = request();
+        request.character = Some(CharacterOutput {
+            name: "苏遥".into(),
+            source_document_id: "characters".into(),
+            source_fingerprint: "1:a".into(),
+        });
+        request.capability = "video".into();
+        assert!(request.validate_output().is_err());
+        request.capability = "image".into();
+        request.character.as_mut().unwrap().name = "\n".into();
+        assert!(request.validate_output().is_err());
+        request.character.as_mut().unwrap().name = "苏遥".into();
+        request.character.as_mut().unwrap().source_document_id = "world".into();
+        assert!(request.validate_output().is_err());
+    }
 }

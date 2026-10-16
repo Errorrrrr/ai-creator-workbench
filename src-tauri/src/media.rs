@@ -341,6 +341,12 @@ pub(crate) fn detect_format(
 }
 
 pub(crate) async fn inspect(path: &Path, kind: &str) -> Result<Value, String> {
+    if kind == "image" {
+        let path = path.to_owned();
+        return tokio::task::spawn_blocking(move || inspect_image(&path))
+            .await
+            .map_err(|_| "图片解码任务中断".to_string())?;
+    }
     let args = vec![
         "-v".into(),
         "error".into(),
@@ -398,6 +404,80 @@ pub(crate) async fn inspect(path: &Path, kind: &str) -> Result<Value, String> {
     ];
     run_tool(&tool("ffmpeg")?, &args, 15).await?;
     Ok(json!({"width":width,"height":height,"duration":duration}))
+}
+
+fn inspect_image(path: &Path) -> Result<Value, String> {
+    let reader = || {
+        image::ImageReader::open(path)
+            .map_err(|_| "图片无法读取".to_string())?
+            .with_guessed_format()
+            .map_err(|_| "图片格式无法识别".to_string())
+    };
+    let (width, height) = reader()?
+        .into_dimensions()
+        .map_err(|_| "图片尺寸无法解码".to_string())?;
+    if width == 0
+        || height == 0
+        || width > 16384
+        || height > 16384
+        || u64::from(width) * u64::from(height) > 120_000_000
+    {
+        return Err("图片尺寸超出安全处理范围".into());
+    }
+    let mut decoder = reader()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16384);
+    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    decoder.limits(limits);
+    // Decode pixels, not just headers. Corrupt provider output never becomes a saved asset.
+    let decoded = decoder
+        .decode()
+        .map_err(|_| "图片损坏、不完整或超出解码内存限制".to_string())?;
+    if decoded.width() != width || decoded.height() != height {
+        return Err("图片尺寸与实际像素不一致".into());
+    }
+    Ok(json!({"width":width,"height":height,"duration":Value::Null}))
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[tokio::test]
+    async fn still_images_decode_without_external_media_tools() {
+        for format in [
+            image::ImageFormat::Png,
+            image::ImageFormat::Jpeg,
+            image::ImageFormat::WebP,
+            image::ImageFormat::Gif,
+        ] {
+            let mut bytes = Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(4, 6)
+                .write_to(&mut bytes, format)
+                .unwrap();
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(bytes.get_ref()).unwrap();
+            assert_eq!(detect_format(file.path()).unwrap().0, "image");
+            let metadata = inspect(file.path(), "image").await.unwrap();
+            assert_eq!(metadata["width"], 4);
+            assert_eq!(metadata["height"], 6);
+            assert!(metadata["duration"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_header_without_pixels_is_rejected() {
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(4, 6)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&bytes.get_ref()[..33]).unwrap();
+        assert_eq!(detect_format(file.path()).unwrap().0, "image");
+        assert!(inspect(file.path(), "image").await.is_err());
+    }
 }
 
 pub(crate) async fn import_path(
@@ -595,6 +675,9 @@ fn register_pending(app: &tauri::AppHandle, registration: &Registration) -> Resu
             updated_at: version.created_at.clone(),
         }
     };
+    if role == "character" {
+        asset.role = "character".into();
+    }
     asset.versions.push(version.clone());
     asset.updated_at = now();
     transaction.execute("INSERT INTO media_files(id,project_id,version_id,relative_path,mime_type,bytes) VALUES(?1,?2,?3,?4,?5,?6)", params![version.file_id, project_id, version.id, relative_path, mime, version.bytes]).map_err(|e| format!("文件已保存但登记失败，可恢复收录：{e}"))?;
@@ -635,6 +718,7 @@ pub(crate) fn recover_job_registration(
         || registration.version.id != id
         || registration.target_id.as_deref() != Some(job.target_id.as_str())
         || registration.kind != job.capability
+        || registration.role != job.request.output_role()
     {
         return Err("任务产物恢复记录归属不一致，拒绝重复收录".into());
     }
