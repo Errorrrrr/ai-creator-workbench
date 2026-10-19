@@ -11,6 +11,7 @@ mod runtime;
 mod storage;
 mod updater;
 mod updates;
+mod video_export;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -52,6 +53,8 @@ pub fn run() {
             media::media_import_bytes,
             media::media_update_asset,
             media::media_export_version,
+            video_export::media_export_flow,
+            video_export::media_export_muse,
             media::media_keyframes,
             media_jobs::media_submit,
             media_jobs::media_submit_batch,

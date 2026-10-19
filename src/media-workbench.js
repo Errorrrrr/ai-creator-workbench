@@ -1,3 +1,4 @@
+import { buildFlowExport, buildMuseExport } from './video-export.js'
 import { ASSET_ROLES, JOB_STATUSES, SHOT_LIMIT, contentFingerprint, createShot, findMediaVersion, mediaPrompt, parseStoryboardCandidate, resolveConnectionRoute, shotIsStale, storyboardPrompt, supportsCapability } from './storyboard.js'
 import { mediaAdapterFor, useMediaAdapterCatalog } from './media-adapters.js'
 import { biographyCharacters, characterImagePrompt, characterTargetId, prepareCharacterRequest } from './character-images.js'
@@ -59,7 +60,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   workflow.append(el('p', 'media-help', '步骤可以跳过或回退；切换执行端不会清空内容或发起生成。图片、视频使用所选资源的真实能力。'))
 
   const shotActions = el('div', 'media-toolbar')
-  shotActions.append(field('拆镜来源', sourceSelect), button('AI 拆镜', generateStoryboard, 'primary-button'), button('新建镜头', addShot), button('批量生成计划', () => openBatchPlan()), button('任务中心', showJobs))
+  shotActions.append(field('拆镜来源', sourceSelect), button('AI 拆镜', generateStoryboard, 'primary-button'), button('新建镜头', addShot), button('导出 Google Flow 素材包', exportFlow), button('导出 Muse 聊天素材包', exportMuse), button('批量生成计划', () => openBatchPlan()), button('任务中心', showJobs))
   storyboardView.querySelector('.media-view-content').append(shotActions)
   const shotStatus = el('p', 'media-notice'), candidateHost = el('section', 'storyboard-candidate'), shotBody = el('div', 'storyboard-body')
   shotStatus.setAttribute('role', 'status')
@@ -716,6 +717,23 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   }
   async function chooseImport() {
     await run(async () => { requireProject(); desktop(); const data = context(); try { const result = await invoke('media_choose_import', { projectId: data.projectId, role: roleFilter.value || 'other' }); if (result?.length) notify(`已导入 ${result.length} 项真实素材`) } finally { await refresh() } })
+  }
+  async function exportFlow() {
+    return exportVideoBundle(buildFlowExport, 'media_export_flow')
+  }
+  async function exportMuse() {
+    return exportVideoBundle(buildMuseExport, 'media_export_muse')
+  }
+  async function exportVideoBundle(build, command) {
+    await run(async () => {
+      requireProject(); desktop()
+      const data = structuredClone(context())
+      if (!data.storyboard.shots.length) throw new Error('尚无分镜，请先拆镜或新建镜头再导出')
+      const latest = await invoke('media_list', { projectId: data.projectId })
+      if (context().projectId !== data.projectId) throw new Error('项目已切换，请在目标项目重新导出')
+      const bundle = build(data, latest.assets)
+      notify(await invoke(command, { projectId: data.projectId, bundle }))
+    })
   }
   async function exportPackage() {
     await run(async () => { requireProject(); desktop(); const data = context(), portable = await portableProject(); notify(await invoke('media_export_package', { projectId: data.projectId, workspace: portable.workspace, index: portable.index })) })
