@@ -129,7 +129,7 @@ pub(crate) async fn generate(
     resume: bool,
 ) -> Result<(), String> {
     let base = runtime::validate_base_url("api", &job.request.connection.base_url)?;
-    let client = runtime::http_client(Duration::from_secs(180))?;
+    let client = runtime::http_client(Duration::from_secs(180)).await?;
     let key = job
         .request
         .api_key

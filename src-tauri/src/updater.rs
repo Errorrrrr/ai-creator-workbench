@@ -72,7 +72,8 @@ async fn download(
     } else {
         download_url
     };
-    let client = reqwest::Client::builder()
+    let client = crate::system_proxy::http_builder()
+        .await?
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(300))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {

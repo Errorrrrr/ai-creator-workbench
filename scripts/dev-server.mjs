@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { ANTIGRAVITY_ARGS, antigravityInput, parseAntigravityOutput } from './antigravity-protocol.mjs'
+import { ANTIGRAVITY_ARGS, antigravityInput, parseAntigravityOutput, sanitizeCliError, antigravityExecutionError } from './antigravity-protocol.mjs'
 import { checkForUpdates } from '../src/updates.js'
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url))
@@ -254,14 +254,6 @@ function buildCliEnvironment(driverId, isolatedHome) {
   }
 }
 
-function sanitizeCliError(diagnostics) {
-  if (/login|log in|auth|api[ _-]?key|credential|unauthorized/i.test(diagnostics)) return 'CLI 尚未登录或授权已失效'
-  if (/avx|architecture|bad cpu|exec format/i.test(diagnostics)) return 'CLI 与当前芯片架构不兼容'
-  if (/rate.?limit|quota|too many requests/i.test(diagnostics)) return 'CLI 上游服务暂时受限'
-  if (/network|resolve|dns|connect|socket|timeout/i.test(diagnostics)) return 'CLI 无法连接上游服务'
-  return 'CLI 运行失败，请在终端检查登录和版本'
-}
-
 function codexDiagnosticMessage(message) {
   for (const [pattern, detail] of [
     [/unexpected argument|unrecognized option|unknown option/i, '命令行选项'],
@@ -459,7 +451,7 @@ export function runCliProcess(executablePath, args, input, { driverId, cwd, sign
       } else if (outputBytes > maxOutputBytes) {
         rejectProcess(Object.assign(new Error('CLI 输出超过限制'), { statusCode: 413 }))
       } else if (code !== 0) {
-        const message = driverId === 'codex' ? codexExecutionError(diagnostics, output, code, terminationSignal, args) : sanitizeCliError(diagnostics)
+        const message = driverId === 'codex' ? codexExecutionError(diagnostics, output, code, terminationSignal, args) : driverId === 'antigravity' ? antigravityExecutionError(diagnostics, output) : sanitizeCliError(diagnostics)
         rejectProcess(Object.assign(new Error(message), { statusCode: 502 }))
       } else if (!output && driverId !== 'codex') {
         rejectProcess(Object.assign(new Error('CLI 未返回内容'), { statusCode: 502 }))

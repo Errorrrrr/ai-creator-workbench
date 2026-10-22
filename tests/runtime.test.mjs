@@ -6,7 +6,7 @@ import {
   createCliPrompt, handleCliGenerateRequest, handleRequest, isAllowedHost,
   isAllowedStaticPath, isLoopbackUrl, readJsonBody, runCliProcess
 } from '../scripts/dev-server.mjs'
-import { antigravityInput, parseAntigravityOutput } from '../scripts/antigravity-protocol.mjs'
+import { antigravityInput, parseAntigravityOutput, antigravityExecutionError } from '../scripts/antigravity-protocol.mjs'
 
 function responseMock() {
   const response = new EventEmitter()
@@ -140,4 +140,15 @@ test('Antigravity protocol accepts one successful result and rejects ambiguous/m
   assert.throws(() => parseAntigravityOutput(`${success}\n${success}`), /多个结果/)
   assert.throws(() => parseAntigravityOutput('not-json'), /无效/)
   assert.throws(() => parseAntigravityOutput('{"event":"progress"}'), /完整结果/)
+})
+
+test('Antigravity classifies region refusal from failed result without exposing diagnostics or reading response text', () => {
+  for (const error of ['User location is not supported for the API use. secret-token', { message: 'User location is not supported for the API use.', token: 'secret-token' }]) {
+    const output = JSON.stringify({ event: 'result', result: { status: 'ERROR', error } })
+    assert.match(antigravityExecutionError('process failed', output), /所在地区/)
+    assert.throws(() => parseAntigravityOutput(output), /所在地区/)
+    assert.ok(!antigravityExecutionError('', output).includes('secret-token'))
+  }
+  assert.ok(!antigravityExecutionError('', JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: 'User location is not supported' } })).includes('所在地区'))
+  assert.ok(!antigravityExecutionError('', JSON.stringify({ event: 'user', message: { content: 'User location is not supported' } })).includes('所在地区'))
 })

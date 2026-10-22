@@ -8,7 +8,7 @@ function harness({ generating = false, saveResult = true, inspirationDirty = fal
   const events = [], dialog = { inert: true }
   const context = vm.createContext({
     projectTransition: false, updateInstalling: false, state: { isGenerating: generating }, unsavedEdits: false, pendingSaves: 0,
-    mediaWorkbench: { hasPendingWork: () => false },
+    mediaWorkbench: { hasPendingWork: () => false, pendingAssetDraft: () => null },
     inspirationUI: { isBusy: () => false, dirty: () => inspirationDirty, save: async () => { events.push('inspiration'); if (inspirationSave) inspirationDirty = false; return inspirationSave } },
     setProjectTransition(value) { context.projectTransition = value; events.push(value ? 'lock' : 'unlock') },
     document: { getElementById: () => dialog },
@@ -29,4 +29,13 @@ test('workspace and inspiration save failures restore editing before reporting f
     const h = harness(options); await assert.rejects(h.run(), /保存/)
     assert.equal(h.events.at(-1), 'unlock'); assert.equal(h.context.updateInstalling, false)
   }
+})
+
+
+test('未保存的素材草稿阻止安装更新，不锁界面或启动保存', async () => {
+  const h = harness()
+  h.context.mediaWorkbench.pendingAssetDraft = () => ({ projectId: 'p1', assetId: 'a1' })
+  await assert.rejects(h.run(), /素材信息尚未保存/)
+  assert.deepEqual(h.events, [])
+  assert.equal(h.context.projectTransition, false)
 })

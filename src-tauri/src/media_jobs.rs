@@ -932,7 +932,7 @@ pub(crate) async fn generate_image(
         "{}\n期望画幅：{}。",
         request.prompt, request.parameters.aspect_ratio
     );
-    let client = runtime::http_client(Duration::from_secs(600))?;
+    let client = runtime::http_client(Duration::from_secs(600)).await?;
     let base = runtime::validate_base_url("api", &request.connection.base_url)?;
     let key = request.api_key.as_deref().ok_or("未提供图片 API 密钥")?;
     let builder = if request.references.is_empty() {

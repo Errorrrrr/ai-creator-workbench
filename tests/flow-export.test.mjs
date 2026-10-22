@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import { buildFlowExport, buildMuseExport } from '../src/video-export.js'
 import { createShot } from '../src/storyboard.js'
+import { planReferenceBackfill } from '../src/storyboard-references.js'
 
 const asset = { name: '角色甲', role: 'character', selectedVersionId: 'new', versions: [{ id: 'fixed', mimeType: 'image/png' }, { id: 'new', mimeType: 'image/jpeg' }, { id: 'video', mimeType: 'video/mp4' }] }
 function context(shots) { return { project: { name: '测试项目', type: '短剧' }, storyboard: { revision: 3, shots }, documents: {}, connections: [{ apiKey: 'DO-NOT-EXPORT' }] } }
@@ -51,9 +52,9 @@ test('UI exports a snapshot without any video connection and refuses a project s
   const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
   const handler = source.slice(source.indexOf('  async function exportFlow() {'), source.indexOf('  async function exportPackage() {'))
   for (const target of ['flow', 'muse']) for (const switched of [false, true]) {
-    const state = { ...context([createShot({ visual: '当前未保存的修改' })]), projectId: 'project-1', connections: [] }
+    const state = { ...context([createShot({ visual: '当前未保存的修改' }), createShot({ visual: '另一场不应导出' })]), projectId: 'project-1', connections: [] }
     const calls = [], notices = []
-    const env = { structuredClone, buildFlowExport, buildMuseExport, context: () => state, desktop() {}, requireProject() {}, notify: message => notices.push(message), run: async action => { try { await action() } catch (error) { notices.push(error.message) } }, invoke: async (command, payload) => {
+    const env = { planReferenceBackfill, visibleShots: data => data.storyboard.shots.slice(0, 1), structuredClone, buildFlowExport, buildMuseExport, context: () => state, desktop() {}, requireProject() {}, notify: message => notices.push(message), run: async action => { try { await action() } catch (error) { notices.push(error.message) } }, invoke: async (command, payload) => {
       calls.push({ command, payload })
       if (command === 'media_list') { if (switched) state.projectId = 'project-2'; return { assets: [] } }
       return '已导出'
@@ -62,6 +63,6 @@ test('UI exports a snapshot without any video connection and refuses a project s
     await env.submit()
     assert.deepEqual(calls.map(call => call.command), switched ? ['media_list'] : ['media_list', `media_export_${target}`])
     if (switched) assert.match(notices[0], /项目已切换/)
-    else { assert.match(calls[1].payload.bundle.texts[0].content, /当前未保存的修改/); assert.equal(calls[1].payload.projectId, 'project-1') }
+    else { assert.match(calls[1].payload.bundle.texts[0].content, /当前未保存的修改/); assert.equal(calls[1].payload.projectId, 'project-1'); assert.ok(!JSON.stringify(calls[1].payload.bundle).includes('另一场不应导出')) }
   }
 })

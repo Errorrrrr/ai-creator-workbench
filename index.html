@@ -12,6 +12,8 @@
     <link rel="stylesheet" href="./src/styles.css" />
     <link rel="stylesheet" href="./src/review-diff.css" />
     <link rel="stylesheet" href="./src/candidate-drafts-ui.css" />
+    <link rel="stylesheet" href="./src/workbench-layout.css" />
+    <link rel="stylesheet" href="./src/media-layout.css" />
   </head>
   <body>
     <a class="skip-link" href="#workspaceMain">跳到正文编辑区</a>
@@ -167,7 +169,7 @@
       </symbol>
     </svg>
 
-    <div class="app-shell" id="appShell">
+    <div class="app-shell assistant-collapsed" id="appShell" data-current-view="workspace">
       <header class="titlebar" data-tauri-drag-region="deep">
         <div class="titlebar-start">
           <div class="window-controls" aria-hidden="true">
@@ -207,8 +209,11 @@
             <svg class="icon theme-icon-light"><use href="#icon-moon"></use></svg>
             <svg class="icon theme-icon-dark"><use href="#icon-sun"></use></svg>
           </button>
-          <button class="icon-button" type="button" data-action="toggle-assistant" aria-label="收起 AI 助手" title="收起 AI 助手" aria-controls="assistantPanel" aria-expanded="true">
-            <svg class="icon"><use href="#icon-panel-right"></use></svg>
+          <button class="icon-button focus-toggle" type="button" data-action="toggle-focus-mode" aria-label="进入专注模式" title="进入专注模式" aria-pressed="false">
+            <svg class="icon"><use href="#icon-panel-left"></use></svg><span>专注模式</span>
+          </button>
+          <button class="icon-button assistant-toggle" type="button" data-action="toggle-assistant" aria-label="打开 AI 助手" title="打开 AI 助手" aria-controls="assistantPanel" aria-expanded="false">
+            <svg class="icon"><use href="#icon-sparkles"></use></svg><span>AI 助手</span>
           </button>
         </div>
       </header>
@@ -236,7 +241,6 @@
           <button class="rail-button" type="button" data-action="project-library" aria-label="数据与备份" data-tooltip="数据与备份">
             <svg class="icon"><use href="#icon-settings"></use></svg>
           </button>
-          <div class="profile-avatar" aria-label="本地用户">舟</div>
         </nav>
 
         <aside class="resource-explorer" id="resourceExplorer" aria-label="项目内容">
@@ -282,12 +286,11 @@
           <nav class="creation-navigation" id="creationNavigation" aria-label="创作步骤" hidden>
             <div class="creation-navigation-row">
               <span id="creationPath" class="creation-path"></span>
-              <button type="button" class="secondary-button compact-button" data-workflow-previous>上一步</button>
               <label class="creation-step-field" for="creationStep"><span class="sr-only">当前创作步骤</span><select id="creationStep" aria-describedby="creationStepHint"></select></label>
-              <button type="button" class="secondary-button compact-button" data-workflow-next>下一步</button>
             </div>
             <details class="creation-step-details">
-              <summary title="查看当前步骤的输入、执行端与输出">步骤说明</summary>
+              <summary title="查看创作路径、上一步与下一步">路径与说明</summary>
+              <div class="creation-step-pagination"><button type="button" class="secondary-button compact-button" data-workflow-previous>上一步</button><button type="button" class="secondary-button compact-button" data-workflow-next>下一步</button></div>
               <p id="creationStepHint" class="creation-step-hint"></p>
               <dl><div><dt>可用输入</dt><dd id="creationStepInput"></dd></div><div><dt>执行端</dt><dd id="creationStepExecutor"></dd></div><div><dt>输出位置</dt><dd id="creationStepOutput"></dd></div></dl>
               <p>实际发送范围请查看助手上下文或媒体计划；步骤切换不会生成内容，序号不代表完成率。</p>
@@ -344,10 +347,7 @@
               <button class="document-tab" type="button" role="tab" aria-selected="false" data-tab="references">关联资料 <span class="tab-count">0</span></button>
               <button class="document-tab" type="button" role="tab" aria-selected="false" data-tab="history">历史版本</button>
               <span class="tab-spacer"></span>
-              <button class="tab-action" type="button" data-action="toggle-focus-mode" aria-label="切换专注模式" aria-pressed="false">
-                <svg class="icon"><use href="#icon-panel-left"></use></svg>
-                <span>专注模式</span>
-              </button>
+
             </div>
 
             <div class="editor-scroll">
@@ -525,6 +525,10 @@
               <button type="button" class="text-button" data-action="test-all-connections">全部检测</button>
             </div>
 
+            <section class="connection-section" aria-labelledby="globalProxyTitle">
+              <div class="connection-section-heading"><div><div><h2 id="globalProxyTitle">全局网络代理</h2><p>统一用于所有 CLI、文字与图片／视频 API、连接测试及更新下载。本机 localhost、127.0.0.1、::1 请求保持直连。</p><p id="globalProxyStatus" role="status">正在读取网络设置…</p></div></div><button type="button" class="secondary-button compact-button" data-action="configure-cli-proxy">代理设置</button></div>
+            </section>
+
             <section class="connection-section" aria-labelledby="globalExecutorsTitle">
               <div class="connection-section-heading"><div><div><h2 id="globalExecutorsTitle">全局默认执行端</h2><p>未单独选择资源的项目按能力继承。修改默认不覆盖项目选择，也不会发起生成。</p></div></div></div>
               <div class="project-workflow" id="globalExecutors"></div>
@@ -543,8 +547,8 @@
             </section>
 
             <section class="connection-section" aria-labelledby="mediaAdaptersTitle">
-              <div class="connection-section-heading"><div><div><h2 id="mediaAdaptersTitle">媒体协议框架</h2><p id="mediaAdapterStatus" role="status">正在读取已实现的 API／CLI 协议；不会调用生成。</p></div></div></div>
-              <div id="mediaAdapterList"></div>
+              <div class="connection-section-heading"><div><div><h2 id="mediaAdaptersTitle">图片与视频支持</h2><p id="mediaAdapterStatus" role="status">正在读取已实现的 API／CLI 协议；不会调用生成。</p></div></div></div>
+              <details class="settings-disclosure"><summary>查看支持的媒体协议</summary><div id="mediaAdapterList"></div></details>
             </section>
 
             <section class="connection-section" aria-labelledby="cliConnectionsTitle">
@@ -553,7 +557,6 @@
                 <button class="text-button" type="button" data-action="detect-cli">重新检测</button>
               </div>
               <div class="connection-list" id="cliConnectionList"></div>
-              <button id="claudeCredentialButton" class="secondary-button" type="button" data-action="configure-claude" hidden>配置 Claude CLI 凭据</button>
             </section>
 
             <section class="connection-section" aria-labelledby="localConnectionsTitle">
@@ -563,10 +566,7 @@
               <div class="connection-list" id="localConnectionList"></div>
             </section>
 
-            <div class="security-note">
-              <svg class="icon"><use href="#icon-lock"></use></svg>
-              <div><strong>本地优先的安全边界</strong><p>密钥默认仅用于当前会话；macOS 桌面版可选择保存到系统钥匙串。CLI 只接受白名单驱动与固定参数，不接受自定义 Shell；选中的知识片段会发送给当前执行端。</p></div>
-            </div>
+            <details class="settings-disclosure connection-security"><summary>数据与调用说明</summary><p>密钥默认仅用于当前会话；macOS 桌面版可选择保存到系统钥匙串。CLI 只接受白名单驱动与固定参数，不接受自定义 Shell；选中的知识片段会发送给当前执行端。</p></details>
           </section>
         </main>
 
@@ -589,8 +589,8 @@
           </header>
 
           <div class="assistant-context">
-            <details class="assistant-context-settings">
-              <summary>本次上下文</summary>
+            <details class="assistant-context-settings" id="assistantContextSettings">
+              <summary>上下文与发送范围</summary>
               <div class="context-heading">
                 <span>调整发送范围</span>
                 <button class="text-button" type="button" data-view-target="knowledge">管理资料</button>
@@ -605,7 +605,6 @@
                 <label><input id="includeSelectionContext" type="checkbox">编辑器选区</label>
                 <button class="text-button" id="addContextObject" type="button" aria-controls="contextObjectPicker" aria-expanded="false">@ 添加对象</button>
               </div>
-            </details>
             <div id="contextObjectReferences" class="context-object-references" aria-label="主动引用的项目对象"></div>
             <details id="contextObjectPicker" class="context-object-picker">
               <summary>选择当前项目对象</summary>
@@ -613,6 +612,8 @@
               <input id="contextObjectSearch" type="search" placeholder="搜索文档、镜头或素材说明">
               <div id="contextObjectList" class="context-object-list"></div>
               <p>文字请求只发送素材说明，不含图片或视频字节。真实媒体参考请在分镜中选择。</p>
+            </details>
+            <details class="context-preview"><summary id="contextPreviewSummary">发送范围</summary><p class="request-mode-help" id="requestModeHelp">讨论不改项目；文字采纳后写入；项目计划先审阅，任务查询只读本地摘要。</p><ul id="contextPreviewList"></ul><div id="contextExcludedList"></div><button class="text-button" id="resetContextScope" type="button">恢复默认上下文</button><details><summary>查看完整文字请求</summary><pre id="contextPreviewMessages"></pre></details><p>仅发送列出的内容、项目标题与创作要求。超出预算的片段会标出截断；移除只影响下次请求，不改动原资料。</p></details>
             </details>
           </div>
 
@@ -664,7 +665,7 @@
               <select id="assistantRequestMode" aria-describedby="requestModeHelp"><option value="text">文字候选</option><option value="discussion">仅讨论</option><option value="project-plan">项目计划 · 编辑与任务查询</option></select>
               <button class="text-button" id="reviewExistingPlan" type="button" data-action="review-existing-plan" hidden>审阅已有计划</button>
             </div>
-            <details class="context-preview"><summary id="contextPreviewSummary">发送范围</summary><p class="request-mode-help" id="requestModeHelp">讨论不改项目；文字采纳后写入；项目计划先审阅，任务查询只读本地摘要。</p><ul id="contextPreviewList"></ul><div id="contextExcludedList"></div><button class="text-button" id="resetContextScope" type="button">恢复默认上下文</button><details><summary>查看完整文字请求</summary><pre id="contextPreviewMessages"></pre></details><p>仅发送列出的内容、项目标题与创作要求。超出预算的片段会标出截断；移除只影响下次请求，不改动原资料。</p></details>
+
             <label class="prompt-box" for="promptInput">
               <span class="sr-only">告诉 AI 你想如何处理当前内容</span>
               <textarea id="promptInput" rows="2" placeholder="描述你想怎么改，或输入下一步情节…"></textarea>
@@ -694,7 +695,6 @@
         </div>
         <div class="statusbar-group statusbar-end">
           <span id="currentMode">剧本模式</span>
-          <span>UTF-8</span>
           <button type="button" data-action="check-updates" aria-haspopup="dialog" aria-controls="updateDialog">检查更新</button>
           <button type="button" data-action="open-shortcuts">快捷键</button>
         </div>
@@ -819,12 +819,43 @@
       </form>
     </dialog>
 
-    <dialog class="app-dialog form-dialog" id="cliModelDialog" aria-labelledby="cliModelTitle">
-      <form id="cliModelForm">
+    <dialog class="app-dialog form-dialog" id="cliProxyDialog" aria-labelledby="cliProxyTitle">
+      <form id="cliProxyForm">
         <div class="dialog-header">
-          <div><span class="eyebrow">本机 CLI · 不调用生成</span><h2 id="cliModelTitle">Codex 规划模型</h2></div>
+          <div><span class="eyebrow">工作台 · 全局网络</span><h2 id="cliProxyTitle">全局代理设置</h2></div>
           <button class="icon-button icon-button-compact" type="button" data-action="close-dialog" aria-label="关闭"><svg class="icon"><use href="#icon-x"></use></svg></button>
         </div>
+        <div class="form-field">
+          <label for="cliProxyMode">代理模式</label>
+          <select id="cliProxyMode" aria-describedby="cliProxyHelp">
+            <option value="auto">自动 · 环境变量／系统代理</option>
+            <option value="manual">手动代理</option>
+            <option value="direct">直连 · 不使用代理</option>
+          </select>
+          <small id="cliProxyHelp">自动模式优先使用已设置的代理环境变量，否则读取 macOS HTTP／HTTPS 系统代理。手动和直连模式覆盖继承的代理设置，统一应用于工作台的全部执行端和网络请求，所有项目共用；本机服务保持直连。</small>
+        </div>
+        <div class="form-field" id="cliProxyAddressField" hidden>
+          <label for="cliProxyAddress">代理地址</label>
+          <input id="cliProxyAddress" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:7897" aria-describedby="cliProxyAddressHelp cliProxyStatus" />
+          <small id="cliProxyAddressHelp">同时用于所有执行端的 HTTP 和 HTTPS 请求。请填写 HTTP／HTTPS 代理地址及端口；不支持在地址中保存账号或密码。</small>
+        </div>
+        <div class="dialog-inline-status" id="cliProxyStatus" role="status"></div>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">保存设置</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="app-dialog form-dialog cli-settings-dialog" id="cliSettingsDialog" aria-labelledby="cliSettingsTitle">
+      <div class="dialog-header">
+        <div><span class="eyebrow">本机 CLI</span><h2 id="cliSettingsTitle">CLI 设置</h2></div>
+        <button class="icon-button icon-button-compact" type="button" data-action="close-dialog" aria-label="关闭"><svg class="icon"><use href="#icon-x"></use></svg></button>
+      </div>
+      <p class="dialog-inline-status" id="cliSettingsRuntime" role="status"></p>
+      <section class="cli-settings-section" aria-labelledby="cliSettingsSourceTitle">
+        <h3 id="cliSettingsSourceTitle">登录与配置</h3>
+        <p id="cliSettingsSource"></p>
+      </section>
+      <p class="cli-settings-network">网络代理：所有 CLI 共用连接中心的「全局网络代理」设置。</p>
+      <form id="cliModelForm" hidden>
         <div class="form-field">
           <label for="cliPlanningModel">模型 ID（可选）</label>
           <input id="cliPlanningModel" name="planningModel" maxlength="128" autocomplete="off" spellcheck="false" aria-describedby="cliModelHelp cliModelStatus" placeholder="留空跟随现有 Codex CLI 配置" />
@@ -833,6 +864,19 @@
         <div class="dialog-inline-status" id="cliModelStatus" role="status">保存不验证账号权限或消耗生成额度。生成失败不会自动更换模型、供应商或计费路径。</div>
         <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">保存设置</button></div>
       </form>
+      <form id="claudeCredentialForm" hidden>
+        <details class="cli-settings-section" id="claudeKeyDetails">
+          <summary>API Key（可选）</summary>
+          <p>需要使用 API Key 时再填写，调用会使用该 Key 的 API 用量。已有 Key 优先于 CLI 登录；未提供 Key 时尝试本机已有登录。</p>
+          <div class="form-field"><label for="claudeApiKey">Anthropic API Key（可选）</label><input id="claudeApiKey" type="password" maxlength="8192" autocomplete="new-password" aria-describedby="claudeKeyHelp" placeholder="留空保留现有设置" /><small id="claudeKeyHelp">留空不会清除已有 Key，也不会更改其保存方式。未在工作台设置 Key 时，仍可能使用启动环境中的 Key。</small></div>
+          <label><input id="rememberClaudeKey" type="checkbox" />保存到 macOS 钥匙串</label>
+          <button class="secondary-button compact-button" id="removeClaudeKey" type="button">移除工作台 Key</button>
+          <p class="media-help">移除会清除当前会话和工作台钥匙串中的 Key，下次调用尝试本机凭据。启动环境中的 Key 仍可能优先于 CLI 登录。</p>
+        </details>
+        <div class="dialog-inline-status" id="claudeCredentialStatus" role="status"></div>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">关闭</button><button class="primary-button" type="submit">保存设置</button></div>
+      </form>
+      <div class="dialog-actions" id="cliSettingsDone"><button class="primary-button" type="button" data-action="close-dialog">完成</button></div>
     </dialog>
 
     <dialog class="app-dialog media-jobs-dialog media-batch-dialog" id="mediaBatchDialog" aria-labelledby="mediaBatchTitle" aria-describedby="mediaBatchHelp">
@@ -853,15 +897,6 @@
       <div class="dialog-header"><div><span class="eyebrow">真实执行 · 原项目归属</span><h2 id="mediaJobsTitle">生成任务</h2></div><button type="button" class="secondary-button compact-button" data-media-close>关闭</button></div>
       <p class="media-help">取消等待不一定能取消远端生成或费用。恢复只查询、下载或收录已有结果，不会自动创建新生成。</p>
       <button type="button" class="text-button" data-media-refresh>刷新任务</button><div class="media-jobs-list"></div>
-    </dialog>
-    <dialog class="app-dialog form-dialog" id="claudeCredentialDialog" aria-labelledby="claudeCredentialTitle">
-      <form id="claudeCredentialForm">
-        <h2 id="claudeCredentialTitle">Claude CLI 凭据</h2>
-        <p>使用 Anthropic API Key 执行无工具创作，不读取本机 Claude 登录与插件配置。请求会使用你的 API 用量。</p>
-        <div class="form-field"><label for="claudeApiKey">Anthropic API Key</label><input id="claudeApiKey" type="password" required autocomplete="new-password" /></div>
-        <label><input id="rememberClaudeKey" type="checkbox" />保存到 macOS 钥匙串</label>
-        <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">保存并检测</button></div>
-      </form>
     </dialog>
 
     <dialog class="app-dialog form-dialog" id="newContentDialog" aria-labelledby="newContentTitle">

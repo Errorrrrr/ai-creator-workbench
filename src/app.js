@@ -1,3 +1,4 @@
+import { validateCliProxy } from './cli-proxy.js'
 import {
   createKnowledgeIndex,
   deserializeKnowledgeIndex,
@@ -9,14 +10,14 @@ import { buildSemanticIndex, semanticSearch, pruneSemanticIndex, semanticIndexCo
 import { initializeInspirations } from './inspirations.js'
 import { initializeUpdates } from './update-ui.js'
 import { consumeProviderStream, fetchProviderResponse, providerEndpointUrl, validateProviderBaseUrl } from './provider-stream.js'
-import { GENERATION_CHARACTER_LIMIT, prepareGeneration, projectMarkdown, planKnowledgeFiles } from './creation-workflow.js'
-import { emptyStoryboard, normalizeStoryboard, normalizeWorkflow, resolveConnectionRoute, supportsCapability, validateStoryboard } from './storyboard.js'
+import { GENERATION_CHARACTER_LIMIT, prepareGeneration, prepareVersionRestore, projectMarkdown, planKnowledgeFiles } from './creation-workflow.js'
+import { contentFingerprint, storyboardSourceFingerprint, emptyStoryboard, normalizeStoryboard, normalizeWorkflow, resolveConnectionRoute, supportsCapability, validateStoryboard } from './storyboard.js'
 import { initializeMediaWorkbench } from './media-workbench.js'
 import { configuredMediaAdapterId, mediaAdapterFor, mediaAdaptersForKind } from './media-adapters.js'
 import { OPERATION_CONTEXT_RESERVE, captureOperationContext, materializeOperationPlan, prepareOperationRequest } from './project-operations.js'
 import { initializeProjectPlanUI } from './project-plan-ui.js'
 import { creationSteps, initializeCreationNavigation } from './workflow-navigation.js'
-import { MAX_CANDIDATE_DRAFTS, candidateDraftsFor, upsertCandidateDraft, removeCandidateDraft } from './candidate-drafts.js'
+import { candidateGeneratedAtLabel, MAX_CANDIDATE_DRAFTS, candidateDraftsFor, upsertCandidateDraft, removeCandidateDraft } from './candidate-drafts.js'
 import { createReviewDiff } from './review-diff.js'
 
 let mediaWorkbench = null
@@ -176,6 +177,7 @@ async function connectionSecret(connection) {
   if (sessionSecrets.has(connection.id)) return sessionSecrets.get(connection.id)
   if (isDesktopRuntime && connection.rememberSecret) {
     const secret = await invokeDesktop('credential_load', { id: connection.id, endpoint: connection.baseUrl })
+    if (!secret && connection.kind === 'cli' && connection.driverId === 'claude') throw new Error('工作台保存的 Claude Key 未找到，请重新配置或移除工作台 Key；未切换到其他凭据')
     if (secret) sessionSecrets.set(connection.id, secret)
     return secret || ''
   }
@@ -254,6 +256,7 @@ function normalizeConnections(value) {
       adapter: configuredMediaAdapterId(connection),
       driverId: connection.kind === 'cli' && typeof connection.driverId === 'string' ? connection.driverId : null,
       status: 'unknown',
+      ...(connection.kind === 'cli' ? { lastExecution: connection.lastExecution && ['ready', 'auth_failed', 'error'].includes(connection.lastExecution.status) ? { status: connection.lastExecution.status, error: typeof connection.lastExecution.error === 'string' ? connection.lastExecution.error : null, at: typeof connection.lastExecution.at === 'string' ? connection.lastExecution.at : null } : null } : {}),
       capabilities: Array.isArray(connection.capabilities) ? connection.capabilities.filter((item) => typeof item === 'string').slice(0, 6) : [],
       isActive: Boolean(connection.isActive),
       defaultFor: [...new Set(Array.isArray(connection.defaultFor) ? connection.defaultFor.filter(capability => ['image', 'video'].includes(capability)) : [])],
@@ -402,6 +405,7 @@ const state = {
     query: ''
   },
   generationTimer: null,
+  generationInFlight: null,
   generationAbortController: null,
   generationSequence: 0,
   activeGenerationId: null,
@@ -492,6 +496,9 @@ const elements = {
   welcome: document.querySelector('#assistantWelcome')
 }
 
+// View preferences stay separate from project data and generated candidates.
+let assistantExpanded = false
+const coreNavigationState = new Map()
 let drawerReturnFocus = null
 
 function rememberDrawerOpener() {
@@ -684,9 +691,18 @@ function renderTreeDocumentButton(documentId, kind, position) {
 function renderProjectTree() {
   if (!elements.projectTree) return
   const fragment = document.createDocumentFragment()
-  const coreSection = document.createElement('div')
-  coreSection.className = 'tree-section'
-  const coreHeading = document.createElement('div')
+  const coreSection = document.createElement('details')
+  coreSection.className = 'tree-section tree-core-details'
+  const isCoreDocument = CORE_DOCUMENT_IDS.concat('draft').includes(state.currentDocId)
+  const coreState = coreNavigationState.get(activeProjectId) || { open: isCoreDocument || !getEpisodeIds().length, documentId: state.currentDocId }
+  if (coreState.documentId !== state.currentDocId && isCoreDocument) coreState.open = true
+  coreState.documentId = state.currentDocId
+  coreNavigationState.set(activeProjectId, coreState)
+  coreSection.open = coreState.open
+  coreSection.addEventListener('toggle', () => {
+    if (coreSection.isConnected && !elements.treeSearch.value.trim()) coreState.open = coreSection.open
+  })
+  const coreHeading = document.createElement('summary')
   coreHeading.className = 'tree-section-heading'
   const coreLabel = document.createElement('span')
   coreLabel.textContent = '前期创作'
@@ -732,6 +748,7 @@ function renderProjectTree() {
 
     const group = document.createElement('div')
     group.className = 'tree-group-content'
+    group.dataset.actId = act.id
     group.hidden = act.collapsed
     act.episodeIds.forEach((episodeId, episodeIndex) => {
       group.append(renderTreeDocumentButton(episodeId, 'episode', episodeIndex))
@@ -750,8 +767,13 @@ function renderProjectTree() {
           sceneButton.dataset.docId = sceneId
           sceneButton.dataset.action = 'select-doc'
           const sceneNumber = document.createElement('span')
+          sceneNumber.className = 'scene-number'
           sceneNumber.textContent = `${episodeIndex + 1}-${sceneIndex + 1}`
-          sceneButton.append(sceneNumber, scene.sceneTitle || scene.title)
+          const sceneName = document.createElement('span')
+          sceneName.className = 'scene-name'
+          sceneName.textContent = scene.sceneTitle || scene.title
+          sceneButton.title = sceneName.textContent
+          sceneButton.append(sceneNumber, sceneName)
           sceneList.append(sceneButton)
         })
         group.append(sceneList)
@@ -770,6 +792,27 @@ function renderProjectTree() {
   })
 
   elements.projectTree.replaceChildren(fragment)
+  filterProjectTree()
+}
+
+function filterProjectTree() {
+  const query = elements.treeSearch.value.trim().toLowerCase()
+  elements.projectTree.querySelectorAll('.tree-item, .scene-item').forEach(item => {
+    item.hidden = Boolean(query) && !item.textContent.toLowerCase().includes(query)
+  })
+  elements.projectTree.querySelectorAll('.tree-section').forEach(section => {
+    const hasMatch = [...section.querySelectorAll('.tree-item, .scene-item')].some(item => !item.hidden)
+    section.hidden = Boolean(query) && !hasMatch
+    if (section.classList.contains('tree-core-details')) {
+      section.open = query ? hasMatch : Boolean(coreNavigationState.get(activeProjectId)?.open)
+    }
+  })
+  elements.projectTree.querySelectorAll('.tree-group-content').forEach(group => {
+    const act = state.structure.acts.find(item => item.id === group.dataset.actId)
+    group.hidden = query ? false : Boolean(act?.collapsed)
+    group.closest('.tree-section').querySelector('.tree-section-toggle')?.setAttribute('aria-expanded', String(!group.hidden))
+  })
+  elements.projectTree.querySelectorAll('.scene-add-button, .tree-add-button').forEach(button => { button.hidden = Boolean(query) })
 }
 
 function updateStageAdvanceButton() {
@@ -827,8 +870,8 @@ function syncThemeControl() {
   themeButton.setAttribute('title', nextLabel)
 }
 
-function formatVersionHistory(documentId) {
-  const entries = Array.isArray(state.versions[documentId]) ? state.versions[documentId] : []
+function formatVersionHistory(documentId, entries = state.versions[documentId]) {
+  entries = Array.isArray(entries) ? entries : []
   if (!entries.length) {
     return tabFallbacks.history
   }
@@ -904,31 +947,53 @@ function renderHistoryControls() {
 }
 
 async function restoreSelectedVersion() {
+  if (projectTransition || state.candidateApplying || state.isGenerating) return
   const entry = getSelectedHistoryVersion()
   if (!entry) {
     showToast('当前文档还没有可恢复的快照')
     return
   }
   const documentId = state.currentDocId
-  const targetTab = entry.tabName
+  const targetTab = entry.tabName || 'script'
   const previousText = getContentAt(documentId, targetTab)
   if (previousText === entry.content) {
     showToast(`v${entry.number} 与当前内容相同，无需恢复`)
     return
   }
-  const history = getEditHistory(documentId, targetTab)
-  const transaction = { before: previousText, after: entry.content }
-  history.undo.push(transaction)
-  history.redo.length = 0
-  setContentAt(documentId, targetTab, entry.content)
-  state.activeTab = targetTab
-  const versionNumber = addVersion(documentId, entry.content, `从 v${entry.number} 恢复`, {
-    tabName: targetTab,
-    knowledgeChunks: entry.knowledgeChunks || []
-  })
-  const saved = await persistWorkspace()
-  updateDocumentView({ keepFocus: true })
-  showToast(saved ? `已将 v${entry.number} 恢复为新版本 v${versionNumber}` : '内容已恢复，但本地保存失败')
+  const owner = activeProjectId
+  state.candidateApplying = true
+  setProjectTransition(true)
+  try {
+    if (!await saveImmediately({ announce: false })) return
+    const prepared = prepareVersionRestore(workspaceSnapshot(), documentId, entry)
+    const next = prepared.workspace
+    next.tabContents[documentId].history = formatVersionHistory(documentId, next.versions[documentId])
+    validateWorkspace(next, state.knowledge.index)
+    setSaveStatus('saving')
+    await saveProject(owner, next, state.knowledge.index)
+    const history = getEditHistory(documentId, targetTab)
+    history.undo.push({ before: prepared.previousText, after: entry.content })
+    history.redo.length = 0
+    setContentAt(documentId, targetTab, entry.content)
+    state.versions[documentId] = next.versions[documentId]
+    state.versionCounters[documentId] = prepared.restoredNumber
+    state.selectedVersionByDocument[documentId] = prepared.restoredNumber
+    state.tabContents[documentId].history = next.tabContents[documentId].history
+    abandonCandidateOnContextChange(documentId, targetTab)
+    state.activeTab = targetTab
+    editRevision += 1
+    state.storageFailed = false
+    unsavedEdits = false
+    updateDocumentView({ keepFocus: true })
+    showToast(`已恢复为 v${prepared.restoredNumber}；恢复前内容保留在 v${prepared.beforeNumber}`)
+  } catch (error) {
+    state.storageFailed = true
+    setSaveStatus('error')
+    showToast(`恢复未保存，当前内容和历史均保留：${readableError(error)}`)
+  } finally {
+    state.candidateApplying = false
+    setProjectTransition(false)
+  }
 }
 
 function createStarterDocuments(projectName, contentType) {
@@ -967,7 +1032,8 @@ function updateDocumentView({ keepFocus = false } = {}) {
   elements.scriptEditor.readOnly = isReadOnly
   elements.scriptEditor.setAttribute('aria-readonly', String(isReadOnly))
   elements.scriptEditor.closest('.editor-paper').classList.toggle('is-readonly', isReadOnly)
-  document.querySelector('.editor-label').textContent = isReadOnly && historyEntry ? `版本 v${historyEntry.number} 快照（只读）` : isReadOnly ? '历史版本（只读）' : '正文'
+  document.querySelector('.editor-label').textContent = isReadOnly && historyEntry ? `版本 v${historyEntry.number} 快照（只读）` : isReadOnly ? '历史版本（只读）' : state.activeTab === 'references' ? '参考笔记' : '正文'
+  syncCurrentDocumentReferences()
   document.querySelectorAll('[data-action="undo"], [data-action="redo"], [data-action="save-snapshot"]').forEach((button) => {
     button.disabled = isReadOnly
   })
@@ -1052,10 +1118,13 @@ async function saveImmediately({ announce = true } = {}) {
   return saved
 }
 
-async function selectDocument(documentId) {
+async function selectDocument(documentId, { keepStoryboard = false } = {}) {
   if (projectTransition) return false
   if (state.candidateApplying) { showToast('正在保存候选，请稍候再切换内容'); return false }
   if (!state.documents[documentId]) return false
+  if (keepStoryboard && mediaWorkbench?.isStoryboardBusy?.()) {
+    mediaWorkbench.selectDocument(documentId); switchView('storyboard'); return true
+  }
   if (state.isGenerating && documentId !== state.currentDocId) stopGeneration()
   const projectId = activeProjectId
   if (!await saveImmediately({ announce: false })) return false
@@ -1064,7 +1133,8 @@ async function selectDocument(documentId) {
   state.workflowStep = null
   state.currentDocId = documentId
   state.activeTab = 'script'
-  switchView('workspace')
+  if (keepStoryboard) mediaWorkbench?.selectDocument?.(documentId)
+  switchView(keepStoryboard ? 'storyboard' : 'workspace')
   updateDocumentView({ keepFocus: true })
   const saved = await persistWorkspace()
   closeDrawers()
@@ -1103,10 +1173,11 @@ async function navigateCreationStep(step) {
     if (!await selectDocument(target)) return false
   } else {
     if (!await saveImmediately({ announce: false }) || owner !== activeProjectId || projectTransition) return false
-    switchView(step.view || 'workspace')
+    switchView(step.view || (step.id === 'export' && state.storyboard.shots.length ? 'storyboard' : 'workspace'))
     closeDrawers()
   }
   state.workflowStep = step.id
+  if (['storyboard', 'images', 'videos', 'export'].includes(step.id) && state.currentView === 'storyboard') mediaWorkbench?.showStage(step.id)
   creationNavigation?.render()
   return true
 }
@@ -1134,6 +1205,7 @@ function switchView(viewName) {
   if (['storyboard', 'assets'].includes(viewName)) mediaWorkbench?.refresh()
   if (state.currentView !== viewName) state.workflowStep = null
   state.currentView = viewName
+  elements.appShell.dataset.currentView = viewName
   document.querySelectorAll('.view-panel').forEach((panel) => {
     panel.hidden = panel !== view
   })
@@ -1149,37 +1221,33 @@ function switchView(viewName) {
   })
   elements.appShell.classList.toggle('secondary-view', !isProjectView(viewName))
   creationNavigation?.render()
-  if (!isProjectView(viewName)) closeDrawers()
+  if (!isProjectView(viewName)) closeDrawers({ preserveAssistant: true })
   else syncAssistantAccessibility()
-  document.querySelector('#workspaceMain').focus({ preventScroll: true })
+  const focusTarget = elements.appShell.classList.contains('assistant-open') ? elements.promptInput : document.querySelector('#workspaceMain')
+  focusTarget.focus({ preventScroll: true })
   window.requestAnimationFrame(() => { view.scrollTop = 0 })
 }
 
 function toggleAssistant(forceOpen) {
-  const usesDrawer = window.matchMedia('(max-width: 1099px)').matches
-  if (usesDrawer) {
-    const wasOpen = elements.appShell.classList.contains('assistant-open')
-    const shouldOpen = typeof forceOpen === 'boolean'
-      ? forceOpen
-      : !wasOpen
-    if (shouldOpen && !wasOpen) rememberDrawerOpener()
-    elements.appShell.classList.toggle('assistant-open', shouldOpen)
-    elements.appShell.classList.remove('assistant-collapsed')
-    syncAssistantAccessibility()
-    if (shouldOpen) window.setTimeout(() => elements.promptInput.focus(), 0)
-    else if (wasOpen) restoreDrawerFocus()
-  } else {
-    const shouldCollapse = typeof forceOpen === 'boolean'
-      ? !forceOpen
-      : !elements.appShell.classList.contains('assistant-collapsed')
-    elements.appShell.classList.toggle('assistant-collapsed', shouldCollapse)
-  }
+  const usesDrawer = window.matchMedia('(max-width: 1399px)').matches
+  const wasOpen = assistantExpanded
+  const focusInside = elements.assistantPanel.contains(document.activeElement)
+  assistantExpanded = typeof forceOpen === 'boolean' ? forceOpen : !wasOpen
+  if (assistantExpanded && !wasOpen && !(usesDrawer && elements.appShell.classList.contains('explorer-open'))) rememberDrawerOpener()
+  if (usesDrawer && assistantExpanded) elements.appShell.classList.remove('explorer-open')
   syncAssistantAccessibility()
+  if (usesDrawer && assistantExpanded) window.setTimeout(() => elements.promptInput.focus(), 0)
+  else if (wasOpen && (usesDrawer || focusInside)) restoreDrawerFocus()
 }
 
 function syncAssistantAccessibility() {
-  const usesDrawer = window.matchMedia('(max-width: 1099px)').matches
-  const isOpen = !elements.appShell.classList.contains('no-project') && isProjectView(state.currentView) && (usesDrawer
+  const usesDrawer = window.matchMedia('(max-width: 1399px)').matches
+  const projectVisible = !elements.appShell.classList.contains('no-project') && isProjectView(state.currentView)
+  if (elements.appShell.classList.contains('no-project')) assistantExpanded = false
+  if (!projectVisible) elements.appShell.classList.remove('explorer-open')
+  elements.appShell.classList.toggle('assistant-collapsed', !assistantExpanded)
+  elements.appShell.classList.toggle('assistant-open', usesDrawer && assistantExpanded && projectVisible)
+  const isOpen = projectVisible && (usesDrawer
     ? elements.appShell.classList.contains('assistant-open')
     : !elements.appShell.classList.contains('assistant-collapsed'))
   const topbarToggle = document.querySelector('.titlebar [data-action="toggle-assistant"]')
@@ -1189,13 +1257,24 @@ function syncAssistantAccessibility() {
   elements.assistantPanel.inert = !isOpen
   elements.assistantPanel.setAttribute('aria-hidden', String(!isOpen))
   const explorerUsesDrawer = window.matchMedia('(max-width: 899px)').matches
-  const explorerOpen = isProjectView(state.currentView) && explorerUsesDrawer && elements.appShell.classList.contains('explorer-open')
+  const explorerOpen = projectVisible && explorerUsesDrawer && elements.appShell.classList.contains('explorer-open')
   const explorerToggle = document.querySelector('[data-action="toggle-explorer"]')
   explorerToggle?.setAttribute('aria-expanded', String(explorerOpen))
   explorerToggle?.setAttribute('aria-label', explorerOpen ? '关闭内容导航' : '打开内容导航')
   explorerToggle?.setAttribute('title', explorerOpen ? '关闭内容导航' : '打开内容导航')
-  elements.resourceExplorer.inert = explorerUsesDrawer ? !explorerOpen : false
-  elements.resourceExplorer.setAttribute('aria-hidden', String(explorerUsesDrawer && !explorerOpen))
+  const explorerHidden = !projectVisible || elements.appShell.classList.contains('focus-mode') || (explorerUsesDrawer && !explorerOpen)
+  elements.resourceExplorer.inert = explorerHidden
+  elements.resourceExplorer.setAttribute('aria-hidden', String(explorerHidden))
+  const focusToggle = document.querySelector('[data-action="toggle-focus-mode"]')
+  if (focusToggle) {
+    const active = elements.appShell.classList.contains('focus-mode')
+    focusToggle.hidden = !projectVisible
+    focusToggle.classList.toggle('is-active', active)
+    focusToggle.setAttribute('aria-pressed', String(active))
+    focusToggle.setAttribute('aria-label', active ? '退出专注模式' : '进入专注模式')
+    focusToggle.setAttribute('title', active ? '退出专注模式' : '进入专注模式')
+    focusToggle.querySelector('span').textContent = active ? '退出专注' : '专注模式'
+  }
 
   const modalDrawerOpen = (usesDrawer && isOpen) || explorerOpen
   const backgroundTargets = ['.titlebar', '.activity-rail', '.main-surface', '.statusbar']
@@ -1207,18 +1286,34 @@ function syncAssistantAccessibility() {
   if (explorerOpen) elements.assistantPanel.inert = true
 }
 
-function closeDrawers() {
+function closeDrawers({ preserveAssistant = false, restoreFocus = true } = {}) {
   const hadOpenDrawer = elements.appShell.classList.contains('assistant-open') || elements.appShell.classList.contains('explorer-open')
+  if (!preserveAssistant && window.matchMedia('(max-width: 1399px)').matches && elements.appShell.classList.contains('assistant-open')) assistantExpanded = false
   elements.appShell.classList.remove('assistant-open', 'explorer-open')
   syncAssistantAccessibility()
-  if (hadOpenDrawer) restoreDrawerFocus()
+  if (hadOpenDrawer && restoreFocus) restoreDrawerFocus()
+}
+
+function setFocusMode(active) {
+  elements.appShell.classList.toggle('focus-mode', active)
+  syncAssistantAccessibility()
+}
+
+function focusProjectSearch() {
+  if (document.querySelector('dialog[open]') || elements.appShell.classList.contains('no-project')) return
+  if (!isProjectView(state.currentView)) switchView('workspace')
+  setFocusMode(false)
+  if (window.matchMedia('(max-width: 899px)').matches) toggleExplorer(true)
+  else { closeDrawers({ restoreFocus: false }); elements.treeSearch.focus() }
 }
 
 function toggleExplorer(forceOpen) {
   const usesDrawer = window.matchMedia('(max-width: 899px)').matches
   const wasOpen = elements.appShell.classList.contains('explorer-open')
   const shouldOpen = typeof forceOpen === 'boolean' ? forceOpen : !wasOpen
-  if (usesDrawer && shouldOpen && !wasOpen) rememberDrawerOpener()
+  if (shouldOpen) setFocusMode(false)
+  if (usesDrawer && shouldOpen && !wasOpen && !elements.appShell.classList.contains('assistant-open')) rememberDrawerOpener()
+  if (usesDrawer && shouldOpen) assistantExpanded = false
   elements.appShell.classList.toggle('explorer-open', shouldOpen)
   syncAssistantAccessibility()
   if (usesDrawer && shouldOpen) window.setTimeout(() => elements.treeSearch.focus(), 0)
@@ -1226,7 +1321,7 @@ function toggleExplorer(forceOpen) {
 }
 
 function focusAssistant() {
-  if (state.currentView !== 'workspace') switchView('workspace')
+  if (!isProjectView(state.currentView)) switchView('workspace')
   toggleAssistant(true)
   window.setTimeout(() => elements.promptInput.focus(), 180)
 }
@@ -1348,7 +1443,7 @@ const assistantProfiles = {
     actions: [
       ['强化悬念', '增加危险感与结尾钩子', '强化当前场景的悬念，增加危险感并设计一个更强的结尾钩子。'],
       ['续写场景', '延续当前语气和节奏', '续写当前场景，保持现有语气和节奏，不提前揭示关键真相。'],
-      ['检查连续性', '核对人物与既有设定', '检查当前场景是否与人物设定、世界观和前文冲突。'],
+      ['检查连续性', '先核对世界观与上一场', '检查当前场景是否与人物设定、世界观和前文冲突。', 'continuity'],
       ['打磨对白', '减少说明，保留潜台词', '将人物对白改得更自然，减少解释性台词。']
     ]
   }
@@ -1381,6 +1476,7 @@ function updateAssistantProfile() {
     button.querySelector('span').textContent = action[0]
     button.querySelector('small').textContent = action[1]
     button.dataset.prompt = action[2]
+    button.dataset.creativeAction = action[3] || ''
   })
   renderContextPreview()
 }
@@ -1404,13 +1500,30 @@ function projectOperationContext() {
   return { projectId: activeProjectId, workspace: workspaceSnapshot(), media: mediaWorkbench?.operationContext() }
 }
 
-function generationDraft(prompt, purpose = document.querySelector('#assistantRequestMode').value) {
+function prepareAssistantAction(prompt, creativeAction = '') {
+  if (state.isGenerating || state.generationInFlight || state.candidateApplying) return showToast('当前 AI 任务尚未结束，请稍候再准备新的请求')
+  elements.promptInput.value = prompt
+  state.creativeActionContext = creativeAction ? { action: creativeAction, projectId: activeProjectId, documentId: state.currentDocId, tabName: state.activeTab } : null
+  focusAssistant()
+  if (creativeAction === 'continuity') {
+    document.querySelector('#assistantRequestMode').value = 'discussion'
+    document.querySelector('#reviewExistingPlan').hidden = true
+    document.querySelector('#assistantContextSettings').open = true
+    document.querySelector('#contextPreviewSummary').closest('details').open = true
+    renderContextPreview()
+    showToast('已准备连续性检查，可在发送范围移除资料；确认后点击发送')
+  } else startGeneration(prompt)
+}
+
+function generationDraft(prompt, purpose = document.querySelector('#assistantRequestMode').value, creativeAction = null) {
   const discussionInstruction = purpose === 'discussion' ? '\n本次仅讨论与分析，给出建议，不提供可自动执行的项目操作，不声称修改项目。' : ''
   const availableObjects = contextObjects()
   const objectReferences = state.contextReferenceKeys.map(key => availableObjects.find(item => item.key === key))
   if (objectReferences.some(item => !item)) throw new Error('已引用对象或固定素材版本不再可用，请移除失效引用再发送。')
   const selectedText = state.includeSelectionContext ? editorSelection() : ''
   if (state.includeSelectionContext && !selectedText) throw new Error('编辑器选区已失效，请重新选择或关闭选区上下文。')
+  const actionContext = state.creativeActionContext
+  creativeAction ??= actionContext?.projectId === activeProjectId && actionContext.documentId === state.currentDocId && actionContext.tabName === state.activeTab ? actionContext.action : ''
   const draft = prepareGeneration({
     project: state.project, documentId: state.currentDocId, tabName: state.activeTab,
     documents: state.documents, tabContents: state.tabContents, structure: state.structure, prompt,
@@ -1418,6 +1531,7 @@ function generationDraft(prompt, purpose = document.querySelector('#assistantReq
     includeCharacters: document.querySelectorAll('.context-chip')[1]?.getAttribute('aria-pressed') === 'true',
     knowledgeChunks: getSelectedKnowledgeChunks(), includeCurrent: state.includeCurrentContext,
     selectedText, objectReferences, excludedContextKeys: [...state.excludedContextKeys.keys()],
+    creativeAction: ['text', 'discussion'].includes(purpose) ? creativeAction : '',
     characterLimit: GENERATION_CHARACTER_LIMIT - (purpose === 'project-plan' ? OPERATION_CONTEXT_RESERVE : discussionInstruction.length)
   })
   if (purpose === 'project-plan') return prepareOperationRequest(draft, captureOperationContext(projectOperationContext(), draft.summary))
@@ -1506,7 +1620,7 @@ function renderContextPreview(draft = null) {
   if (!getCurrentDocument()) { document.querySelector('#contextPreviewSummary').textContent = '创建或打开项目后查看发送范围'; return }
   try {
     const preview = draft || generationDraft(elements.promptInput.value.trim())
-    document.querySelector('#contextPreviewSummary').textContent = `发送范围 · ${preview.characters.toLocaleString('zh-CN')} 字符${preview.truncated ? ' · 部分已截断' : ''}`
+    document.querySelector('#contextPreviewSummary').textContent = `发送范围${preview.creativeAction === 'continuity' ? ' · 连续性检查' : ''} · ${preview.characters.toLocaleString('zh-CN')} 字符${preview.truncated ? ' · 部分已截断' : ''}`
     for (const item of preview.summary) {
       const line = document.createElement('li')
       const details = document.createElement('details'), summary = document.createElement('summary'), content = document.createElement('pre')
@@ -1526,6 +1640,9 @@ function renderContextPreview(draft = null) {
       restore.addEventListener('click', () => { state.excludedContextKeys.delete(key); renderContextPreview() }); excluded.append(restore)
     }
     if (!preview.summary.length) list.textContent = '未携带正文或资料，仅发送项目标题和创作要求。'
+    for (const message of preview.contextWarnings || []) {
+      const warning = document.createElement('li'); warning.textContent = message; list.append(warning)
+    }
   } catch (error) { list.textContent = readableError(error) }
 }
 
@@ -1536,6 +1653,7 @@ function buildGenerationMessages() {
 function appendGenerationDelta(delta, generationId = state.activeGenerationId) {
   if (!delta || !state.isGenerating || generationId !== state.activeGenerationId) return
   state.generationText += delta
+  mediaWorkbench?.updateStoryboardTask?.(generationId, { phase: 'receiving', characters: state.generationText.length })
   elements.candidateContent.textContent = state.generationText
   scheduleCandidateSave()
   elements.assistantConversation.scrollTop = elements.assistantConversation.scrollHeight
@@ -1572,6 +1690,7 @@ function confirmCliGeneration(connection, boundary, signal) {
 
 async function generateWithConnection(connection, prompt, generationId, submittedDraft = null) {
   let unlisten = null
+  state.generationInFlight = generationId
   const controller = new AbortController()
   state.generationAbortController = controller
   try {
@@ -1582,6 +1701,7 @@ async function generateWithConnection(connection, prompt, generationId, submitte
       : connection.driverId === 'codex'
         ? 'Codex 使用现有 CLI 登录态和模型设置，生成仍采用只读模式和临时工作目录。仅由 CLI 读取模型配置，不继承用户 hooks、MCP、execpolicy rules 或自定义供应商，不保留本次会话。只读不等于禁止读取本机信息。'
         : 'Claude 优先使用已配置 API Key；否则尝试已有 CLI 登录态。禁用内置工具、外部 MCP、技能和普通 hooks；不保留会话。组织托管策略仍可能生效，CLI 可能读取自身用户上下文。'
+    mediaWorkbench?.updateStoryboardTask?.(generationId, { phase: allowUserProfile ? 'confirming' : 'running' })
     if (allowUserProfile && !await confirmCliGeneration(connection, cliBoundary, controller.signal)) {
       if (generationId === state.activeGenerationId && state.isGenerating) {
         finishGeneration({ stopped: true, silent: true, generationId })
@@ -1594,6 +1714,7 @@ async function generateWithConnection(connection, prompt, generationId, submitte
       elements.promptInput.value = ''
       elements.promptInput.dispatchEvent(new Event('input', { bubbles: true }))
     }
+    mediaWorkbench?.updateStoryboardTask?.(generationId, { phase: 'running' })
     const messages = buildGenerationMessages(prompt)
     let response
     if (isDesktopRuntime) {
@@ -1662,18 +1783,23 @@ async function generateWithConnection(connection, prompt, generationId, submitte
     if (!state.generationText.trim()) throw new Error('执行端返回了空内容')
     connection.status = 'ready'
     connection.error = null
-    finishGeneration({ generationId })
+    if (connection.kind === 'cli') connection.lastExecution = { status: 'ready', error: null, at: new Date().toISOString() }
+    await finishGeneration({ generationId })
     renderConnections()
   } catch (error) {
+    if (generationId === state.activeGenerationId && !controller.signal.aborted) mediaWorkbench?.updateStoryboardTask?.(generationId, { phase: 'failed', message: readableError(error, '拆镜处理失败，候选已保留') })
     if (generationId !== state.activeGenerationId || error?.name === 'AbortError' || !state.isGenerating) return
     const message = readableError(error, '生成失败')
     connection.status = /login|登录|授权|密钥/i.test(message) ? 'auth_failed' : 'error'
     connection.error = message
+    if (connection.kind === 'cli') connection.lastExecution = { status: connection.status, error: message, at: new Date().toISOString() }
     renderConnections()
     await persistWorkspace()
     failGeneration(connection.error, generationId)
   } finally {
     unlisten?.()
+    if (state.generationInFlight === generationId) state.generationInFlight = null
+    mediaWorkbench?.releaseStoryboardTask?.(generationId)
     if (generationId === state.activeGenerationId) state.generationAbortController = null
   }
 }
@@ -1699,17 +1825,18 @@ function failGeneration(message, generationId = state.activeGenerationId) {
   updateCandidateCitations(state.generationContext?.knowledgeChunks || [])
   elements.a11yAnnouncements.textContent = `AI 生成失败：${message}`
   showToast(message)
+  mediaWorkbench?.updateStoryboardTask?.(generationId, { phase: 'failed', message })
   state.candidateStatus = 'error'
   rememberCurrentCandidate()
   renderCandidateDrafts()
   scheduleCandidateSave({ immediate: true })
 }
 
-function startGeneration(prompt, { clearComposer = true, purpose = null, connectionId = null, sourceFingerprint = '', storyboardRevision = null } = {}) {
+function startGeneration(prompt, { clearComposer = true, purpose = null, creativeAction = null, connectionId = null, sourceFingerprint = '', storyboardRevision = null, storyboardSourceFingerprint: sourceStoryboardFingerprint = '', storyboardTaskId = null } = {}) {
   if (state.candidateApplying) return showToast('候选正在保存，请稍候')
   if (!getCurrentDocument()) return openDialog(elements.newProjectDialog)
-  if (state.isGenerating) {
-    stopGeneration()
+  if (state.isGenerating || state.generationInFlight || (mediaWorkbench?.isStoryboardBusy?.() && !storyboardTaskId)) {
+    showToast('已有 AI 任务正在执行，请等待任务结束或停止后再发起新任务')
     return
   }
   const cleanPrompt = prompt.trim()
@@ -1734,14 +1861,25 @@ function startGeneration(prompt, { clearComposer = true, purpose = null, connect
     document.querySelector('#reviewExistingPlan').hidden = purpose !== 'project-plan'
   }
   let prepared
-  try { prepared = generationDraft(cleanPrompt, purpose) }
+  try { prepared = generationDraft(cleanPrompt, purpose, creativeAction) }
   catch (error) { showToast(readableError(error)); return }
   rememberCurrentCandidate()
   if (state.candidateDrafts.length >= MAX_CANDIDATE_DRAFTS) return showToast(`已保留 ${MAX_CANDIDATE_DRAFTS} 份待审稿，请先采纳或丢弃部分候选再生成`)
   renderContextPreview(prepared)
   state.lastPrompt = cleanPrompt
   const sequence = ++state.generationSequence
-  const generationId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${sequence}`
+  const generationId = storyboardTaskId || globalThis.crypto?.randomUUID?.() || `${Date.now()}-${sequence}`
+  if (purpose === 'storyboard' && mediaWorkbench?.reserveStoryboardTask) {
+    try {
+      if (!storyboardTaskId) mediaWorkbench.reserveStoryboardTask({ id: generationId, projectId: activeProjectId, documentId: state.currentDocId, title: getCurrentDocument().title })
+      const task = mediaWorkbench.getStoryboardTask(generationId)
+      if (task.projectId !== activeProjectId || task.documentId !== state.currentDocId) throw new Error('拆镜来源已切换，未执行其他分场')
+      mediaWorkbench.bindStoryboardTask(generationId)
+    } catch (error) {
+      if (!mediaWorkbench.getStoryboardTask(generationId)?.bound) mediaWorkbench.releaseStoryboardTask(generationId)
+      showToast(readableError(error)); return
+    }
+  }
   state.activeGenerationId = generationId
   state.activeCandidateId = generationId
   state.candidateCreatedAt = new Date().toISOString()
@@ -1751,8 +1889,10 @@ function startGeneration(prompt, { clearComposer = true, purpose = null, connect
   state.generationContext = {
     projectId: activeProjectId,
     purpose,
+    creativeAction: prepared.creativeAction || '',
     sourceFingerprint,
     storyboardRevision,
+    ...(purpose === 'storyboard' ? { storyboardSourceFingerprint: sourceStoryboardFingerprint || storyboardSourceFingerprint(state.storyboard, state.currentDocId) } : {}),
     operationContext: prepared.operationContext || null,
     documentId: state.currentDocId,
     tabName: state.activeTab,
@@ -1790,9 +1930,10 @@ function startGeneration(prompt, { clearComposer = true, purpose = null, connect
   scheduleCandidateSave({ immediate: true })
 
   generateWithConnection(connection, cleanPrompt, generationId, clearComposer && elements.promptInput.value.trim() === cleanPrompt ? elements.promptInput.value : null)
+  return generationId
 }
 
-function finishGeneration({ stopped = false, silent = false, generationId = state.activeGenerationId } = {}) {
+async function finishGeneration({ stopped = false, silent = false, generationId = state.activeGenerationId } = {}) {
   if (generationId !== state.activeGenerationId) return
   window.clearInterval(state.generationTimer)
   state.generationTimer = null
@@ -1815,11 +1956,17 @@ function finishGeneration({ stopped = false, silent = false, generationId = stat
     : 'AI 候选内容已生成，尚未写入正文'
   elements.a11yAnnouncements.textContent = announcement
   if (stopped && !silent) showToast(hasCandidate ? '已停止生成，部分内容仍可采纳' : '已停止生成，未收到候选内容')
-  if (hasCandidate && state.generationContext?.purpose === 'storyboard' && state.generationContext.projectId === activeProjectId) mediaWorkbench?.receiveCandidate(elements.candidateContent.textContent, state.generationContext, state.activeCandidateId)
   state.candidateStatus = stopped ? 'partial' : 'complete'
   rememberCurrentCandidate()
   renderCandidateDrafts()
   scheduleCandidateSave({ immediate: true })
+  if (state.generationContext?.purpose === 'storyboard') {
+    mediaWorkbench?.updateStoryboardTask?.(generationId, { phase: stopped ? 'cancelling' : 'saving', characters: state.generationText.length })
+    if (hasCandidate && state.generationContext.projectId === activeProjectId) {
+      const applied = await mediaWorkbench?.receiveCandidate(elements.candidateContent.textContent, state.generationContext, state.activeCandidateId, { autoApply: !stopped, createdAt: state.candidateCreatedAt })
+      if (!stopped) mediaWorkbench?.updateStoryboardTask?.(generationId, { phase: applied ? 'completed' : 'review', message: applied ? `已保存 ${applied} 个镜头，并关联可用角色参考图` : '候选已保留，请查看分场中的提示；未覆盖已有镜头' })
+    }
+  }
 }
 
 function stopGeneration() {
@@ -1878,7 +2025,7 @@ function renderCandidateDrafts() {
       }
       showSavedCandidate(draft)
     })
-    const hint = document.createElement('p'); hint.textContent = '切换内容后仍保留；重新生成会新增一稿。待审稿随项目备份。'
+    const hint = document.createElement('p'); hint.textContent = '旧分镜候选不会自动展示，请按生成时间选择一份打开。采纳或替换成功后移除对应候选，其他待审稿仍保留。'
     shelf.append(summary, label, select, hint)
     elements.assistantConversation.prepend(shelf)
     const review = document.createElement('details'); review.id = 'candidateDiffReview'; review.className = 'candidate-diff-review'
@@ -1894,7 +2041,7 @@ function renderCandidateDrafts() {
   for (const draft of [...state.candidateDrafts].reverse()) {
     const title = state.documents[draft.documentId]?.title || `${draft.context.title}（原文档已删除）`
     const status = { complete: '待审', partial: '部分内容', error: '生成未完成' }[draft.status]
-    const option = new Option(`${title} · ${tabs[draft.tabName]} · ${status} · ${draft.prompt.slice(0, 28)} · ${new Date(draft.createdAt).toLocaleString('zh-CN')}`, draft.id)
+    const option = new Option(`${candidateGeneratedAtLabel(draft.createdAt)} · ${title} · ${draft.context.purpose === 'storyboard' ? '分镜' : tabs[draft.tabName]} · ${status} · ${draft.prompt.slice(0, 28)}`, draft.id)
     select.append(option)
   }
   if (!state.activeCandidateId && state.candidateDrafts.length) select.prepend(new Option('选择一份待审稿', ''))
@@ -1922,6 +2069,8 @@ function renderCandidateDiff() {
 }
 
 function showSavedCandidate(draft) {
+  draft = state.candidateDrafts.find(item => item.id === draft?.id)
+  if (!draft) return
   if (state.isGenerating || state.candidateApplying) return
   state.activeCandidateId = draft.id
   state.candidateCreatedAt = draft.createdAt
@@ -1952,7 +2101,7 @@ function showSavedCandidate(draft) {
   elements.candidateCard.querySelector('.candidate-warning').textContent = purpose === 'discussion' ? '讨论建议 · 不修改项目' : purpose === 'project-plan' ? '项目修改计划 · 尚未执行' : '待审稿 · 尚未写入正文'
   document.querySelector('#sentContextMessages').textContent = JSON.stringify(draft.context.messages || [], null, 2)
   updateCandidateCitations(draft.context.knowledgeChunks || [])
-  if (purpose === 'storyboard' && draft.context.projectId === activeProjectId) mediaWorkbench?.receiveCandidate(draft.text, state.generationContext, draft.id)
+  if (purpose === 'storyboard' && draft.context.projectId === activeProjectId) mediaWorkbench?.receiveCandidate(draft.text, state.generationContext, draft.id, { createdAt: draft.createdAt })
   renderCandidateDrafts()
 }
 
@@ -1965,7 +2114,7 @@ function restoreDocumentCandidate() {
   }
   discardCandidate({ silent: true, remove: false, persist: false })
   const draft = candidateDraftsFor(state.candidateDrafts, state.currentDocId, state.activeTab).at(-1)
-  if (draft) showSavedCandidate(draft)
+  if (draft && draft.context.purpose !== 'storyboard') showSavedCandidate(draft)
   else renderCandidateDrafts()
 }
 
@@ -1980,7 +2129,7 @@ function discardCandidate({ silent = false, remove = true, persist = true } = {}
   }
   if (state.isGenerating) finishGeneration({ stopped: true, silent: true, generationId })
   const previousCount = state.candidateDrafts.length
-  if (remove && state.activeCandidateId) mediaWorkbench?.clearCandidate?.(state.activeCandidateId)
+  if (state.activeCandidateId && (remove || state.generationContext?.purpose === 'storyboard')) mediaWorkbench?.clearCandidate?.(state.activeCandidateId)
   if (remove && state.activeCandidateId) state.candidateDrafts = removeCandidateDraft(state.candidateDrafts, state.activeCandidateId)
   state.activeCandidateId = null
   state.generationText = ''
@@ -2202,6 +2351,7 @@ function openDialog(dialog) {
 function closeDialog(button) {
   const dialog = button.closest('dialog')
   if (dialog === elements.connectionDialog && document.querySelector('#connectionForm').dataset.saving === 'true') return
+  if (dialog?.id === 'cliSettingsDialog' && dialog.querySelector('form[data-saving="true"]')) return
   if (dialog === elements.connectionDialog) invalidateConnectionDraftTest()
   dialog?.close()
 }
@@ -2256,11 +2406,30 @@ function formatKnowledgeDate(value) {
 }
 
 function syncCurrentDocumentReferences() {
-  if (!state.tabContents[state.currentDocId]) return
+  let panel = document.querySelector('#referenceKnowledgePreview')
+  if (!panel) {
+    panel = document.createElement('details')
+    panel.id = 'referenceKnowledgePreview'
+    panel.className = 'scene-intent reference-knowledge-preview'
+    elements.scriptEditor.closest('.editor-paper').before(panel)
+  }
+  panel.hidden = state.activeTab !== 'references' || !state.tabContents[state.currentDocId]
+  if (panel.hidden) return
   const chunks = getSelectedKnowledgeChunks()
-  state.tabContents[state.currentDocId].references = chunks.length
-    ? `已选择的知识上下文\n\n${chunks.map((chunk, index) => `[K${String(index + 1).padStart(3, '0')}] ${chunk.content}\n来源：${chunk.name} / ${chunk.path}`).join('\n\n')}\n\n这些片段只会在“知识”上下文开关启用时随下一次请求发送。`
-    : tabFallbacks.references
+  const summary = document.createElement('summary')
+  summary.textContent = `已选知识资料 · ${chunks.length} 条（只读）`
+  const hint = document.createElement('p')
+  hint.textContent = '资料随知识选择与上下文开关更新；下方参考笔记单独保存。实际发送片段和截断情况可在 AI 助手的“发送范围”查看。'
+  panel.replaceChildren(summary, hint)
+  for (const [index, chunk] of chunks.entries()) {
+    const details = document.createElement('details'), title = document.createElement('summary'), content = document.createElement('pre')
+    title.textContent = `K${index + 1} · ${chunk.name} / ${chunk.path}`
+    content.textContent = chunk.content
+    details.append(title, content); panel.append(details)
+  }
+  if (!chunks.length) {
+    const empty = document.createElement('p'); empty.textContent = '未启用知识资料。可在知识库选择资料，并打开 AI 助手的知识上下文开关。'; panel.append(empty)
+  }
 }
 
 function renderKnowledgeSources() {
@@ -2790,6 +2959,7 @@ function renderRuntimeDrivers() {
       const isReady = driver.status === 'ready'
       const canGenerate = Boolean(isReady && driver.canGenerate && connection)
       const isVerified = canGenerate && connection.status === 'ready'
+      const executionFailed = ['auth_failed', 'error'].includes(connection?.lastExecution?.status || connection?.status)
       const isTranslated = driver.compatibility === 'translated'
       const requiresCredential = driver.executionStatus === 'credential_required'
       card.className = `connection-card${isReady ? '' : ' connection-card-muted'}`
@@ -2822,8 +2992,8 @@ function renderRuntimeDrivers() {
       const dot = document.createElement('span')
       dot.className = `status-dot ${isReady ? 'status-dot-success' : 'status-dot-muted'}`
       const status = document.createElement('span')
-      status.textContent = isVerified
-        ? '可用'
+      status.textContent = driver.credentialError ? '已安装 · 凭据读取失败' : isReady && executionFailed ? '已安装 · 上次调用失败' : isVerified
+        ? '已安装 · 上次调用成功'
         : !isReady
           ? driver.status === 'not_found' ? '未安装' : '检测失败 / 版本不兼容'
         : isTranslated
@@ -2841,7 +3011,7 @@ function renderRuntimeDrivers() {
       note.textContent = !isReady
         ? driver.status === 'not_found' ? '安装 CLI 后点击重新检测' : '请检查 CLI 版本与运行状态后重新检测；并非账号未授权'
         : driver.id === 'antigravity' && isReady
-        ? '先在终端运行 agy 登录；使用默认模型。每次调用需确认用户配置与额度，不是无工具模式。'
+        ? `先在终端运行 agy 登录；使用默认模型。每次调用需确认用户配置与额度，不是无工具模式。`
         : driver.id === 'codex' && isReady
           ? `沿用现有 Codex CLI 登录态。规划模型：${connection?.planningModel || '跟随本机 CLI 配置'}；不复用自定义供应商。已安装或已配置不代表账号可用。`
         : driver.id === 'claude' && isReady
@@ -2859,15 +3029,14 @@ function renderRuntimeDrivers() {
               : '可选'
       const actions = document.createElement('div')
       actions.className = 'connection-card-actions'
-      if (driver.id === 'codex' && connection) {
-        const modelButton = document.createElement('button')
-        modelButton.type = 'button'
-        modelButton.className = 'secondary-button compact-button'
-        modelButton.dataset.action = 'configure-cli-model'
-        modelButton.dataset.connectionId = connection.id
-        modelButton.textContent = '模型设置'
-        actions.append(modelButton)
-      }
+      const settingsButton = document.createElement('button')
+      settingsButton.type = 'button'
+      settingsButton.className = 'secondary-button compact-button'
+      settingsButton.dataset.action = 'configure-cli'
+      settingsButton.dataset.driverId = driver.id
+      settingsButton.setAttribute('aria-label', `${driver.name} 设置`)
+      settingsButton.textContent = '设置'
+      actions.append(settingsButton)
       if (canGenerate && getActiveConnection()?.id !== connection.id) {
         const useButton = document.createElement('button')
         useButton.type = 'button'
@@ -2881,6 +3050,12 @@ function renderRuntimeDrivers() {
         badge.className = 'default-badge'
         badge.textContent = activeProjectId ? '当前项目文字' : '全局文字默认'
         actions.append(badge)
+      }
+      if (driver.credentialError) note.textContent = `Claude 凭据读取失败：${driver.credentialError}。请检查钥匙串或在设置中移除工作台 Key；未改用 CLI 登录。`
+      else if (connection?.lastExecution || (executionFailed && connection?.error)) {
+        const last = connection.lastExecution
+        const when = last?.at ? new Date(last.at).toLocaleString('zh-CN', { hour12: false }) : '时间未记录'
+        note.textContent += ` 上次调用（${when}）：${last?.error || connection.error || '成功'}。重新检测只检查安装状态。`
       }
       card.append(brand, copy, capabilities, health, note, actions)
       fragment.append(card)
@@ -3076,7 +3251,7 @@ async function testConnection(button) {
 
 function syncCliConnections(drivers) {
   const executableIds = new Set()
-  drivers.filter((driver) => driver.canGenerate).forEach((driver) => {
+  drivers.filter((driver) => driver.canGenerate || driver.credentialError).forEach((driver) => {
     const connectionId = `cli-${driver.id}`
     executableIds.add(connectionId)
     let connection = state.connections.find((item) => item.id === connectionId && item.kind === 'cli')
@@ -3101,29 +3276,88 @@ function syncCliConnections(drivers) {
     connection.model = driver.version || connection.model
     connection.binaryArchitecture = driver.binaryArchitecture || null
     connection.compatibility = driver.compatibility || 'unknown'
-    connection.status = driver.status === 'ready'
-      ? connection.status === 'ready' ? 'ready' : 'installed'
+    // Discovery confirms installation only. Account results belong to the last real call.
+    const last = connection.lastExecution
+    const discoveryRecovered = connection.discoveryError && !driver.credentialError
+    connection.discoveryError = driver.credentialError || null
+    connection.status = driver.credentialError ? 'auth_failed' : driver.status === 'ready'
+      ? last?.status || (!discoveryRecovered && connection.status === 'ready' ? 'ready' : 'installed')
       : 'error'
-    connection.error = driver.status === 'ready' ? null : driver.status === 'not_found' ? '未发现可执行文件' : 'CLI 检测失败或版本不兼容，请重新检测'
+    connection.error = driver.credentialError || (driver.status === 'ready'
+      ? last?.error || null
+      : driver.status === 'not_found' ? '未发现可执行文件' : 'CLI 检测失败或版本不兼容，请重新检测')
   })
 
   state.connections.filter((connection) => connection.kind === 'cli' && !executableIds.has(connection.id)).forEach((connection) => {
     connection.status = 'error'
-    connection.error = '当前版本不允许通过该 CLI 生成'
+    const driver = drivers.find(item => item.id === connection.driverId)
+    connection.error = driver?.status === 'not_found' ? '未发现可执行文件' : '当前版本不允许通过该 CLI 生成'
   })
 }
 
-function openCliModelDialog(connectionId) {
-  if (projectTransition || state.isGenerating) return showToast('请先等待当前保存或文字任务完成，再设置规划模型')
-  const connection = state.connections.find(item => item.id === connectionId && item.kind === 'cli' && item.driverId === 'codex')
-  if (!connection) return showToast('未找到受支持的 Codex 连接，请先检测 CLI')
+function syncCliProxyFields() {
+  const manual = document.querySelector('#cliProxyMode').value === 'manual'
+  document.querySelector('#cliProxyAddressField').hidden = !manual
+  document.querySelector('#cliProxyAddress').disabled = !manual
+}
+
+async function openCliProxyDialog() {
+  if (!isDesktopRuntime) return showToast('浏览器版使用浏览器和运行服务的网络代理；此设置用于桌面工作台')
+  if (projectTransition || state.isGenerating) return showToast('请等待当前保存或文字任务完成，再设置代理')
+  const status = document.querySelector('#cliProxyStatus')
+  try {
+    const settings = await invokeDesktop('network_proxy_get')
+    document.querySelector('#cliProxyMode').value = settings.mode || 'auto'
+    document.querySelector('#cliProxyAddress').value = settings.url || ''
+    status.textContent = '对所有项目生效，保存后从下一次新建网络连接或 CLI 调用开始使用。'
+  } catch (error) {
+    document.querySelector('#cliProxyMode').value = 'auto'
+    document.querySelector('#cliProxyAddress').value = ''
+    status.textContent = readableError(error, '无法读取全局代理设置，可重新保存以修复')
+  }
+  syncCliProxyFields()
+  openDialog(document.querySelector('#cliProxyDialog'))
+}
+
+function openCliSettingsDialog(driverId) {
+  if (projectTransition || state.isGenerating) return showToast('请先等待当前保存或文字任务完成，再设置 CLI')
+  const driver = state.runtime.drivers.find(item => item.id === driverId)
+  if (!driver) return showToast('未找到此 CLI，请重新检测后再打开设置')
+  const connection = state.connections.find(item => item.kind === 'cli' && item.driverId === driver.id)
+  const dialog = document.querySelector('#cliSettingsDialog')
+  dialog.dataset.driverId = driver.id
+  document.querySelector('#cliSettingsTitle').textContent = `${driver.name} 设置`
+  const runtimeStatus = driver.status === 'ready' ? '已安装' : driver.status === 'not_found' ? '未安装 · 安装后请重新检测' : '检测失败 · 请检查版本后重新检测'
+  document.querySelector('#cliSettingsRuntime').textContent = [runtimeStatus, driver.version].filter(Boolean).join(' · ')
+  const descriptions = {
+    antigravity: '使用本机 Antigravity CLI 的登录和默认模型。在终端运行 agy 完成登录后即可在工作台选择；账号及模型由 CLI 管理。',
+    codex: '使用本机 Codex CLI 的已有登录。模型默认跟随 CLI 配置，可在下面为此连接指定规划模型。',
+    claude: 'API Key 为可选项。未提供 Key 时，工作台会尝试使用本机 Claude CLI 已有登录；尚未登录可在终端运行 claude auth login。',
+    gemini: '登录和模型由本机 Gemini CLI 管理。工作台目前仅支持安装检测，暂未开放 Gemini 的创作执行。'
+  }
+  document.querySelector('#cliSettingsSource').textContent = descriptions[driver.id] || '登录与模型由本机 CLI 管理。'
+  if (driver.id === 'codex' && !connection) document.querySelector('#cliSettingsSource').textContent += ' 安装并重新检测后，可在这里保存模型设置。'
   const form = document.querySelector('#cliModelForm')
-  form.dataset.connectionId = connection.id
+  form.hidden = driver.id !== 'codex' || !connection
+  form.dataset.connectionId = connection?.id || ''
   const input = document.querySelector('#cliPlanningModel')
-  input.value = connection.planningModel || ''
+  input.value = driver.id === 'codex' ? connection?.planningModel || '' : ''
   input.removeAttribute('aria-invalid')
   document.querySelector('#cliModelStatus').textContent = '保存不验证账号权限或消耗生成额度。生成失败不会自动更换模型、供应商或计费路径。'
-  openDialog(document.querySelector('#cliModelDialog'))
+  const credentialForm = document.querySelector('#claudeCredentialForm')
+  credentialForm.hidden = driver.id !== 'claude' || !isDesktopRuntime
+  document.querySelector('#claudeKeyDetails').open = false
+  document.querySelector('#removeClaudeKey').disabled = !(connection?.rememberSecret || sessionSecrets.has('cli-claude'))
+  document.querySelector('#claudeApiKey').value = ''
+  document.querySelector('#rememberClaudeKey').checked = Boolean(driver.id === 'claude' && connection?.rememberSecret)
+  document.querySelector('#claudeCredentialStatus').textContent = driver.id === 'claude' && connection?.rememberSecret
+    ? '已设置从 macOS 钥匙串读取 Key。留空保存保留现有设置。'
+    : driver.id === 'claude' && sessionSecrets.has('cli-claude') ? '已设置当前会话 Key。留空保存保留现有设置。' : '无需填写 API Key 即可关闭；未提供 Key 时尝试本机已有登录。'
+  if (driver.id === 'claude' && driver.credentialError) document.querySelector('#claudeCredentialStatus').textContent = `凭据读取失败：${driver.credentialError}。请重新保存 Key，或移除工作台 Key 后使用本机凭据。`
+  if (driver.id === 'claude' && !isDesktopRuntime) document.querySelector('#cliSettingsSource').textContent += ' 工作台内的可选 API Key 设置仅在桌面版提供。'
+  document.querySelector('#cliSettingsDone').hidden = !form.hidden || !credentialForm.hidden
+  openDialog(dialog)
+  window.setTimeout(() => (!form.hidden ? input : dialog.querySelector('[data-action="close-dialog"]'))?.focus(), 0)
 }
 
 async function detectRuntime() {
@@ -3147,11 +3381,14 @@ async function detectRuntime() {
       if (ollamaResponse.ok) ollamaPayload = await ollamaResponse.json()
     }
     if (isDesktopRuntime) {
-      const claudeConnection = state.connections.find(item => item.id === 'cli-claude') || { id: 'cli-claude', baseUrl: '', rememberSecret: false }
-      const secret = await connectionSecret(claudeConnection)
-      if (secret) {
-        const driver = runtime.drivers?.find(item => item.id === 'claude' && item.status === 'ready')
-        if (driver) { driver.canGenerate = true; driver.executionStatus = 'available' }
+      const claudeConnection = state.connections.find(item => item.id === 'cli-claude') || { id: 'cli-claude', kind: 'cli', driverId: 'claude', baseUrl: '', rememberSecret: false }
+      const driver = runtime.drivers?.find(item => item.id === 'claude')
+      try {
+        const secret = await connectionSecret(claudeConnection)
+        if (secret && driver?.status === 'ready') { driver.canGenerate = true; driver.executionStatus = 'available' }
+      } catch (error) {
+        // A locked/refused credential affects Claude only; never fall back to another identity.
+        if (driver) { driver.credentialError = readableError(error, 'Claude 凭据读取失败'); driver.canGenerate = false; driver.executionStatus = 'credential_error' }
       }
     }
     state.runtime = {
@@ -3598,8 +3835,7 @@ async function advanceStage() {
   }
   const nextDocument = { idea: 'brief', brief: 'world', world: 'characters', characters: 'outline' }[state.currentDocId]
   if (nextDocument) {
-    selectDocument(nextDocument)
-    showToast(`已进入${state.documents[nextDocument].title}，上一步内容会作为 AI 上下文`)
+    if (await selectDocument(nextDocument)) showToast(`已进入${state.documents[nextDocument].title}，上一步内容会作为 AI 上下文`)
     return
   }
   if (state.currentDocId === 'outline') {
@@ -3676,7 +3912,7 @@ async function handleAction(button, action) {
       parentId: button.dataset.parentId || getParentEpisodeId(state.currentDocId),
       actId: button.dataset.actId || null
     }); break
-    case 'select-doc': selectDocument(button.dataset.docId); break
+    case 'select-doc': selectDocument(button.dataset.docId, { keepStoryboard: state.currentView === 'storyboard' }); break
     case 'toggle-tree-group': {
       const act = state.structure.acts.find((item) => item.id === button.dataset.actId)
       if (!act) break
@@ -3686,9 +3922,8 @@ async function handleAction(button, action) {
       break
     }
     case 'toggle-focus-mode': {
-      const active = elements.appShell.classList.toggle('focus-mode')
-      button.classList.toggle('is-active', active)
-      button.setAttribute('aria-pressed', String(active))
+      const active = !elements.appShell.classList.contains('focus-mode')
+      setFocusMode(active)
       showToast(active ? '已进入专注模式' : '已退出专注模式')
       break
     }
@@ -3697,9 +3932,9 @@ async function handleAction(button, action) {
     case 'restore-version': restoreSelectedVersion(); break
     case 'undo': undoCustom(); break
     case 'redo': redoCustom(); break
-    case 'send-prompt': startGeneration(elements.promptInput.value); break
+    case 'send-prompt': if (state.isGenerating) stopGeneration(); else startGeneration(elements.promptInput.value); break
     case 'discard-candidate': discardCandidate(); break
-    case 'retry-generation': startGeneration(state.lastPrompt, { clearComposer: false, purpose: state.generationContext?.purpose || 'text', sourceFingerprint: state.generationContext?.sourceFingerprint || '', storyboardRevision: state.generationContext?.storyboardRevision ?? null }); break
+    case 'retry-generation': startGeneration(state.lastPrompt, { clearComposer: false, purpose: state.generationContext?.purpose || 'text', creativeAction: state.generationContext?.creativeAction || '', storyboardRevision: state.storyboard.revision, storyboardSourceFingerprint: storyboardSourceFingerprint(state.storyboard, state.currentDocId), sourceFingerprint: contentFingerprint(getCurrentContent()) }); break
     case 'review-project-plan': projectPlanUI?.open(elements.candidateContent.textContent, state.generationContext?.operationContext, { candidateId: state.activeCandidateId }); break
     case 'review-existing-plan': if (state.isGenerating) showToast('请先停止或等待当前任务'); else projectPlanUI?.open(); break
     case 'accept-candidate': acceptCandidate(); break
@@ -3767,8 +4002,8 @@ async function handleAction(button, action) {
     case 'test-connection': testConnection(button); break
     case 'test-all-connections': testAllConnections(button); break
     case 'detect-cli': detectRuntime(); break
-    case 'configure-claude': openDialog(document.querySelector('#claudeCredentialDialog')); break
-    case 'configure-cli-model': openCliModelDialog(button.dataset.connectionId); break
+    case 'configure-cli': openCliSettingsDialog(button.dataset.driverId); break
+    case 'configure-cli-proxy': openCliProxyDialog(); break
     case 'activate-connection': setActiveConnection(button.dataset.connectionId); break
     case 'open-terminal': showToast('已检测本机 CLI；执行能力将在受控桌面 Runner 中启用'); break
     case 'learn-local-model': openConnectionDialog('ollama-local'); break
@@ -3800,9 +4035,7 @@ document.addEventListener('click', (event) => {
   }
 
   if (button.dataset.prompt) {
-    elements.promptInput.value = button.dataset.prompt
-    focusAssistant()
-    startGeneration(button.dataset.prompt)
+    prepareAssistantAction(button.dataset.prompt, button.dataset.creativeAction)
     return
   }
 
@@ -3821,6 +4054,7 @@ document.addEventListener('click', (event) => {
   if (button.classList.contains('context-chip')) {
     const isPressed = button.getAttribute('aria-pressed') === 'true'
     button.setAttribute('aria-pressed', String(!isPressed))
+    syncCurrentDocumentReferences()
     renderContextPreview()
     return
   }
@@ -3858,12 +4092,7 @@ elements.scriptEditor.addEventListener('input', () => {
   scheduleSave()
 })
 
-elements.treeSearch.addEventListener('input', (event) => {
-  const query = event.target.value.trim().toLowerCase()
-  document.querySelectorAll('.tree-item, .scene-item').forEach((item) => {
-    item.hidden = Boolean(query) && !item.textContent.toLowerCase().includes(query)
-  })
-})
+elements.treeSearch.addEventListener('input', filterProjectTree)
 
 document.querySelector('#knowledgeSearch').addEventListener('input', (event) => {
   const query = event.target.value.trim().toLowerCase()
@@ -3901,10 +4130,12 @@ elements.commandInput.addEventListener('keydown', (event) => {
 })
 
 elements.promptInput.addEventListener('input', () => {
+  if (!elements.promptInput.value.trim()) state.creativeActionContext = null
   renderContextPreview()
   const prefix = elements.promptInput.value.slice(0, elements.promptInput.selectionStart)
   const match = prefix.match(/(?:^|\s)@([^\s@]*)$/u)
   if (match) {
+    document.querySelector('#assistantContextSettings').open = true
     document.querySelector('#contextObjectPicker').open = true
     document.querySelector('#contextObjectSearch').value = match[1]
     renderContextObjects()
@@ -3912,7 +4143,7 @@ elements.promptInput.addEventListener('input', () => {
 })
 document.querySelector('#addContextObject').addEventListener('click', () => {
   const picker = document.querySelector('#contextObjectPicker'); picker.open = !picker.open
-  if (picker.open) { document.querySelector('#contextObjectSearch').value = ''; renderContextObjects(); document.querySelector('#contextObjectSearch').focus() }
+  if (picker.open) { document.querySelector('#assistantContextSettings').open = true; document.querySelector('#contextObjectSearch').value = ''; renderContextObjects(); document.querySelector('#contextObjectSearch').focus() }
 })
 document.querySelector('#contextObjectSearch').addEventListener('input', renderContextObjects)
 document.querySelector('#contextObjectPicker').addEventListener('toggle', event => document.querySelector('#addContextObject').setAttribute('aria-expanded', String(event.target.open)))
@@ -3926,6 +4157,7 @@ elements.scriptEditor.addEventListener('select', () => { if (state.includeSelect
 document.querySelector('#resetContextScope').addEventListener('click', () => {
   state.includeCurrentContext = true; state.includeSelectionContext = false; state.excludedContextKeys.clear(); state.contextReferenceKeys = []
   document.querySelectorAll('.context-chip').forEach(chip => chip.setAttribute('aria-pressed', 'true'))
+  syncCurrentDocumentReferences()
   renderContextPreview()
 })
 
@@ -3937,6 +4169,7 @@ elements.promptInput.addEventListener('keydown', (event) => {
 })
 
 document.addEventListener('keydown', (event) => {
+  if (event.defaultPrevented || projectTransition) return
   const commandKey = event.metaKey || event.ctrlKey
   if (elements.connectionDialog.open && document.querySelector('#connectionForm').dataset.saving === 'true') {
     if (event.key === 'Escape' || (commandKey && ['k', 'p', 's'].includes(event.key.toLowerCase()))) event.preventDefault()
@@ -3948,8 +4181,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (commandKey && event.key.toLowerCase() === 'p') {
     event.preventDefault()
-    if (window.matchMedia('(max-width: 899px)').matches) toggleExplorer(true)
-    else document.querySelector('#treeSearch').focus()
+    focusProjectSearch()
   }
   if (commandKey && event.key.toLowerCase() === 's') {
     event.preventDefault()
@@ -4093,19 +4325,80 @@ function confirmProjectDeletion(project) {
   })
 }
 
+function requestAssetDraftDecision({ title, message, allowSave = false }) {
+  if (document.querySelector('#assetDraftDecisionDialog')) return Promise.resolve('cancel')
+  const returnTarget = document.activeElement
+  const dialog = document.createElement('dialog')
+  dialog.id = 'assetDraftDecisionDialog'; dialog.className = 'app-dialog form-dialog'
+  dialog.setAttribute('aria-labelledby', 'assetDraftDecisionTitle')
+  dialog.setAttribute('aria-describedby', 'assetDraftDecisionMessage')
+  const form = document.createElement('form'); form.method = 'dialog'
+  const heading = document.createElement('h2'); heading.id = 'assetDraftDecisionTitle'; heading.textContent = title
+  const description = document.createElement('p'); description.id = 'assetDraftDecisionMessage'; description.className = 'dialog-description'; description.textContent = message
+  const actions = document.createElement('div'); actions.className = 'dialog-actions'
+  for (const [value, label] of [['cancel', '取消'], ['discard', allowSave ? '放弃修改并归档' : '放弃这些修改'], ...(allowSave ? [['save', '保存并归档']] : [])]) {
+    const button = document.createElement('button')
+    button.type = 'submit'; button.value = value; button.textContent = label
+    button.className = value === 'save' ? 'primary-button' : 'secondary-button'
+    if (value === 'cancel') button.autofocus = true
+    actions.append(button)
+  }
+  form.append(heading, description, actions); dialog.append(form); document.body.append(dialog)
+  return new Promise(resolve => {
+    // A project-library dialog may remain open below this decision.
+    dialog.addEventListener('keydown', event => {
+      if (event.key !== 'Escape') return
+      event.preventDefault(); event.stopPropagation(); dialog.close('cancel')
+    })
+    dialog.addEventListener('close', () => {
+      const choice = dialog.returnValue
+      dialog.remove()
+      if (returnTarget?.isConnected) returnTarget.focus()
+      resolve(['save', 'discard'].includes(choice) ? choice : 'cancel')
+    }, { once: true })
+    dialog.showModal()
+  })
+}
+
+async function resolveAssetDraftsBeforeClose() {
+  let draft
+  while ((draft = mediaWorkbench?.pendingAssetDraft())) {
+    const project = listProjects().find(item => item.id === draft.projectId)
+    if (project) {
+      if (activeProjectId !== draft.projectId) await switchProject(draft.projectId)
+      if (activeProjectId !== draft.projectId) { showToast('尚未切回素材草稿所在项目，请稍后再关闭'); return false }
+      await mediaWorkbench.refresh()
+      if (mediaWorkbench.showAssetDraft(draft.assetId)) {
+        showToast('素材信息尚未保存，请保存或放弃修改后再关闭')
+        return false
+      }
+    }
+    const archived = !project && listArchivedProjects().some(item => item.id === draft.projectId)
+    const message = project ? '暂时无法定位待保存的素材。可取消后在素材库重新读取，或放弃此素材的未保存修改。'
+      : archived ? '素材草稿所属项目已归档。可取消后从项目库恢复项目再保存，或放弃该项目的未保存素材修改。'
+        : '素材草稿所属项目已不存在。放弃该项目的未保存素材修改后，即可继续关闭应用。'
+    if (await requestAssetDraftDecision({ title: '处理未保存的素材修改', message }) !== 'discard') return false
+    mediaWorkbench.discardAssetDrafts(draft.projectId, project ? draft.assetId : null)
+  }
+  return true
+}
+
 async function deleteSelectedProject(id) {
   if (projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy()) return
+  if (mediaWorkbench?.hasPendingWork()) return showToast('素材正在保存或同步，请稍后再删除项目')
   const project = [...listProjects(), ...listArchivedProjects()].find(item => item.id === id)
   if (!project) return showToast('未找到项目，请重新打开项目库')
   if (state.isGenerating) return showToast('请先停止当前文字生成，再删除项目')
   if (!await confirmProjectDeletion(project)) return
   if (projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy() || state.isGenerating) return
+  if (mediaWorkbench?.hasPendingWork()) return showToast('素材正在保存或同步，请稍后再删除项目')
   setProjectTransition(true)
   try {
     // Save only the project that survives deletion. A damaged/full target must remain deletable.
     if (activeProjectId !== id && !await saveImmediately({ announce: false })) return
     window.clearTimeout(state.saveTimer)
     const result = await deleteProject(id)
+    mediaWorkbench?.discardAssetDrafts(id)
     if (activeProjectId === id) loadProjectSnapshot(getActiveProject())
     await openProjectLibrary()
     showToast(result.cleanupPending ? '项目已删除，部分媒体文件待清理；重新打开应用时会自动重试' : '项目已永久删除')
@@ -4115,12 +4408,26 @@ async function deleteSelectedProject(id) {
 
 async function archiveCurrentProject() {
   if (!activeProjectId || projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy()) return
+  if (mediaWorkbench?.hasPendingWork()) return showToast('素材正在保存或同步，请稍后再归档')
+  const owner = activeProjectId
+  let draftChoice = null
+  if (mediaWorkbench?.pendingAssetDraft(owner)) {
+    draftChoice = await requestAssetDraftDecision({ title: '归档前处理素材修改', message: '当前项目有尚未保存的素材名称或用途。请选择保存、放弃这些修改，或取消归档继续编辑。', allowSave: true })
+    if (draftChoice === 'cancel') return
+  }
+  if (owner !== activeProjectId || projectTransition || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy()) return
+  if (mediaWorkbench?.hasPendingWork()) return showToast('素材正在保存或同步，请稍后再归档')
   setProjectTransition(true)
   try {
     if (state.isGenerating) stopGeneration()
+    if (draftChoice === 'save') {
+      await mediaWorkbench.saveAssetDrafts(owner)
+      if (mediaWorkbench.pendingAssetDraft(owner)) throw new Error('素材还有未保存修改，请完成保存后再归档')
+    }
     window.clearTimeout(state.saveTimer)
     if (state.activeTab !== 'history') setCurrentContent(elements.scriptEditor.value)
-    await archiveProject(activeProjectId, workspaceSnapshot(), state.knowledge.index)
+    await archiveProject(owner, workspaceSnapshot(), state.knowledge.index)
+    if (draftChoice === 'discard') mediaWorkbench.discardAssetDrafts(owner)
     loadProjectSnapshot(getActiveProject())
     showingArchivedProjects = false
     await openProjectLibrary()
@@ -4419,6 +4726,30 @@ document.querySelector('#connectionForm').addEventListener('submit', async (even
   }
 })
 
+document.querySelector('#cliProxyMode').addEventListener('change', syncCliProxyFields)
+document.querySelector('#cliProxyForm').addEventListener('submit', async event => {
+  event.preventDefault()
+  const form = event.currentTarget, status = document.querySelector('#cliProxyStatus')
+  if (form.dataset.saving === 'true' || projectTransition) return
+  if (state.isGenerating) { status.textContent = '请等待当前文字任务完成后再保存。'; return }
+  let settings
+  try { settings = validateCliProxy({ mode: document.querySelector('#cliProxyMode').value, url: document.querySelector('#cliProxyAddress').value }) }
+  catch (error) { status.textContent = error.message; document.querySelector('#cliProxyAddress').focus(); return }
+  const controls = [...form.querySelectorAll('input, select, button')]
+  form.dataset.saving = 'true'; controls.forEach(control => { control.disabled = true })
+  try {
+    await invokeDesktop('network_proxy_save', { settings })
+    document.querySelector('#globalProxyStatus').textContent = `当前模式：${({ auto: '自动', manual: '手动代理', direct: '直连' })[settings.mode]} · 全部项目共用`
+    document.querySelector('#cliProxyDialog').close()
+    showToast('全局代理已保存，所有执行端的新请求将使用此设置')
+  } catch (error) { status.textContent = readableError(error, '保存失败，原代理设置保留') }
+  finally {
+    form.dataset.saving = 'false'; controls.forEach(control => { control.disabled = false })
+    syncCliProxyFields()
+    if (!document.querySelector('#cliProxyDialog').open) document.querySelector('[data-action="configure-cli-proxy"]')?.focus()
+  }
+})
+
 document.querySelector('#cliPlanningModel').addEventListener('input', event => {
   event.target.removeAttribute('aria-invalid')
   document.querySelector('#cliModelStatus').textContent = '尚未保存。只保存模型选择，不调用生成或验证账号权限。'
@@ -4438,7 +4769,7 @@ document.querySelector('#cliModelForm').addEventListener('submit', async event =
     input.focus()
     return
   }
-  const previous = { planningModel: connection.planningModel, status: connection.status, error: connection.error }
+  const previous = { planningModel: connection.planningModel, status: connection.status, error: connection.error, lastExecution: connection.lastExecution }
   const controls = [...form.querySelectorAll('input, button')]
   const submit = form.querySelector('[type="submit"]')
   form.dataset.saving = 'true'; controls.forEach(control => { control.disabled = true }); submit.textContent = '保存中…'
@@ -4446,49 +4777,95 @@ document.querySelector('#cliModelForm').addEventListener('submit', async event =
   setProjectTransition(true)
   try {
     connection.planningModel = model
+    connection.lastExecution = null
     if (state.runtime.drivers.some(driver => driver.id === 'codex' && driver.status === 'ready')) {
       connection.status = 'installed'; connection.error = null
     } else if (connection.status === 'ready') connection.status = 'unknown'
     if (!await persistWorkspace({ onError: message => { status.textContent = `设置未保存：${message}。原设置和输入保留，请重试。` } })) {
       Object.assign(connection, previous)
       if (previous.planningModel === undefined) delete connection.planningModel
+      if (previous.lastExecution === undefined) delete connection.lastExecution
       renderConnections()
       return
     }
     cliSessionConsent = null
     renderConnections()
-    document.querySelector('#cliModelDialog').close()
+    document.querySelector('#cliSettingsDialog').close()
     showToast(model ? 'Codex 规划模型已保存；实际账号可用性尚未验证' : '已恢复使用 CLI 默认规划模型；不会自动挑选其他模型')
   } finally {
     form.dataset.saving = 'false'; controls.forEach(control => { control.disabled = false }); submit.textContent = '保存设置'
     setProjectTransition(false)
-    if (document.querySelector('#cliModelDialog').open) input.focus()
-    else document.querySelector('[data-action="configure-cli-model"][data-connection-id="cli-codex"]')?.focus()
+    if (document.querySelector('#cliSettingsDialog').open) input.focus()
+    else document.querySelector('[data-action="configure-cli"][data-driver-id="codex"]')?.focus()
   }
 })
 
-document.querySelector('#claudeCredentialForm').addEventListener('submit', async event => {
-  event.preventDefault()
+async function saveClaudeCredential({ remove = false } = {}) {
+  const form = document.querySelector('#claudeCredentialForm')
+  const status = document.querySelector('#claudeCredentialStatus')
+  if (form.dataset.saving === 'true' || projectTransition) return
+  if (state.isGenerating) { status.textContent = '请等待当前文字任务完成后再保存。'; return }
   const input = document.querySelector('#claudeApiKey')
   const secret = input.value.trim()
-  if (!isDesktopRuntime || !secret) return
-  const rememberSecret = document.querySelector('#rememberClaudeKey').checked
+  if (!isDesktopRuntime) return
+  if (!secret && !remove) {
+    document.querySelector('#cliSettingsDialog').close()
+    showToast('未填写新 API Key，现有 CLI 设置保持不变')
+    return
+  }
+  const rememberSecret = !remove && document.querySelector('#rememberClaudeKey').checked
+  const controls = [...form.querySelectorAll('input, button')]
+  form.dataset.saving = 'true'; controls.forEach(control => { control.disabled = true })
+  setProjectTransition(true)
   try {
-    let connection = state.connections.find(item => item.id === 'cli-claude')
-    if (rememberSecret || connection?.rememberSecret) await invokeDesktop('credential_save', { id: 'cli-claude', endpoint: '', secret: rememberSecret ? secret : '' })
-    if (!connection) {
-      connection = { id: 'cli-claude', kind: 'cli', driverId: 'claude', name: 'Claude Code', baseUrl: '', model: '', status: 'unknown', capabilities: ['受控 CLI'], isActive: false }
-      state.connections.push(connection)
+    const index = state.connections.findIndex(item => item.id === 'cli-claude')
+    const previous = index >= 0 ? state.connections[index] : null
+    const connection = { ...(previous || { id: 'cli-claude', kind: 'cli', driverId: 'claude', name: 'Claude Code', baseUrl: '', model: '', status: 'unknown', capabilities: ['受控 CLI'], isActive: false }), rememberSecret, status: 'installed', error: null, lastExecution: null, discoveryError: null }
+    const restoreConnection = () => {
+      if (previous) state.connections.splice(index, 1, previous)
+      else state.connections = state.connections.filter(item => item !== connection)
     }
-    connection.rememberSecret = rememberSecret
-    sessionSecrets.set(connection.id, secret)
+    if (previous) state.connections.splice(index, 1, connection)
+    else state.connections.push(connection)
+    if (!await persistWorkspace({ onError: message => { status.textContent = `设置未保存：${message}。现有 Key 保留，请重试。` } })) {
+      restoreConnection()
+      renderConnections()
+      return
+    }
+    try {
+      if (remove || rememberSecret || previous?.rememberSecret) await invokeDesktop('credential_save', { id: 'cli-claude', endpoint: '', secret: rememberSecret ? secret : '' })
+    } catch (error) {
+      restoreConnection()
+      const restored = await persistWorkspace({ onError: () => {} })
+      renderConnections()
+      throw new Error(`${readableError(error)}。新 Key 未用于当前会话。${restored ? '保存选项已恢复，请重试。' : '保存选项恢复失败，请保留窗口并重试。'}`)
+    }
+    // Do not switch the live credential until both metadata and keychain writes succeed.
+    if (remove) sessionSecrets.delete(connection.id)
+    else sessionSecrets.set(connection.id, secret)
     input.value = ''
-    if (!await persistWorkspace()) return
-    document.querySelector('#claudeCredentialDialog').close()
+    cliSessionConsent = null
+    document.querySelector('#cliSettingsDialog').close()
     await detectRuntime()
-    showToast('凭据已保存；请选择已检测到的 Claude CLI 执行创作')
-  } catch (error) { showToast(readableError(error)) }
+    showToast(remove ? '工作台 Claude Key 已移除；下次尝试本机凭据，启动环境中的 Key 仍可能优先于 CLI 登录' : 'Claude 可选 API Key 已保存；下次调用将使用该 Key，账号权限尚未验证')
+  } catch (error) { status.textContent = readableError(error); showToast(status.textContent) }
+  finally {
+    form.dataset.saving = 'false'; controls.forEach(control => { control.disabled = false })
+    document.querySelector('#removeClaudeKey').disabled = !(state.connections.find(item => item.id === 'cli-claude')?.rememberSecret || sessionSecrets.has('cli-claude'))
+    setProjectTransition(false)
+    if (document.querySelector('#cliSettingsDialog').open) {
+      document.querySelector('#claudeKeyDetails').open = true
+      input.focus()
+    }
+    else document.querySelector('[data-action="configure-cli"][data-driver-id="claude"]')?.focus()
+  }
+}
+
+document.querySelector('#claudeCredentialForm').addEventListener('submit', async event => {
+  event.preventDefault()
+  await saveClaudeCredential()
 })
+document.querySelector('#removeClaudeKey').addEventListener('click', () => saveClaudeCredential({ remove: true }))
 
 document.querySelector('#knowledgeForm').addEventListener('submit', async (event) => {
   event.preventDefault()
@@ -4512,20 +4889,24 @@ document.querySelector('#knowledgeForm').addEventListener('submit', async (event
 })
 
 document.querySelectorAll('dialog').forEach((dialog) => {
+  dialog.addEventListener('cancel', event => {
+    if (dialog.id === 'cliSettingsDialog' && dialog.querySelector('form[data-saving="true"]')) event.preventDefault()
+  })
   dialog.addEventListener('click', (event) => {
     if (event.target !== dialog) return
+    if (dialog.id === 'cliSettingsDialog' && dialog.querySelector('form[data-saving="true"]')) return
     const bounds = dialog.getBoundingClientRect()
     if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close()
   })
   dialog.addEventListener('close', () => {
     if (dialog === elements.connectionDialog) document.querySelector('#apiKey').value = ''
-    if (dialog.id === 'claudeCredentialDialog') document.querySelector('#claudeApiKey').value = ''
+    if (dialog.id === 'cliSettingsDialog') document.querySelector('#claudeApiKey').value = ''
     if (dialog === elements.commandDialog) {
       elements.commandInput.setAttribute('aria-expanded', 'false')
       elements.commandInput.removeAttribute('aria-activedescendant')
     }
-    const returnTarget = dialog.id === 'cliModelDialog'
-      ? [...document.querySelectorAll('[data-action="configure-cli-model"]')].find(button => button.dataset.connectionId === document.querySelector('#cliModelForm').dataset.connectionId) || dialogReturnFocus
+    const returnTarget = dialog.id === 'cliSettingsDialog'
+      ? [...document.querySelectorAll('[data-action="configure-cli"]')].find(button => button.dataset.driverId === dialog.dataset.driverId) || dialogReturnFocus
       : dialogReturnFocus
     if (returnTarget instanceof HTMLElement) returnTarget.focus()
     dialogReturnFocus = null
@@ -4533,15 +4914,13 @@ document.querySelectorAll('dialog').forEach((dialog) => {
 })
 
 window.addEventListener('resize', () => {
-  if (!window.matchMedia('(max-width: 1099px)').matches) {
-    elements.appShell.classList.remove('assistant-open')
-  }
   if (!window.matchMedia('(max-width: 899px)').matches) elements.appShell.classList.remove('explorer-open')
   syncAssistantAccessibility()
 })
 
 document.documentElement.dataset.theme = storedWorkspace.theme === 'dark' ? 'dark' : 'light'
 window.addEventListener('beforeunload', event => {
+  if (mediaWorkbench?.pendingAssetDraft()) { event.preventDefault(); event.returnValue = ''; return }
   if (unsavedEdits || pendingSaves || state.storageFailed || inspirationUI.dirty()) {
     event.preventDefault()
     if (inspirationUI.dirty()) {
@@ -4561,23 +4940,25 @@ if (isDesktopRuntime && window.__TAURI__.window?.getCurrentWindow) {
     closeRequestActive = true
     try {
     if (projectTransition || state.candidateApplying || state.knowledgeBusy) return showToast('内容正在保存，请稍候再关闭')
+    if (mediaWorkbench?.hasPendingWork()) return showToast('素材正在保存或同步，请稍候再关闭')
+    if (!await resolveAssetDraftsBeforeClose()) return
     if (state.isGenerating) stopGeneration()
     if (inspirationUI.dirty() && !await inspirationUI.save()) {
       switchView('inspirations')
       showToast('灵感尚未保存，请补全标题与正文后再关闭')
       return
     }
-    if (await saveImmediately({ announce: false }) && !unsavedEdits && !pendingSaves && !inspirationUI.dirty()) await appWindow.destroy()
+    if (await saveImmediately({ announce: false }) && !unsavedEdits && !pendingSaves && !inspirationUI.dirty() && !mediaWorkbench?.pendingAssetDraft() && !mediaWorkbench?.hasPendingWork()) await appWindow.destroy()
     } finally { closeRequestActive = false }
   }).catch(error => showToast(readableError(error, '关闭前保存监听失败，请手动保存')))
 }
 function initializeProjectMediaWorkbench() {
   return initializeMediaWorkbench({
-  getContext: () => ({ projectId: activeProjectId, project: state.project, documents: state.documents, currentDocId: state.currentDocId, connections: state.connections, workflow: state.workflow, storyboard: state.storyboard }),
-  commit: async (patch, { projectId, revision = null, immediate = true, resolvedCandidateId = null } = {}) => {
+  getContext: () => ({ projectId: activeProjectId, project: state.project, documents: state.documents, structure: state.structure, currentDocId: state.currentDocId, connections: state.connections, workflow: state.workflow, storyboard: state.storyboard, textGenerating: state.isGenerating || Boolean(state.generationInFlight), mutationBusy: projectTransition || state.candidateApplying }),
+  commit: async (patch, { projectId, revision = null, immediate = true, resolvedCandidateId = null, atomic = false } = {}) => {
     if (!activeProjectId || activeProjectId !== projectId || projectTransition) throw new Error('项目已切换或正在保存，未修改其他项目')
     if (revision !== null && state.storyboard.revision !== revision) throw new Error('分镜已有新的修改，请重试；未覆盖当前内容')
-    if (resolvedCandidateId) {
+    if (resolvedCandidateId || atomic) {
       if (state.isGenerating || state.candidateApplying) throw new Error('请先等待或停止当前任务')
       rememberCurrentCandidate()
       state.candidateApplying = true
@@ -4586,12 +4967,16 @@ function initializeProjectMediaWorkbench() {
         if (!await saveImmediately({ announce: false })) throw new Error('原项目保存失败，尚未采纳分镜')
         const next = structuredClone(workspaceSnapshot())
         next.storyboard = patch.storyboard
-        next.candidateDrafts = removeCandidateDraft(next.candidateDrafts, resolvedCandidateId)
+        if (resolvedCandidateId) next.candidateDrafts = removeCandidateDraft(next.candidateDrafts, resolvedCandidateId)
         validateWorkspace(next, state.knowledge.index)
         try { await saveProject(projectId, next, state.knowledge.index) }
         catch (error) { state.storageFailed = true; setSaveStatus('error'); throw error }
         state.storyboard = next.storyboard
         state.candidateDrafts = next.candidateDrafts
+        // Clear the active buffer before releasing the save lock, so a later
+        // workspace snapshot cannot put the resolved draft back into storage.
+        if (resolvedCandidateId && state.activeCandidateId === resolvedCandidateId) discardCandidate({ silent: true, remove: false, persist: false })
+        if (resolvedCandidateId) mediaWorkbench?.clearCandidate?.(resolvedCandidateId)
         editRevision += 1; unsavedEdits = false; state.storageFailed = false
         creationNavigation?.render(); setSaveStatus('saved')
       } finally { state.candidateApplying = false; setProjectTransition(false); renderCandidateDrafts() }
@@ -4610,9 +4995,14 @@ function initializeProjectMediaWorkbench() {
     editRevision += 1
     if (!await persistWorkspace()) throw new Error('保存失败，当前编辑仍保留，请重试保存或导出备份')
   },
-  getSavedCandidate: () => {
-    const drafts = state.candidateDrafts.filter(draft => draft.context.purpose === 'storyboard' && draft.context.projectId === activeProjectId)
-    return drafts.find(draft => draft.id === state.activeCandidateId) || drafts.at(-1) || null
+  openSavedCandidates: () => {
+    toggleAssistant(true)
+    renderCandidateDrafts()
+    const shelf = document.querySelector('#candidateDraftShelf')
+    if (!state.candidateDrafts.length) return showToast('暂无待审候选')
+    shelf.open = true
+    shelf.scrollIntoView({ block: 'nearest' })
+    document.querySelector('#candidateDraftSelect').focus()
   },
   onCandidateChange: (id, text) => {
     if (projectTransition || state.candidateApplying) throw new Error('项目正在保存，请稍后编辑候选')
@@ -4632,13 +5022,16 @@ function initializeProjectMediaWorkbench() {
   invoke: isDesktopRuntime ? invokeDesktop : null,
   secret: connectionSecret,
   beforeSubmit: async () => { if (!await saveImmediately({ announce: false })) throw new Error('请先保存当前项目再生成媒体') },
+  stopText: stopGeneration,
   requestText: async (prompt, metadata) => {
-    if (state.isGenerating) return showToast('请先等待当前文字任务完成或停止')
-    await selectDocument(metadata.documentId)
+    const owner = activeProjectId
+    if (state.isGenerating || state.generationInFlight) return showToast('请先等待当前文字任务完成或停止')
+    if (!await selectDocument(metadata.documentId) || owner !== activeProjectId) return false
     if (state.activeTab !== 'script') await switchTab('script')
-    switchView('workspace')
-    startGeneration(prompt, { ...metadata, clearComposer: false })
-    focusAssistant()
+    if (owner !== activeProjectId || state.currentDocId !== metadata.documentId || contentFingerprint(getCurrentContent()) !== metadata.sourceFingerprint) throw new Error('拆镜来源在准备期间已变化，请重新执行')
+    const started = startGeneration(prompt, { ...metadata, clearComposer: false })
+    switchView('storyboard')
+    return started
   },
   notify: showToast,
   navigate: switchView,
@@ -4659,7 +5052,6 @@ function initializeProjectMediaWorkbench() {
 
 document.querySelectorAll('svg.icon').forEach((icon) => icon.setAttribute('aria-hidden', 'true'))
 syncThemeControl()
-document.querySelector('#claudeCredentialButton').hidden = !isDesktopRuntime
 document.querySelector('#embeddingModel').value = state.knowledge.semantic?.model || ''
 renderProjectIdentity()
 renderKnowledge()
@@ -4692,6 +5084,7 @@ const inspirationUI = initializeInspirations({
 const updatesUI = initializeUpdates({
   invoke: isDesktopRuntime ? invokeDesktop : null, openDialog,
   beforeInstall: async () => {
+    if (mediaWorkbench?.pendingAssetDraft()) throw new Error('素材信息尚未保存，请在对应项目素材库保存或放弃修改后再更新')
     if (projectTransition || state.isGenerating || state.candidateApplying || state.knowledgeBusy || inspirationUI.isBusy() || mediaWorkbench?.hasPendingWork()) {
       throw new Error('请先等待当前生成、导入或保存任务结束')
     }
@@ -4773,3 +5166,11 @@ document.querySelector('#assistantRequestMode').addEventListener('change', () =>
   document.querySelector('#reviewExistingPlan').hidden = document.querySelector('#assistantRequestMode').value !== 'project-plan'
   renderContextPreview()
 })
+
+if (isDesktopRuntime) {
+  invokeDesktop('network_proxy_get').then(settings => {
+    document.querySelector('#globalProxyStatus').textContent = `当前模式：${({ auto: '自动', manual: '手动代理', direct: '直连' })[settings.mode || 'auto'] || '待配置'} · 全部项目共用`
+  }).catch(() => { document.querySelector('#globalProxyStatus').textContent = '配置读取失败，请打开代理设置重新保存' })
+} else {
+  document.querySelector('#globalProxyStatus').textContent = '浏览器版沿用浏览器与运行服务的代理设置'
+}

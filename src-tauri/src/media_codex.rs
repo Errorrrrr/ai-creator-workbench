@@ -418,6 +418,7 @@ pub(crate) async fn configured_model(
         return Err("已取消，尚未读取 Codex 模型设置".into());
     }
     let mut command = restricted_app_server(executable, task)?;
+    crate::system_proxy::configure_cli(&mut command, token).await?;
     if let Some(home) = std::env::var_os("CODEX_HOME") {
         command.env("CODEX_HOME", home);
     }
@@ -865,6 +866,7 @@ pub(crate) async fn generate(
     };
     let (profile, _profile_guard) = prepare_profile(&task)?;
     let mut command = restricted_app_server(&executable, &task)?;
+    crate::system_proxy::configure_cli(&mut command, token).await?;
     command
         .args(["--enable", "image_generation"])
         .env("CODEX_HOME", &profile);

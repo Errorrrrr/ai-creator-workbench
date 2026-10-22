@@ -282,6 +282,9 @@ function nativeCloseHarness({ inspirationDirty = true } = {}) {
   }
   const context = vm.createContext({
     isDesktopRuntime: true, projectTransition: false, state: { candidateApplying: false, knowledgeBusy: false },
+    activeProjectId: 'p1', listProjects: () => [{ id: 'p1' }], listArchivedProjects: () => [],
+    requestAssetDraftDecision: async () => 'cancel',
+    mediaWorkbench: { hasPendingWork: () => false, pendingAssetDraft: () => null },
     window: { __TAURI__: { window: { getCurrentWindow: () => appWindow } } },
     inspirationUI: {
       dirty: () => dirty,
@@ -295,7 +298,7 @@ function nativeCloseHarness({ inspirationDirty = true } = {}) {
   const start = appSource.indexOf('if (isDesktopRuntime && window.__TAURI__.window?.getCurrentWindow) {')
   const end = appSource.indexOf("document.querySelectorAll('svg.icon')", start)
   assert.ok(start >= 0 && end > start, 'the actual native-close registration must be extractable')
-  vm.runInContext(appSource.slice(start, end), context)
+  vm.runInContext(`${productionFunction('resolveAssetDraftsBeforeClose')}\n${appSource.slice(start, end)}`, context)
   assert.equal(typeof callback, 'function')
   return { inspirationSave, projectSave, events, context, close: () => callback({ preventDefault: () => events.push('prevent-close') }), setDirty: value => { dirty = value } }
 }
@@ -304,6 +307,7 @@ test('原生关闭先等待灵感保存，再等待项目保存，两者成功�
   const harness = nativeCloseHarness()
   let finished = false
   const pending = harness.close().then(() => { finished = true })
+  await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(harness.events, ['prevent-close', 'inspiration-save'])
   assert.equal(finished, false)
   harness.inspirationSave.resolve(true)
@@ -329,6 +333,7 @@ test('原生关闭遇到灵感保存失败，留在灵感页且不保存项目�
 test('原生关闭遇到项目保存失败也保留窗口', async () => {
   const harness = nativeCloseHarness({ inspirationDirty: false })
   const pending = harness.close()
+  await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(harness.events, ['prevent-close', 'project-save'])
   harness.projectSave.resolve(false)
   await pending
@@ -338,6 +343,8 @@ test('原生关闭遇到项目保存失败也保留窗口', async () => {
 test('关闭保存期间再次出现灵感修改时，不销毁窗口', async () => {
   const harness = nativeCloseHarness({ inspirationDirty: false })
   const pending = harness.close()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.ok(harness.events.includes('project-save'))
   harness.setDirty(true)
   harness.projectSave.resolve(true)
   await pending
@@ -351,4 +358,22 @@ test('项目正在切换或恢复时，原生关闭不能插入保存或销毁�
   assert.ok(harness.events.some(event => event.startsWith('toast:')))
   assert.ok(!harness.events.includes('project-save'))
   assert.ok(!harness.events.includes('destroy'))
+})
+
+
+test('原生关闭定位未保存素材，保存期间新出现草稿也不销毁窗口', async () => {
+  const h = nativeCloseHarness({ inspirationDirty: false })
+  h.context.activeProjectId = 'p1'
+  h.context.mediaWorkbench = { hasPendingWork: () => false, pendingAssetDraft: () => ({ projectId: 'p1', assetId: 'a1' }), refresh: async () => {}, showAssetDraft: id => h.events.push(`asset:${id}`) }
+  await h.close()
+  assert.ok(h.events.includes('asset:a1'))
+  assert.ok(!h.events.includes('destroy'))
+  assert.ok(!h.events.includes('project-save'))
+  h.context.mediaWorkbench.pendingAssetDraft = () => null
+  const closing = h.close()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.ok(h.events.includes('project-save'))
+  h.context.mediaWorkbench.pendingAssetDraft = () => ({ projectId: 'p1', assetId: 'a1' })
+  h.projectSave.resolve(true); await closing
+  assert.ok(!h.events.includes('destroy'))
 })

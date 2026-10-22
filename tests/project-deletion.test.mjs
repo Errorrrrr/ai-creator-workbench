@@ -8,7 +8,7 @@ const handler = source.slice(source.indexOf('async function deleteSelectedProjec
 function harness({ confirm = true, save = true, failure = false, current = 'a', generating = false } = {}) {
   const calls = { saves: 0, deleted: [], loaded: 0, messages: [], locks: [] }
   const context = vm.createContext({
-    projectTransition: false, activeProjectId: current,
+    projectTransition: false, activeProjectId: current, mediaWorkbench: null,
     state: { candidateApplying: false, knowledgeBusy: false, isGenerating: generating },
     inspirationUI: { isBusy: () => false },
     listProjects: () => [{ id: 'a', name: '甲' }], listArchivedProjects: () => [{ id: 'b', name: '乙' }],

@@ -9,6 +9,7 @@ mod media_video;
 mod project_deletion;
 mod runtime;
 mod storage;
+mod system_proxy;
 mod updater;
 mod updates;
 mod video_export;
@@ -18,6 +19,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            system_proxy::initialize(app.handle()).map_err(std::io::Error::other)?;
+            Ok(())
+        })
         .manage(updater::UpdateRuntime::default())
         .register_uri_scheme_protocol("workbench-media", |context, request| {
             media::protocol(context.app_handle(), request)
@@ -26,6 +31,8 @@ pub fn run() {
         .manage(media_jobs::MediaRuntime::default())
         .manage(media::FileChooserRuntime::default())
         .invoke_handler(tauri::generate_handler![
+            system_proxy::network_proxy_get,
+            system_proxy::network_proxy_save,
             updates::app_version,
             updates::check_for_updates,
             updates::open_update_link,

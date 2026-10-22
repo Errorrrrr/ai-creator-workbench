@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { MAX_CANDIDATE_DRAFTS, validateCandidateDrafts, candidateDraftsFor, upsertCandidateDraft, removeCandidateDraft } from '../src/candidate-drafts.js'
+import { candidateGeneratedAtLabel, MAX_CANDIDATE_DRAFTS, validateCandidateDrafts, candidateDraftsFor, upsertCandidateDraft, removeCandidateDraft } from '../src/candidate-drafts.js'
 import { projectBackup, parseBackup, validateWorkspace } from '../src/project-store.js'
 import { captureOperationContext } from '../src/project-operations.js'
 import { prepareGeneration } from '../src/creation-workflow.js'
@@ -89,10 +89,18 @@ test('candidate schema rejects malformed fields, unknown fields and mismatched c
   for (const patch of [
     { projectId: '' }, { documentId: 'other' }, { tabName: 'outline' }, { purpose: 'execute' },
     { selectionStart: -1 }, { selectionEnd: 500 }, { storyboardRevision: -1 },
-    { sourceFingerprint: {} }, { unknownContext: 'preserve or reject' },
+    { sourceFingerprint: {} }, { creativeAction: 'execute' }, { unknownContext: 'preserve or reject' },
     { messages: [{ role: 'user', content: '正文', tool_calls: [] }] },
     { messages: [{ role: 'tool', content: '正文' }] }, { knowledgeChunks: null }
   ]) assert.throws(() => validateCandidateDrafts([{ ...draft(), context: { ...draft().context, ...patch } }]))
+})
+
+test('连续性操作类型随候选保存，旧候选仍兼容', () => {
+  const candidate = draft()
+  assert.doesNotThrow(() => validateCandidateDrafts([candidate]))
+  candidate.context.creativeAction = 'continuity'
+  const restored = candidateDraftsFor(upsertCandidateDraft([], candidate), candidate.documentId, candidate.tabName)
+  assert.equal(restored[0].context.creativeAction, 'continuity')
 })
 
 test('structured credentials and connection configuration never enter saved candidates', () => {
@@ -163,4 +171,13 @@ test('project backup and restore preserve candidates for deleted documents with 
   assert.doesNotThrow(() => validateWorkspace({ ...data, candidateDrafts: undefined }))
   assert.throws(() => parseBackup(serialized.replace('"status":"complete"', '"status":"complete","authorization":"Bearer test"')), /未知字段/)
   assert.throws(() => validateWorkspace({ ...data, candidateDrafts: null }), /待审稿/)
+})
+
+
+test('生成时间显示真实日期与秒，未知旧时间不伪装成当前时间', () => {
+  const label = candidateGeneratedAtLabel('2026-10-22T13:14:15+08:00')
+  assert.match(label, /生成时间：2026/)
+  assert.match(label, /:15/)
+  assert.equal(candidateGeneratedAtLabel(null), '生成时间：未记录（旧候选）')
+  assert.equal(candidateGeneratedAtLabel('invalid'), '生成时间：未记录（旧候选）')
 })

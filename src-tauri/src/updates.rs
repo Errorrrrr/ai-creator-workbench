@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use reqwest::{Client, Url};
+use reqwest::Url;
 use semver::Version;
 use serde::Serialize;
 use serde_json::Value;
@@ -289,7 +289,8 @@ pub(crate) fn app_version(app: tauri::AppHandle) -> String {
 }
 
 pub(crate) async fn fetch_manifest(app: &tauri::AppHandle) -> Result<Option<Value>, String> {
-    let client = Client::builder()
+    let client = crate::system_proxy::http_builder()
+        .await?
         .connect_timeout(Duration::from_secs(5))
         .timeout(CHECK_TIMEOUT)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {

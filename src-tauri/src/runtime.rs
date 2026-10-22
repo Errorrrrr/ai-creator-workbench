@@ -307,7 +307,8 @@ pub(crate) async fn embed_text(
         return Err("Embedding 请求参数超出限制".into());
     }
     let url = validate_base_url("ollama", &base_url)?;
-    let client = reqwest::Client::builder()
+    let client = crate::system_proxy::http_builder()
+        .await?
         .timeout(Duration::from_secs(60))
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -573,8 +574,9 @@ async fn inspect_cli(driver: &CliDriverDefinition) -> CliDriverStatus {
     }
 }
 
-pub(crate) fn http_client(timeout_duration: Duration) -> Result<Client, String> {
-    Client::builder()
+pub(crate) async fn http_client(timeout_duration: Duration) -> Result<Client, String> {
+    crate::system_proxy::http_builder()
+        .await?
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout_duration)
         .redirect(reqwest::redirect::Policy::none())
@@ -656,7 +658,7 @@ fn provider_status_error(status: StatusCode) -> String {
 }
 
 async fn detect_ollama(base_url: &str) -> OllamaStatus {
-    let Ok(client) = http_client(Duration::from_millis(2500)) else {
+    let Ok(client) = http_client(Duration::from_millis(2500)).await else {
         return OllamaStatus {
             status: "not_running".into(),
             models: Vec::new(),
@@ -757,7 +759,7 @@ pub(crate) async fn connection_test(
 ) -> Result<ConnectionTestResult, String> {
     let started_at = Instant::now();
     let base_url = validate_base_url(&input.kind, &input.base_url)?;
-    let client = http_client(TEST_TIMEOUT)?;
+    let client = http_client(TEST_TIMEOUT).await?;
     let token = CancellationToken::new();
     let request = if input.kind == "openai-compatible" {
         let api_key = input
@@ -1108,7 +1110,7 @@ async fn generate_provider(
     if request.model.trim().is_empty() {
         return Err("请先选择模型".into());
     }
-    let client = http_client(PROVIDER_TOTAL_TIMEOUT)?;
+    let client = http_client(PROVIDER_TOTAL_TIMEOUT).await?;
     let response = if request.kind == "openai-compatible" {
         let api_key = request
             .api_key
@@ -1201,7 +1203,17 @@ pub(crate) async fn terminate_and_reap(child: &mut Child, process_group_id: Opti
 
 pub(crate) fn sanitize_cli_error(diagnostics: &str) -> &'static str {
     let value = diagnostics.to_lowercase();
-    if ["login", "auth", "api key", "credential", "unauthorized"]
+    if [
+        "user location is not supported",
+        "unsupported_country_region_territory",
+        "country is not supported",
+        "region is not supported",
+    ]
+    .iter()
+    .any(|pattern| value.contains(pattern))
+    {
+        "CLI 上游服务不支持当前账号或请求所在地区；请使用可用的其他执行端"
+    } else if ["login", "auth", "api key", "credential", "unauthorized"]
         .iter()
         .any(|pattern| value.contains(pattern))
     {
@@ -1372,6 +1384,7 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
             }
         }
     }
+    crate::system_proxy::configure_cli(&mut command, token).await?;
     for name in ["LANG", "LC_ALL", "LC_CTYPE"] {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
@@ -1471,6 +1484,13 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
                 model,
             ));
         }
+        if driver_id == "antigravity" {
+            return Err(antigravity_execution_error(
+                &String::from_utf8_lossy(&stderr),
+                &String::from_utf8_lossy(&stdout),
+            )
+            .into());
+        }
         return Err(sanitize_cli_error(&String::from_utf8_lossy(&stderr)).into());
     }
     let output = String::from_utf8_lossy(&stdout).trim().to_owned();
@@ -1495,6 +1515,28 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
     Ok(output)
 }
 
+fn antigravity_execution_error(diagnostics: &str, output: &str) -> &'static str {
+    let mut category = sanitize_cli_error(diagnostics);
+    for line in output.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if event["event"] != "result" || event["result"]["status"] == "SUCCESS" {
+            continue;
+        }
+        let error = &event["result"]["error"];
+        let message = error
+            .as_str()
+            .or_else(|| error["message"].as_str())
+            .unwrap_or("");
+        let classified = sanitize_cli_error(message);
+        if classified != sanitize_cli_error("") {
+            category = classified;
+        }
+    }
+    category
+}
+
 fn parse_antigravity_output(output: &str) -> Result<String, String> {
     let mut result = None;
     for line in output.lines().filter(|line| !line.trim().is_empty()) {
@@ -1509,7 +1551,7 @@ fn parse_antigravity_output(output: &str) -> Result<String, String> {
     }
     let result = result.ok_or("Antigravity 未返回完整结果")?;
     if result["status"] != "SUCCESS" {
-        return Err(sanitize_cli_error(result["error"].as_str().unwrap_or("")).into());
+        return Err(antigravity_execution_error("", output).into());
     }
     let text = result["response"]
         .as_str()
@@ -1765,6 +1807,34 @@ mod tests {
         assert!(parse_antigravity_output("invalid-json").is_err());
     }
 
+    #[test]
+    fn antigravity_reports_region_refusal_without_exposing_raw_diagnostics() {
+        for error in [
+            json!("User location is not supported for the API use. secret-token"),
+            json!({"message":"User location is not supported for the API use.","token":"secret-token"}),
+        ] {
+            let output =
+                json!({"event":"result","result":{"status":"ERROR","error":error}}).to_string();
+            let message = antigravity_execution_error("process failed", &output);
+            assert!(message.contains("所在地区"));
+            assert!(!message.contains("secret-token"));
+            assert_eq!(parse_antigravity_output(&output).unwrap_err(), message);
+        }
+        let output = json!({"event":"result","result":{"status":"SUCCESS","response":"User location is not supported"}}).to_string();
+        assert_eq!(
+            antigravity_execution_error("", &output),
+            sanitize_cli_error("")
+        );
+        assert_eq!(
+            antigravity_execution_error(
+                "",
+                &json!({"event":"user","message":{"content":"User location is not supported"}})
+                    .to_string()
+            ),
+            sanitize_cli_error("")
+        );
+    }
+
     /// A loopback mock verifies the HTTP parser/callback together, without any real model.
     #[tokio::test]
     async fn http_stream_emits_delta_before_response_completes() {
@@ -1786,6 +1856,7 @@ mod tests {
             socket.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\" second\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n").unwrap();
         });
         let response = http_client(Duration::from_secs(5))
+            .await
             .unwrap()
             .get(format!("http://{address}"))
             .send()
@@ -1813,6 +1884,7 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
         let request = http_client(Duration::from_secs(1))
+            .await
             .unwrap()
             .get("http://127.0.0.1:1");
         assert_eq!(
@@ -1838,6 +1910,7 @@ mod tests {
             delta_receiver.recv_timeout(Duration::from_secs(3)).unwrap();
         });
         let response = http_client(Duration::from_secs(5))
+            .await
             .unwrap()
             .get(format!("http://{address}"))
             .send()

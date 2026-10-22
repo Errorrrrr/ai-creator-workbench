@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import { providerEndpointUrl, validateProviderBaseUrl } from '../src/provider-stream.js'
+import { createStoryboardTasks } from '../src/storyboard-tasks.js'
 import { prepareGeneration } from '../src/creation-workflow.js'
 
 const source = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8')
@@ -117,7 +118,7 @@ function desktopGenerationHarness({ secret } = {}) {
   const state = { activeGenerationId: 'test-task', isGenerating: true, generationText: '', generationContext: { messages: prepared.messages, knowledgeChunks: prepared.knowledgeChunks } }
   const elements = { candidateContent: { textContent: '' }, assistantConversation: { scrollTop: 0, scrollHeight: 0 } }
   const context = vm.createContext({
-    state, elements, AbortController, isDesktopRuntime: true, validateProviderBaseUrl,
+    state, elements, AbortController, isDesktopRuntime: true, validateProviderBaseUrl, mediaWorkbench: null,
     connectionSecret: secret || (async () => 'mock-only'), renderConnections() {}, readableError: error => error.message,
     persistWorkspace: async () => true, scheduleCandidateSave() {},
     finishGeneration: () => { calls.finish++; state.isGenerating = false },
@@ -127,7 +128,7 @@ function desktopGenerationHarness({ secret } = {}) {
   })
   vm.runInContext(source.slice(source.indexOf('function buildGenerationMessages('), source.indexOf('\nlet cliSessionConsent')), context)
   vm.runInContext(source.slice(source.indexOf('async function generateWithConnection('), source.indexOf('\nfunction failGeneration(')), context)
-  return { input, calls, state, elements, invoked, run: () => context.generateWithConnection({ id: 'mock', kind: 'openai-compatible', baseUrl: 'https://example.invalid/v1', model: 'mock' }, 'original', 'test-task'), emit: payload => listener({ payload }), complete: output => deliver({ output }) }
+  return { input, calls, state, elements, invoked, context, run: () => context.generateWithConnection({ id: 'mock', kind: 'openai-compatible', baseUrl: 'https://example.invalid/v1', model: 'mock' }, 'original', 'test-task'), emit: payload => listener({ payload }), complete: output => deliver({ output }) }
 }
 
 test('desktop event integration sends frozen context, filters task IDs and removes the listener', async () => {
@@ -178,4 +179,43 @@ test('a desktop result arriving after stop does not overwrite the retained parti
   assert.equal(harness.state.generationText, '保留半段')
   assert.equal(harness.calls.finish, 0)
   assert.equal(harness.calls.unlisten, 1)
+})
+
+
+test('拆镜关联真实执行任务，保存完成和执行端退出前均保持占用', async () => {
+  for (const stopped of [false, true]) {
+    const h = desktopGenerationHarness()
+    const tasks = createStoryboardTasks()
+    tasks.reserve({ id: 'test-task', projectId: 'p', documentId: 's1' }); tasks.bind('test-task')
+    h.context.mediaWorkbench = { updateStoryboardTask: (id, patch) => tasks.update(id, patch), releaseStoryboardTask: id => tasks.release(id) }
+    let finishSave
+    let saving
+    const enteredSave = new Promise(resolve => { saving = resolve })
+    h.context.finishGeneration = async () => {
+      h.state.isGenerating = false
+      tasks.update('test-task', { phase: 'saving' }); saving()
+      await new Promise(resolve => { finishSave = resolve })
+      tasks.update('test-task', { phase: 'completed' })
+    }
+    const running = h.run()
+    await h.invoked
+    h.emit({ taskId: 'test-task', delta: '结果' })
+    assert.equal(tasks.active().characters, 2)
+    if (stopped) {
+      h.state.generationAbortController.abort(); h.state.isGenerating = false
+      tasks.update('test-task', { phase: 'cancelling' })
+      assert.ok(tasks.active(), 'cancellation alone cannot release the provider lock')
+    }
+    h.complete('完整结果')
+    if (!stopped) {
+      await enteredSave
+      assert.equal(tasks.active().phase, 'saving')
+      assert.equal(h.state.generationInFlight, 'test-task')
+      finishSave()
+    }
+    await running
+    assert.equal(tasks.active(), null)
+    assert.equal(h.state.generationInFlight, null)
+    assert.equal(tasks.get('test-task').phase, stopped ? 'cancelled' : 'completed')
+  }
 })

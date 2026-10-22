@@ -15,7 +15,7 @@ const exportStep = { id: 'export', label: '审阅与导出', hint: '文字可独
 export function creationSteps(preset) {
   if (preset === 'text') return [idea, brief, outline, documentStep('draft', '正文', '独立完成文章或其他文字内容；首次进入只创建空白正文。'), exportStep]
   if (preset === 'storyboard') return [{ id: 'source', label: '已有文本', view: 'workspace', capability: 'text', hint: '打开或粘贴已有正文；正式拆镜时仍可选择其他文档。' }, references, storyboard, images, videos, exportStep]
-  return [idea, brief, documentStep('world', '世界设定', '保留既有规则与代价，可跳过不需要的设定。'), documentStep('characters', '人物', '建立人物目标、关系与行为依据。'), outline, script, storyboard, images, videos, exportStep]
+  return [idea, brief, documentStep('world', '世界设定', '保留既有规则与代价，可跳过不需要的设定。'), documentStep('characters', '人物', '建立人物目标、关系与行为依据。'), outline, script, references, storyboard, images, videos, exportStep]
 }
 
 function currentStep(data, steps) {
@@ -94,7 +94,7 @@ export function initializeCreationNavigation({ getContext, navigate, notify }) {
       output.textContent = step.id === 'storyboard' ? '分镜候选与可编辑镜头' : '对应镜头的媒体候选，不自动替换选用版本'
     } else {
       input.textContent = step.id === 'export' ? '当前文档、选用素材与审阅结果' : '主动导入的角色、场景、道具与风格素材'
-      output.textContent = step.id === 'export' ? 'Markdown；完整媒体项目包在素材页导出' : '本地参考资产及固定版本'
+      output.textContent = step.id === 'export' ? '文字导出在创作页；Flow／Muse 素材包在分镜页；完整项目包在素材页' : '本地参考资产及固定版本'
     }
     if (!step.capability) executor.textContent = '无需 AI 执行端'
     else {

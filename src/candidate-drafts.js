@@ -1,9 +1,15 @@
 // Candidate snapshots contain writing and request context, never execution credentials.
 export const MAX_CANDIDATE_DRAFTS = 100
+export function candidateGeneratedAtLabel(createdAt) {
+  const date = createdAt ? new Date(createdAt) : null
+  return date && Number.isFinite(date.getTime())
+    ? `生成时间：${date.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}`
+    : '生成时间：未记录（旧候选）'
+}
 const MAX_TEXT_CHARACTERS = 2 * 1024 * 1024
 const TABS = ['script', 'outline', 'references']
 const DRAFT_FIELDS = ['id', 'documentId', 'tabName', 'prompt', 'text', 'createdAt', 'status', 'context']
-const CONTEXT_FIELDS = ['projectId', 'purpose', 'sourceFingerprint', 'storyboardRevision', 'operationContext', 'documentId', 'tabName', 'title', 'baseContent', 'selectionStart', 'selectionEnd', 'knowledgeChunks', 'messages']
+const CONTEXT_FIELDS = ['projectId', 'purpose', 'creativeAction', 'sourceFingerprint', 'storyboardRevision', 'storyboardSourceFingerprint', 'operationContext', 'documentId', 'tabName', 'title', 'baseContent', 'selectionStart', 'selectionEnd', 'knowledgeChunks', 'messages']
 const CHUNK_FIELDS = ['id', 'sourceId', 'name', 'path', 'content', 'start', 'end', 'updatedAt', 'vector']
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 const SENSITIVE_KEYS = new Set(['authorization', 'proxyauthorization', 'headers', 'cookie', 'cookies', 'setcookie', 'apikey', 'key', 'secret', 'clientsecret', 'password', 'passwd', 'token', 'accesstoken', 'refreshtoken', 'idtoken', 'credential', 'credentials', 'connection', 'connections', 'connectionid', 'baseurl', 'endpoint', 'privatekey', 'env', 'environment'])
@@ -61,10 +67,12 @@ function validateContext(context, draft) {
   for (const [key, value] of Object.entries(context)) if (key !== 'operationContext') validateJson(value)
   assert(id(context.projectId) && context.documentId === draft.documentId && context.tabName === draft.tabName, '候选上下文归属无效')
   assert(['text', 'discussion', 'project-plan', 'storyboard'].includes(context.purpose), '候选用途无效')
+  if (context.creativeAction !== undefined) assert(['', 'continuity'].includes(context.creativeAction), '候选创作操作无效')
   // The output cap does not truncate an existing large document's baseline;
   // workspace storage still enforces the total library size budget.
   assert(typeof context.title === 'string' && typeof context.baseContent === 'string', '候选原文快照无效')
   if (context.sourceFingerprint !== undefined) assert(typeof context.sourceFingerprint === 'string' && context.sourceFingerprint.length <= 1024, '候选原文指纹无效')
+  if (context.storyboardSourceFingerprint !== undefined) assert(typeof context.storyboardSourceFingerprint === 'string' && context.storyboardSourceFingerprint.length <= 1024, '候选分场快照指纹无效')
   if (context.storyboardRevision !== undefined && context.storyboardRevision !== null) assert(integer(context.storyboardRevision), '候选分镜修订号无效')
   for (const field of ['selectionStart', 'selectionEnd']) if (context[field] !== undefined) assert(integer(context[field]) && context[field] <= context.baseContent.length, '候选原文选区无效')
   if (context.selectionStart !== undefined && context.selectionEnd !== undefined) assert(context.selectionEnd >= context.selectionStart, '候选原文选区无效')

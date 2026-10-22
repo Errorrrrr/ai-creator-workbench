@@ -5,7 +5,7 @@ import vm from 'node:vm'
 import { webcrypto } from 'node:crypto'
 import { MAX_CANDIDATE_DRAFTS, candidateDraftsFor, upsertCandidateDraft, removeCandidateDraft } from '../src/candidate-drafts.js'
 import { prepareGeneration } from '../src/creation-workflow.js'
-import { contentFingerprint, createShot, parseStoryboardCandidate, resolveConnectionRoute } from '../src/storyboard.js'
+import { contentFingerprint, storyboardSourceFingerprint, createShot, parseStoryboardCandidate, resolveConnectionRoute } from '../src/storyboard.js'
 import { validateWorkspace, projectBackup, parseBackup } from '../src/project-store.js'
 import { materializeOperationPlan, parseOperationPlan } from '../src/project-operations.js'
 
@@ -129,7 +129,7 @@ function harness({ candidates = [draft()], activeProjectId = 'project-original' 
       calls.persisted.push({ projectId, snapshot: copy, at: timers.now })
     },
     setSaveStatus: status => calls.statuses.push(status), showToast: message => calls.toasts.push(message),
-    readableError: error => error.message, resolveConnectionRoute,
+    readableError: error => error.message, resolveConnectionRoute, storyboardSourceFingerprint,
     initializeMediaWorkbench: options => options, connectionSecret: async () => null,
     setProjectTransition: value => { sandbox.projectTransition = value },
     validateWorkspace: (workspace, index) => validateWorkspace(structuredClone(workspace), index),
@@ -137,7 +137,7 @@ function harness({ candidates = [draft()], activeProjectId = 'project-original' 
     generateWithConnection: (connection, prompt, generationId) => calls.providers.push({ connection, prompt, generationId }),
     getAssistantProfileKey: () => 'writing', assistantProfiles: { writing: { progress: '正在生成' } },
     renderCandidateDrafts() {}, renderContextPreview() {}, updateCandidateCitations() {}, updateAssistantProfile() {},
-    updateEditorMetrics() {}, updateStageAdvanceButton() {}, renderProjectIdentity() {}, renderHistoryControls: () => null,
+    updateEditorMetrics() {}, updateStageAdvanceButton() {}, renderProjectIdentity() {}, renderHistoryControls: () => null, syncCurrentDocumentReferences() {},
     switchView() {}, closeDrawers() {}, scheduleSave() { throw new Error('unexpected extra save after candidate transaction') }
   }
   const names = [
@@ -377,10 +377,22 @@ test('storyboard JSON edits persist in the shared pending draft and restore with
   assert.equal(saved.text, edited)
   assert.deepEqual(saved.context, candidate.context)
   const restarted = harness({ candidates: [saved] })
-  const restoredMedia = restarted.context.initializeProjectMediaWorkbench()
-  assert.deepEqual(restoredMedia.getSavedCandidate(), saved)
+  const received = []
+  restarted.context.mediaWorkbench = { receiveCandidate: (...args) => received.push(args), clearCandidate() {} }
+  restarted.context.restoreDocumentCandidate()
+  assert.equal(restarted.state.activeCandidateId, null, 'restart does not display old storyboard drafts')
+  assert.equal(received.length, 0)
+  restarted.context.showSavedCandidate(saved)
+  assert.equal(received[0][0], edited)
+  assert.equal(received[0][3].createdAt, saved.createdAt)
+  assert.deepEqual(restarted.state.generationContext, saved.context)
+  await restarted.context.selectDocument('scene-2')
+  await restarted.context.selectDocument('scene-1')
+  assert.equal(restarted.state.activeCandidateId, null, 'returning to the scene does not reopen the old candidate')
+  assert.equal(received.length, 1)
   restarted.context.activeProjectId = 'another-project'
-  assert.equal(restoredMedia.getSavedCandidate(), null, 'an imported storyboard keeps its original project ownership')
+  restarted.context.showSavedCandidate(saved)
+  assert.equal(received.length, 1, 'imported draft keeps its original project ownership')
 })
 
 test('storyboard acceptance commits new shots and resolves the candidate in the same saved snapshot', async () => {
@@ -402,6 +414,10 @@ test('storyboard acceptance commits new shots and resolves the candidate in the 
   assert.ok(h.state.candidateDrafts.some(value => value.id === candidate.id))
   finalSave.resolve(true)
   await accepting
+  assert.equal(h.state.activeCandidateId, null, 'commit itself clears the active buffer before any UI callback')
+  assert.deepEqual(h.context.workspaceSnapshot().candidateDrafts.map(value => value.id), [unrelated.id], 'later autosave cannot revive the resolved draft')
+  h.context.showSavedCandidate(candidate)
+  assert.equal(h.state.activeCandidateId, null, 'a stale history selection cannot reopen a resolved draft')
   media.onCandidateResolved(candidate.id, { committed: true })
   assert.deepEqual(h.state.storyboard, next)
   assert.deepEqual(h.state.candidateDrafts, [unrelated])
@@ -497,4 +513,87 @@ test('restoring the previous library cancels pending candidate autosave before a
   assert.equal(h.context.projectTransition, false)
   assert.equal(h.timers.pending.length, 0)
   assert.equal(h.calls.persisted.length, 0, 'recovery must not advance the previous snapshot through an extra autosave')
+})
+
+test('storyboard completion records complete draft before automatic handoff; stopped output is review-only', async () => {
+  for (const stopped of [false, true]) {
+    const h = harness({ candidates: [] })
+    h.context.startGeneration('拆镜', { purpose: 'storyboard', sourceFingerprint: contentFingerprint('她站在门前。'), storyboardRevision: 0 })
+    const id = h.state.activeCandidateId
+    h.context.appendGenerationDelta(storyboardDraft().text, h.state.activeGenerationId)
+    let received = false
+    h.context.mediaWorkbench = { receiveCandidate(text, context, draftId, options) {
+      received = true
+      assert.equal(draftId, id)
+      assert.equal(options.autoApply, !stopped)
+      assert.equal(h.state.isGenerating, false)
+      assert.equal(h.state.candidateDrafts.find(draft => draft.id === id).status, stopped ? 'partial' : 'complete')
+    } }
+    h.context.finishGeneration({ stopped, generationId: h.state.activeGenerationId })
+    assert.equal(received, true)
+  }
+})
+
+
+test('重复生成不会停止或替换当前任务，拆镜期间侧栏仅切换查看范围', async () => {
+  const h = harness({ candidates: [] })
+  h.context.startGeneration('拆镜', { purpose: 'storyboard' })
+  const id = h.state.activeGenerationId
+  h.context.startGeneration('重复点击', { purpose: 'storyboard' })
+  assert.equal(h.calls.providers.length, 1)
+  assert.equal(h.state.activeGenerationId, id)
+  assert.equal(h.state.isGenerating, true)
+  let viewed
+  h.context.mediaWorkbench = { isStoryboardBusy: () => true, selectDocument: id => { viewed = id } }
+  assert.equal(await h.context.selectDocument('scene-2', { keepStoryboard: true }), true)
+  assert.equal(viewed, 'scene-2')
+  assert.equal(h.state.currentDocId, 'scene-1')
+  assert.equal(h.state.generationContext.documentId, 'scene-1')
+  assert.equal(h.state.isGenerating, true)
+  h.state.isGenerating = false; h.state.generationInFlight = id
+  h.context.startGeneration('保存中再次点击', { purpose: 'storyboard' })
+  assert.equal(h.calls.providers.length, 1)
+})
+
+
+test('替换分镜事务清除对应旧候选，不影响正在审阅的另一份候选', async () => {
+  const resolved = storyboardDraft(), other = draft('other')
+  const h = harness({ candidates: [resolved, other] })
+  h.context.showSavedCandidate(other)
+  const cleared = []
+  h.context.mediaWorkbench = { clearCandidate: id => cleared.push(id) }
+  const media = h.context.initializeProjectMediaWorkbench()
+  const next = { revision: 1, shots: parseStoryboardCandidate(resolved.text) }
+  await media.commit({ storyboard: next }, { projectId: 'project-original', revision: 0, resolvedCandidateId: resolved.id })
+  assert.equal(h.state.activeCandidateId, other.id)
+  assert.deepEqual(h.context.workspaceSnapshot().candidateDrafts.map(d => d.id), [other.id])
+  assert.ok(cleared.includes(resolved.id))
+  assert.deepEqual(h.calls.persisted.at(-1).snapshot.candidateDrafts.map(d => d.id), [other.id])
+})
+
+test('automatic reference save is atomic, retains candidates and refuses stale or foreign snapshots', async () => {
+  for (const succeeds of [false, true]) {
+    const candidate = storyboardDraft(), h = harness({ candidates: [candidate] })
+    h.context.showSavedCandidate(candidate)
+    const shot = createShot({ visual: '陆骁抬头' })
+    h.state.storyboard.shots.push(shot)
+    const original = structuredClone(h.state.storyboard)
+    const next = structuredClone(original); next.revision++; next.shots[0].references.push({ versionId: 'auto-image', role: 'reference' })
+    const media = h.context.initializeProjectMediaWorkbench()
+    await assert.rejects(media.commit({ storyboard: next }, { projectId: 'foreign', revision: 0, atomic: true }), /项目已切换/)
+    await assert.rejects(media.commit({ storyboard: next }, { projectId: 'project-original', revision: 99, atomic: true }), /分镜已有新的修改/)
+    const preflight = h.blockNextSave(), finalSave = h.blockNextSave()
+    const saving = media.commit({ storyboard: next }, { projectId: 'project-original', revision: 0, atomic: true })
+    await preflight.entered; preflight.resolve(true)
+    const staged = await finalSave.entered
+    assert.deepEqual(staged.candidateDrafts, [candidate])
+    assert.deepEqual(h.state.storyboard, original)
+    finalSave.resolve(succeeds)
+    if (succeeds) await saving
+    else await assert.rejects(saving, /磁盘写入失败/)
+    assert.deepEqual(h.state.storyboard, succeeds ? next : original)
+    assert.equal(h.state.activeCandidateId, candidate.id)
+    assert.deepEqual(h.state.candidateDrafts, [candidate])
+    assert.equal(h.context.projectTransition, false)
+  }
 })
