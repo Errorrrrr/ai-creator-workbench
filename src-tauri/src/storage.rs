@@ -152,13 +152,24 @@ fn write_library_with_media(
     if current_revision(&transaction)? != expected_revision {
         return Err("项目已在另一窗口更新，请备份当前内容后重新打开".into());
     }
-    let archives = archive_payload
-        .unwrap_or(read_archives(&transaction, false)?.unwrap_or_else(|| "[]".into()));
-    validate_sizes(payload.len(), archives.len())?;
-    let archive_value: serde_json::Value =
-        serde_json::from_str(&archives).map_err(|e| e.to_string())?;
-    if !archive_value.is_array() {
-        return Err("归档库格式无效".into());
+    // Ordinary saves omit the archive payload. Keep its bytes in SQLite rather
+    // than reading/parsing/rewriting hundreds of MiB for each keystroke pause.
+    let archive_value = if let Some(archives) = archive_payload.as_ref() {
+        validate_sizes(payload.len(), archives.len())?;
+        let value: serde_json::Value = serde_json::from_str(archives).map_err(|e| e.to_string())?;
+        if !value.is_array() { return Err("归档库格式无效".into()); }
+        value
+    } else {
+        let bytes: i64 = transaction.query_row(
+            "SELECT COALESCE((SELECT length(CAST(payload AS BLOB)) FROM archive_snapshots WHERE id=1),2)",
+            [], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        validate_sizes(payload.len(), usize::try_from(bytes).map_err(|_| "归档库大小无效")?)?;
+        // The unchanged archive was validated by the transaction that saved it.
+        serde_json::json!([])
+    };
+    if (deleted_project_id.is_some() || media_import_id.is_some()) && archive_payload.is_none() {
+        return Err("项目导入或删除必须提供完整归档快照".into());
     }
     crate::project_deletion::validate_library(&transaction, &value, &archive_value)?;
     if let Some(id) = deleted_project_id {
@@ -202,19 +213,21 @@ fn write_library_with_media(
             [],
         )
         .map_err(|e| e.to_string())?;
-    transaction.execute("INSERT OR REPLACE INTO archive_snapshots(id,payload) VALUES (2,COALESCE((SELECT payload FROM archive_snapshots WHERE id=1),'[]'))", []).map_err(|e| e.to_string())?;
+    transaction.execute("INSERT INTO archive_snapshots(id,payload) VALUES (2,COALESCE((SELECT payload FROM archive_snapshots WHERE id=1),'[]')) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload WHERE archive_snapshots.payload != excluded.payload", []).map_err(|e| e.to_string())?;
     transaction
         .execute(
             "INSERT OR REPLACE INTO library(id,revision,payload) VALUES (1,?1,?2)",
             params![next_revision, payload],
         )
         .map_err(|e| e.to_string())?;
-    transaction
-        .execute(
-            "INSERT OR REPLACE INTO archive_snapshots(id,payload) VALUES (1,?1)",
-            [archives],
-        )
-        .map_err(|e| e.to_string())?;
+    if let Some(archives) = archive_payload {
+        transaction
+            .execute(
+                "INSERT INTO archive_snapshots(id,payload) VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload WHERE archive_snapshots.payload != excluded.payload",
+                [archives],
+            )
+            .map_err(|e| e.to_string())?;
+    }
     if let Some(id) = deleted_project_id {
         for (table, previous) in [
             ("library", read_library(&transaction, true)?),
@@ -335,6 +348,20 @@ mod tests {
 
     fn payload(revision: i64, projects: serde_json::Value) -> String {
         json!({"version":1,"revision":revision,"projects":projects}).to_string()
+    }
+
+    #[test]
+    fn ordinary_writes_reuse_archives_and_keep_a_coherent_previous_snapshot() {
+        let mut db = memory_database();
+        let archived = json!([{"id":"archived","content":"unchanged archive"}]).to_string();
+        write_library(&mut db, payload(1, json!([{"id":"a"}])), Some(archived.clone()), 0).unwrap();
+        // The first later save advances previousArchives to the current archive.
+        write_library(&mut db, payload(2, json!([{"id":"a","content":"one"}])), None, 1).unwrap();
+        db.execute_batch("CREATE TRIGGER no_archive_insert BEFORE INSERT ON archive_snapshots WHEN NOT EXISTS(SELECT 1 FROM archive_snapshots WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'archive insertion forbidden'); END; CREATE TRIGGER no_archive_update BEFORE UPDATE ON archive_snapshots BEGIN SELECT RAISE(ABORT,'archive rewrite forbidden'); END;").unwrap();
+        write_library(&mut db, payload(3, json!([{"id":"a","content":"two"}])), None, 2).unwrap();
+        assert_eq!(read_archives(&db, false).unwrap(), Some(archived.clone()));
+        assert_eq!(read_archives(&db, true).unwrap(), Some(archived));
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&read_library(&db, true).unwrap().unwrap()).unwrap()["projects"][0]["content"], "one");
     }
 
     #[test]

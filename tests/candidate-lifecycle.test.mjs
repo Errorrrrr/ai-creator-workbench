@@ -136,7 +136,7 @@ function harness({ candidates = [draft()], activeProjectId = 'project-original' 
     generationDraft: prompt => prepareGeneration({ ...state, documentId: state.currentDocId, tabName: state.activeTab, prompt }),
     generateWithConnection: (connection, prompt, generationId) => calls.providers.push({ connection, prompt, generationId }),
     getAssistantProfileKey: () => 'writing', assistantProfiles: { writing: { progress: '正在生成' } },
-    renderCandidateDrafts() {}, renderContextPreview() {}, updateCandidateCitations() {}, updateAssistantProfile() {},
+    renderCandidateDrafts() {}, renderContextPreview() {}, renderFollowupContext() {}, updateWritingPreview() {}, updateCandidateCitations() {}, updateAssistantProfile() {},
     updateEditorMetrics() {}, updateStageAdvanceButton() {}, renderProjectIdentity() {}, renderHistoryControls: () => null, syncCurrentDocumentReferences() {},
     switchView() {}, closeDrawers() {}, scheduleSave() { throw new Error('unexpected extra save after candidate transaction') }
   }

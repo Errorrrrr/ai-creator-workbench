@@ -109,6 +109,14 @@
 .video-return-selection input { flex: 0 0 auto; width: 16px; }
 .video-return-row select { width: 100%; min-width: 0; }
 .video-return-dialog .dialog-actions { position: sticky; bottom: -24px; padding-block: 14px; background: var(--paper); }
+.storyboard-mode-dialog, .storyboard-history-dialog, .video-playlist-dialog { width: min(800px, calc(100vw - 40px)); max-height: calc(100dvh - 60px); overflow-y: auto; padding: 24px; }
+.storyboard-mode-dialog h2, .storyboard-history-dialog h2, .video-playlist-dialog h2 { margin: 0 0 14px; font: 650 22px var(--font-ui); }
+.storyboard-mode-option { display: block; width: 100%; text-align: left; padding: 15px; margin: 10px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font: 600 15px var(--font-ui); cursor: pointer; }
+.storyboard-mode-option .media-help { display: block; margin-top: 7px; font-weight: 400; }
+.storyboard-mode-option:hover, .storyboard-mode-option:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent-soft); }
+.storyboard-history-dialog .video-return-row { margin-block: 12px; }
+.video-playlist-dialog > select { width: 100%; }
+.video-playlist-dialog > video { display: block; width: 100%; max-height: 55dvh; margin: 12px 0; object-fit: contain; background: #111; }
 @container (max-width: 1000px) {
   .media-scope-controls { flex-basis: 100%; }
   .media-primary-actions { width: 100%; }

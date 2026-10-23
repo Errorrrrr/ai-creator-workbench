@@ -3,12 +3,13 @@ import assert from 'node:assert/strict'
 import { webcrypto } from 'node:crypto'
 import { chunkDocument, createKnowledgeIndex, deserializeKnowledgeIndex } from '../src/knowledge-index.js'
 import { pruneSemanticIndex, semanticIndexCoverage } from '../src/semantic-search.js'
+import { createShot } from '../src/storyboard.js'
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto
 
 let storeSequence = 0
 async function memoryStore() {
-  const saved = { current: null, archives: '[]', previous: null, previousArchives: '[]', failNext: false }
+  const saved = { current: null, archives: '[]', previous: null, previousArchives: '[]', failNext: false, writes: [] }
   globalThis.window = { __TAURI__: { core: { invoke: async (command, args = {}) => {
     if (command === 'library_read') return saved.current
     if (command === 'library_read_archives') return saved.archives
@@ -16,13 +17,15 @@ async function memoryStore() {
     if (command === 'library_read_previous_archives') return saved.previousArchives
     if (command === 'library_current_revision') return saved.revision || 0
     if (command !== 'library_write') throw new Error(`Unexpected command: ${command}`)
+    saved.writes.push(structuredClone(args))
+    if (saved.gate) await saved.gate
     if (saved.failNext) { saved.failNext = false; throw new Error('simulated disk failure') }
     assert.equal(args.expectedRevision, saved.revision || 0, 'optimistic revision matches')
     assert.equal(JSON.parse(args.payload).revision, args.expectedRevision + 1)
     saved.previous = saved.current
     saved.previousArchives = saved.archives
     saved.current = args.payload
-    saved.archives = args.archivePayload
+    if (args.archivePayload !== undefined) saved.archives = args.archivePayload
     saved.revision = args.expectedRevision + 1
   } } } }
   globalThis.localStorage = { getItem: () => null }
@@ -211,6 +214,101 @@ test('no-op saves preserve the useful previous snapshot and settings can save wi
   await store.activateProject(id)
   assert.equal(saved.revision, revision)
   assert.equal(saved.previous, previous)
+})
+
+test('ordinary saves omit unchanged archives and coalesce only adjacent pending saves of one project', async () => {
+  const { store, saved } = await memoryStore()
+  const a = await store.createProject(workspace('A'), null)
+  const b = await store.createProject(workspace('B'), null)
+  const before = saved.writes.length
+  const first = workspace('A'); first.documents.idea.content = 'A 的中间值'
+  const latest = workspace('A'); latest.documents.idea.content = 'A 的最终值'
+  const one = store.saveProject(a, first, null, { coalesce: true })
+  const two = store.saveProject(a, latest, null, { coalesce: true })
+  assert.equal(one, two, 'pending saves share the result of the latest snapshot')
+  await Promise.all([one, two])
+  assert.equal(saved.writes.length, before + 1)
+  assert.equal(Object.hasOwn(saved.writes.at(-1), 'archivePayload'), false)
+  assert.equal(saved.archives, '[]')
+  const different = workspace('B'); different.documents.idea.content = 'B 的内容'
+  await Promise.all([
+    store.saveProject(a, first, null, { coalesce: true }),
+    store.saveProject(b, different, null, { coalesce: true }),
+    store.saveProject(a, latest, null, { coalesce: true })
+  ])
+  assert.equal(saved.writes.length, before + 4, 'different projects keep queue ordering')
+  const projects = JSON.parse(saved.current).projects
+  assert.equal(projects.find(p => p.id === a).workspace.documents.idea.content, 'A 的最终值')
+  assert.equal(projects.find(p => p.id === b).workspace.documents.idea.content, 'B 的内容')
+})
+
+test('explicit mutations split coalescing; failed merged saves keep stored state and allow retry', async () => {
+  const { store, saved } = await memoryStore()
+  const id = await store.createProject(workspace(), null)
+  const first = workspace(); first.documents.idea.content = '第一步'
+  const final = workspace(); final.documents.idea.content = '最后一步'
+  const before = saved.writes.length
+  await Promise.all([
+    store.saveProject(id, first, null, { coalesce: true }),
+    store.saveInspiration({ title: '明确事务', content: '必须按顺序保存' }),
+    store.saveProject(id, final, null, { coalesce: true })
+  ])
+  assert.equal(saved.writes.length, before + 3)
+  assert.equal(JSON.parse(saved.writes[before + 1].payload).projects[0].workspace.documents.idea.content, '第一步')
+  const previous = saved.current
+  saved.failNext = true
+  const failed = store.saveProject(id, first, null, { coalesce: true })
+  const failedAgain = store.saveProject(id, { ...first, project: { name: '合并后' } }, null, { coalesce: true })
+  await assert.rejects(failed, /disk failure/)
+  await assert.rejects(failedAgain, /disk failure/)
+  assert.equal(saved.current, previous)
+  await store.saveProject(id, first, null, { coalesce: true })
+  assert.equal(JSON.parse(saved.current).projects[0].workspace.documents.idea.content, '第一步')
+})
+
+test('an in-flight save completes before the latest coalesced snapshot and deletion remains a barrier', async () => {
+  const { store, saved } = await memoryStore()
+  const id = await store.createProject(workspace(), null)
+  let release
+  saved.gate = new Promise(resolve => { release = resolve })
+  const first = workspace(); first.documents.idea.content = '正在写入'
+  const mid = workspace(); mid.documents.idea.content = '等待中的中间内容'
+  const last = workspace(); last.documents.idea.content = '等待中的最新内容'
+  const before = saved.writes.length
+  const active = store.saveProject(id, first, null, { coalesce: true })
+  await new Promise(resolve => setImmediate(resolve))
+  const waiting = store.saveProject(id, mid, null, { coalesce: true })
+  const latest = store.saveProject(id, last, null, { coalesce: true })
+  assert.equal(waiting, latest)
+  saved.gate = null; release()
+  await Promise.all([active, waiting, latest])
+  assert.equal(saved.writes.length, before + 2)
+  assert.equal(JSON.parse(saved.current).projects[0].workspace.documents.idea.content, '等待中的最新内容')
+  const earlier = store.saveProject(id, mid, null, { coalesce: true })
+  const deleted = store.deleteProject(id)
+  const tooLate = store.saveProject(id, last, null, { coalesce: true })
+  await earlier; await deleted
+  await assert.rejects(tooLate, /项目不存在/)
+  assert.equal(store.listProjects().length, 0)
+})
+
+test('text backups keep storyboard history writing but drop current and historical media claims on restore', async () => {
+  const { store } = await memoryStore()
+  const draft = workspace()
+  const shot = createShot({ title: '保留的旧镜头', visual: '画面' }, { documentId: 'idea' })
+  Object.assign(shot, { references: [{ versionId: 'original-image', role: 'reference' }], selectedImageVersionId: 'original-image', selectedVideoVersionId: 'original-video', reviewedVideoVersionId: 'original-video', reviewedInputFingerprint: 'old-review' })
+  draft.storyboard = { revision: 1, shots: [shot], sourceVersions: [{ id: 'history', createdAt: '2026-10-23T00:00:00Z', sourceDocumentId: 'idea', label: '替换前', shots: [structuredClone(shot)] }] }
+  const backup = store.projectBackup(draft, null)
+  const restored = store.parseBackup(backup).workspace.storyboard
+  for (const value of [restored.shots[0], restored.sourceVersions[0].shots[0]]) {
+    assert.equal(value.title, '保留的旧镜头')
+    assert.equal(value.sourceDocumentId, 'idea')
+    assert.deepEqual(value.references, [])
+    assert.equal(value.selectedVideoVersionId, '')
+    assert.equal(value.reviewedVideoVersionId, '')
+    assert.equal(value.reviewedInputFingerprint, undefined)
+  }
+  assert.equal(draft.storyboard.shots[0].selectedVideoVersionId, 'original-video', 'export/restore never edits the source project')
 })
 
 test('version 1 library records without optional archive or inspiration fields still load', async () => {

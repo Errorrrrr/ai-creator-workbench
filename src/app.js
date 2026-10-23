@@ -10,7 +10,7 @@ import { buildSemanticIndex, semanticSearch, pruneSemanticIndex, semanticIndexCo
 import { initializeInspirations } from './inspirations.js'
 import { initializeUpdates } from './update-ui.js'
 import { consumeProviderStream, fetchProviderResponse, providerEndpointUrl, validateProviderBaseUrl } from './provider-stream.js'
-import { GENERATION_CHARACTER_LIMIT, prepareGeneration, prepareVersionRestore, projectMarkdown, planKnowledgeFiles } from './creation-workflow.js'
+import { GENERATION_CHARACTER_LIMIT, prepareGeneration, prepareVersionRestore, projectMarkdown, planKnowledgeFiles, prepareStructureChange, sceneNavigation } from './creation-workflow.js'
 import { contentFingerprint, storyboardSourceFingerprint, emptyStoryboard, normalizeStoryboard, normalizeWorkflow, resolveConnectionRoute, supportsCapability, validateStoryboard } from './storyboard.js'
 import { initializeMediaWorkbench } from './media-workbench.js'
 import { configuredMediaAdapterId, mediaAdapterFor, mediaAdaptersForKind } from './media-adapters.js'
@@ -19,6 +19,7 @@ import { initializeProjectPlanUI } from './project-plan-ui.js'
 import { creationSteps, initializeCreationNavigation } from './workflow-navigation.js'
 import { candidateGeneratedAtLabel, MAX_CANDIDATE_DRAFTS, candidateDraftsFor, upsertCandidateDraft, removeCandidateDraft } from './candidate-drafts.js'
 import { createReviewDiff } from './review-diff.js'
+import { renderWritingPreview } from './writing-preview.js'
 
 let mediaWorkbench = null
 let projectPlanUI = null
@@ -98,10 +99,10 @@ function setProjectTransition(value) {
     // Cancelling recovery must not cancel the draft's pending auto-save forever.
     if (unsavedEdits && !state.storageFailed && activeProjectId) {
       window.clearTimeout(state.saveTimer)
-      state.saveTimer = window.setTimeout(() => { persistWorkspace() }, 300)
+      state.saveTimer = window.setTimeout(() => { persistWorkspace({ coalesce: true }) }, 300)
     }
     const target = document.querySelector('dialog[open] button:not([disabled]), dialog[open] input:not([disabled])')
-      || (state.currentView === 'workspace' ? elements.scriptEditor : null)
+      || (state.currentView === 'workspace' ? state.readingPreview ? document.querySelector('#writingPreview') : elements.scriptEditor : null)
     target?.focus({ preventScroll: true })
   }
 }
@@ -419,6 +420,9 @@ const state = {
   contextReferenceKeys: [],
   excludedContextKeys: new Map(),
   includeCurrentContext: true,
+  includeReferenceNotes: true,
+  followupContext: null,
+  readingPreview: false,
   includeSelectionContext: false,
   isGenerating: false,
   candidateApplying: false,
@@ -584,13 +588,13 @@ let saveSequence = 0
 let pendingSaves = 0
 let unsavedEdits = false
 let editRevision = 0
-async function persistWorkspace({ onError } = {}) {
+async function persistWorkspace({ onError, coalesce = false } = {}) {
   const sequence = ++saveSequence
   const revision = editRevision
   pendingSaves += 1
   setSaveStatus('saving')
   try {
-    await saveProject(activeProjectId, workspaceSnapshot(), state.knowledge.index)
+    await saveProject(activeProjectId, workspaceSnapshot(), state.knowledge.index, { coalesce })
     if (sequence === saveSequence && revision === editRevision) {
       state.storageFailed = false
       unsavedEdits = false
@@ -818,12 +822,17 @@ function filterProjectTree() {
 function updateStageAdvanceButton() {
   if (!elements.stageAdvanceButton) return
   const kind = getDocumentKind(state.currentDocId)
+  const neighbors = sceneNavigation(state.currentDocId, state.structure)
+  const previousButton = document.querySelector('#previousSceneButton')
+  if (previousButton) { previousButton.hidden = kind !== 'scene'; previousButton.disabled = !neighbors.previous }
+  const newButton = document.querySelector('#newSceneButton')
+  if (newButton) newButton.hidden = !['scene', 'episode'].includes(kind)
   const labelByDocument = {
     idea: '进入创作简报', brief: '完善世界观', world: '塑造人物', characters: '形成全剧大纲', outline: '拆分为分集'
   }
   const textLabel = { idea: '进入创作简报', brief: '整理大纲', outline: '开始正文', draft: '审阅与导出' }
   const label = (state.workflow.preset === 'text' ? textLabel[state.currentDocId] : null) || (state.currentDocId === 'outline' ? '开始剧本创作' : labelByDocument[state.currentDocId])
-    || (kind === 'episode' ? '拆分为分场' : kind === 'scene' ? '新增下一场' : '下一步')
+    || (kind === 'episode' ? state.structure.episodes[state.currentDocId]?.sceneIds.length ? '进入第一场' : '新增分场' : kind === 'scene' ? neighbors.next ? '进入下一场' : '新增下一场' : '下一步')
   elements.stageAdvanceButton.querySelector('span').textContent = label
   elements.stageAdvanceButton.setAttribute('aria-label', label)
   elements.stageAdvanceButton.title = label
@@ -1058,6 +1067,7 @@ function updateDocumentView({ keepFocus = false } = {}) {
   updateEditorMetrics()
   updateAssistantProfile()
   restoreDocumentCandidate()
+  updateWritingPreview({ focus: false })
   updateStageAdvanceButton()
   creationNavigation?.render()
   setSaveStatus(state.storageFailed ? 'error' : pendingSaves ? 'saving' : unsavedEdits ? 'dirty' : 'saved')
@@ -1070,7 +1080,7 @@ function updateDocumentView({ keepFocus = false } = {}) {
         else document.querySelector('[data-tab="history"]')?.focus()
       })
     } else {
-      elements.scriptEditor.focus()
+      (state.readingPreview ? document.querySelector('#writingPreview') : elements.scriptEditor).focus()
     }
   }
 }
@@ -1080,6 +1090,7 @@ function updateEditorMetrics() {
   elements.characterCount.textContent = `${count.toLocaleString('zh-CN')} 字`
   elements.scriptEditor.style.height = 'auto'
   elements.scriptEditor.style.height = `${Math.max(438, elements.scriptEditor.scrollHeight)}px`
+  if (state.readingPreview) updateWritingPreview({ focus: false })
   renderContextPreview()
 }
 
@@ -1105,7 +1116,7 @@ function scheduleSave() {
   unsavedEdits = true
   window.clearTimeout(state.saveTimer)
   setSaveStatus('dirty')
-  state.saveTimer = window.setTimeout(() => { persistWorkspace() }, 300)
+  state.saveTimer = window.setTimeout(() => { persistWorkspace({ coalesce: true }) }, 300)
 }
 
 async function saveImmediately({ announce = true } = {}) {
@@ -1442,7 +1453,7 @@ const assistantProfiles = {
     disclaimer: 'AI 可能出错。追加前请检查人物和剧情连续性。',
     actions: [
       ['强化悬念', '增加危险感与结尾钩子', '强化当前场景的悬念，增加危险感并设计一个更强的结尾钩子。'],
-      ['续写场景', '延续当前语气和节奏', '续写当前场景，保持现有语气和节奏，不提前揭示关键真相。'],
+      ['续写场景', '从当前结尾继续写', '续写当前场景，保持现有语气和节奏，不提前揭示关键真相。', 'continuation'],
       ['检查连续性', '先核对世界观与上一场', '检查当前场景是否与人物设定、世界观和前文冲突。', 'continuity'],
       ['打磨对白', '减少说明，保留潜台词', '将人物对白改得更自然，减少解释性台词。']
     ]
@@ -1502,6 +1513,8 @@ function projectOperationContext() {
 
 function prepareAssistantAction(prompt, creativeAction = '') {
   if (state.isGenerating || state.generationInFlight || state.candidateApplying) return showToast('当前 AI 任务尚未结束，请稍候再准备新的请求')
+  state.followupContext = null
+  renderFollowupContext()
   elements.promptInput.value = prompt
   state.creativeActionContext = creativeAction ? { action: creativeAction, projectId: activeProjectId, documentId: state.currentDocId, tabName: state.activeTab } : null
   focusAssistant()
@@ -1512,10 +1525,44 @@ function prepareAssistantAction(prompt, creativeAction = '') {
     document.querySelector('#contextPreviewSummary').closest('details').open = true
     renderContextPreview()
     showToast('已准备连续性检查，可在发送范围移除资料；确认后点击发送')
-  } else startGeneration(prompt)
+  } else {
+    document.querySelector('#assistantRequestMode').value = 'text'
+    document.querySelector('#reviewExistingPlan').hidden = true
+    startGeneration(prompt)
+  }
 }
 
-function generationDraft(prompt, purpose = document.querySelector('#assistantRequestMode').value, creativeAction = null) {
+function renderFollowupContext() {
+  const host = document.querySelector('#followupContext')
+  if (!host) return
+  host.hidden = !state.followupContext
+  if (state.followupContext) host.querySelector('span').textContent = `${state.followupContext.purpose === 'discussion' ? '继续讨论' : '继续修改候选'} · ${state.followupContext.prompt.slice(0, 60)}`
+}
+
+function prepareCandidateFollowup() {
+  const context = state.generationContext
+  if (state.isGenerating || state.candidateApplying || !state.activeCandidateId || !state.generationText.trim() || !['text', 'discussion'].includes(context?.purpose)) return
+  if (context.projectId !== activeProjectId || context.documentId !== state.currentDocId || context.tabName !== state.activeTab) return showToast('请先打开此候选所属文档')
+  state.followupContext = { candidateId: state.activeCandidateId, projectId: activeProjectId, documentId: context.documentId, tabName: context.tabName, purpose: context.purpose, prompt: state.lastPrompt, text: state.generationText }
+  state.creativeActionContext = null
+  document.querySelector('#assistantRequestMode').value = context.purpose
+  elements.promptInput.value = ''
+  renderFollowupContext(); renderContextPreview(); focusAssistant(); elements.promptInput.focus()
+  showToast('已绑定这份候选，请输入修改要求；其他候选不会加入本次请求')
+}
+
+function updateWritingPreview({ focus = true } = {}) {
+  const preview = document.querySelector('#writingPreview'), button = document.querySelector('#toggleWritingPreview')
+  if (!preview || !button) return
+  preview.hidden = !state.readingPreview; elements.scriptEditor.hidden = Boolean(state.readingPreview)
+  button.textContent = state.readingPreview ? '返回编辑' : '阅读预览'
+  button.setAttribute('aria-pressed', String(Boolean(state.readingPreview)))
+  if (state.readingPreview) renderWritingPreview(preview, elements.scriptEditor.value)
+  else { elements.scriptEditor.style.height = 'auto'; elements.scriptEditor.style.height = `${Math.max(438, elements.scriptEditor.scrollHeight)}px` }
+  if (focus) (state.readingPreview ? preview : elements.scriptEditor).focus()
+}
+
+function generationDraft(prompt, purpose = document.querySelector('#assistantRequestMode').value, creativeAction = null, followup = undefined) {
   const discussionInstruction = purpose === 'discussion' ? '\n本次仅讨论与分析，给出建议，不提供可自动执行的项目操作，不声称修改项目。' : ''
   const availableObjects = contextObjects()
   const objectReferences = state.contextReferenceKeys.map(key => availableObjects.find(item => item.key === key))
@@ -1524,13 +1571,16 @@ function generationDraft(prompt, purpose = document.querySelector('#assistantReq
   if (state.includeSelectionContext && !selectedText) throw new Error('编辑器选区已失效，请重新选择或关闭选区上下文。')
   const actionContext = state.creativeActionContext
   creativeAction ??= actionContext?.projectId === activeProjectId && actionContext.documentId === state.currentDocId && actionContext.tabName === state.activeTab ? actionContext.action : ''
+  if (followup === undefined) followup = state.followupContext
+  if (followup && (followup.projectId !== activeProjectId || followup.documentId !== state.currentDocId || followup.tabName !== state.activeTab)) throw new Error('继续修改的候选属于其他文档，请重新选择候选或改为新请求')
+  if (followup && !['text', 'discussion'].includes(purpose)) throw new Error('继续修改只适用于文字候选或讨论，请先改为新请求')
   const draft = prepareGeneration({
     project: state.project, documentId: state.currentDocId, tabName: state.activeTab,
     documents: state.documents, tabContents: state.tabContents, structure: state.structure, prompt,
     includeUpstream: document.querySelectorAll('.context-chip')[0]?.getAttribute('aria-pressed') === 'true',
     includeCharacters: document.querySelectorAll('.context-chip')[1]?.getAttribute('aria-pressed') === 'true',
     knowledgeChunks: getSelectedKnowledgeChunks(), includeCurrent: state.includeCurrentContext,
-    selectedText, objectReferences, excludedContextKeys: [...state.excludedContextKeys.keys()],
+    selectedText, objectReferences, followup, includeReferenceNotes: state.includeReferenceNotes, excludedContextKeys: [...state.excludedContextKeys.keys()],
     creativeAction: ['text', 'discussion'].includes(purpose) ? creativeAction : '',
     characterLimit: GENERATION_CHARACTER_LIMIT - (purpose === 'project-plan' ? OPERATION_CONTEXT_RESERVE : discussionInstruction.length)
   })
@@ -1598,6 +1648,8 @@ function renderContextObjects() {
 
 function removeContextItem(item) {
   if (item.key === 'current') state.includeCurrentContext = false
+  else if (item.key.startsWith('notes:')) state.includeReferenceNotes = false
+  else if (item.key.startsWith('followup:')) { state.followupContext = null; renderFollowupContext() }
   else if (item.key === 'selection') state.includeSelectionContext = false
   else if (item.key.startsWith('object:')) state.contextReferenceKeys = state.contextReferenceKeys.filter(key => key !== item.key.slice(7))
   else if (item.key.startsWith('knowledge:')) {
@@ -1615,12 +1667,13 @@ function renderContextPreview(draft = null) {
   document.querySelector('#contextPreviewMessages').textContent = ''
   document.querySelector('#contextExcludedList').replaceChildren()
   document.querySelector('#includeCurrentContext').checked = state.includeCurrentContext
+  const noteCheckbox = document.querySelector('#includeReferenceNotes'); if (noteCheckbox) noteCheckbox.checked = state.includeReferenceNotes !== false
   document.querySelector('#includeSelectionContext').checked = state.includeSelectionContext
   renderContextObjects()
   if (!getCurrentDocument()) { document.querySelector('#contextPreviewSummary').textContent = '创建或打开项目后查看发送范围'; return }
   try {
     const preview = draft || generationDraft(elements.promptInput.value.trim())
-    document.querySelector('#contextPreviewSummary').textContent = `发送范围${preview.creativeAction === 'continuity' ? ' · 连续性检查' : ''} · ${preview.characters.toLocaleString('zh-CN')} 字符${preview.truncated ? ' · 部分已截断' : ''}`
+    document.querySelector('#contextPreviewSummary').textContent = `发送范围${preview.creativeAction === 'continuity' ? ' · 连续性检查' : preview.creativeAction === 'continuation' ? ' · 从结尾续写' : ''} · ${preview.characters.toLocaleString('zh-CN')} 字符${preview.truncated ? ' · 部分已截断' : ''}`
     for (const item of preview.summary) {
       const line = document.createElement('li')
       const details = document.createElement('details'), summary = document.createElement('summary'), content = document.createElement('pre')
@@ -1832,7 +1885,7 @@ function failGeneration(message, generationId = state.activeGenerationId) {
   scheduleCandidateSave({ immediate: true })
 }
 
-function startGeneration(prompt, { clearComposer = true, purpose = null, creativeAction = null, connectionId = null, sourceFingerprint = '', storyboardRevision = null, storyboardSourceFingerprint: sourceStoryboardFingerprint = '', storyboardTaskId = null } = {}) {
+function startGeneration(prompt, { clearComposer = true, purpose = null, creativeAction = null, followup = undefined, storyboardApplyMode = null, connectionId = null, sourceFingerprint = '', storyboardRevision = null, storyboardSourceFingerprint: sourceStoryboardFingerprint = '', storyboardTaskId = null } = {}) {
   if (state.candidateApplying) return showToast('候选正在保存，请稍候')
   if (!getCurrentDocument()) return openDialog(elements.newProjectDialog)
   if (state.isGenerating || state.generationInFlight || (mediaWorkbench?.isStoryboardBusy?.() && !storyboardTaskId)) {
@@ -1861,7 +1914,7 @@ function startGeneration(prompt, { clearComposer = true, purpose = null, creativ
     document.querySelector('#reviewExistingPlan').hidden = purpose !== 'project-plan'
   }
   let prepared
-  try { prepared = generationDraft(cleanPrompt, purpose, creativeAction) }
+  try { prepared = generationDraft(cleanPrompt, purpose, creativeAction, followup) }
   catch (error) { showToast(readableError(error)); return }
   rememberCurrentCandidate()
   if (state.candidateDrafts.length >= MAX_CANDIDATE_DRAFTS) return showToast(`已保留 ${MAX_CANDIDATE_DRAFTS} 份待审稿，请先采纳或丢弃部分候选再生成`)
@@ -1890,6 +1943,8 @@ function startGeneration(prompt, { clearComposer = true, purpose = null, creativ
     projectId: activeProjectId,
     purpose,
     creativeAction: prepared.creativeAction || '',
+    ...(prepared.followup ? { followup: prepared.followup } : {}),
+    ...(purpose === 'storyboard' && storyboardApplyMode ? { storyboardApplyMode } : {}),
     sourceFingerprint,
     storyboardRevision,
     ...(purpose === 'storyboard' ? { storyboardSourceFingerprint: sourceStoryboardFingerprint || storyboardSourceFingerprint(state.storyboard, state.currentDocId) } : {}),
@@ -1903,6 +1958,8 @@ function startGeneration(prompt, { clearComposer = true, purpose = null, creativ
     knowledgeChunks: prepared.knowledgeChunks,
     messages: prepared.messages
   }
+  state.followupContext = null
+  renderFollowupContext()
   document.querySelector('#sentContextMessages').textContent = JSON.stringify(prepared.messages, null, 2)
   const profileKey = getAssistantProfileKey()
   const profile = assistantProfiles[profileKey]
@@ -1988,7 +2045,7 @@ function scheduleCandidateSave({ immediate = false } = {}) {
   const owner = activeProjectId
   const save = () => {
     state.candidateSaveTimer = null
-    if (owner === activeProjectId && !projectTransition && !state.candidateApplying) persistWorkspace()
+    if (owner === activeProjectId && !projectTransition && !state.candidateApplying) persistWorkspace({ coalesce: !immediate })
   }
   // Continuous tokens must not indefinitely postpone saving like editor debounce.
   if (immediate) save()
@@ -2035,6 +2092,14 @@ function renderCandidateDrafts() {
     review.addEventListener('toggle', () => { if (review.open) renderCandidateDiff() })
     elements.candidateContent.after(review)
   }
+  const continueButton = document.querySelector('#continueCandidateButton')
+  if (continueButton) {
+    continueButton.hidden = !['text', 'discussion'].includes(state.generationContext?.purpose) || !state.generationText.trim()
+    continueButton.disabled = state.isGenerating || state.candidateApplying
+    continueButton.textContent = state.generationContext?.purpose === 'discussion' ? '继续本次讨论' : '继续修改此候选'
+  }
+  const candidatePreview = document.querySelector('#candidateReadingPreview')
+  if (candidatePreview?.open) renderWritingPreview(document.querySelector('#candidateMarkdownPreview'), state.generationText)
   const select = shelf.querySelector('select')
   select.replaceChildren()
   const tabs = { script: '正文', outline: '大纲', references: '设定引用' }
@@ -2151,6 +2216,7 @@ function discardCandidate({ silent = false, remove = true, persist = true } = {}
 
 function abandonCandidateOnContextChange(documentId, tabName) {
   const context = state.generationContext
+  if (state.followupContext && (state.followupContext.documentId !== documentId || state.followupContext.tabName !== tabName)) { state.followupContext = null; renderFollowupContext() }
   if (!context || (context.documentId === documentId && context.tabName === tabName)) return
   rememberCurrentCandidate()
   discardCandidate({ silent: true, remove: false, persist: false })
@@ -2266,6 +2332,7 @@ async function saveManualSnapshot(button) {
 
 async function undoCustom() {
   if (state.activeTab === 'history') return
+  if (state.readingPreview) { state.readingPreview = false; updateWritingPreview() }
   const history = getEditHistory()
   const transaction = history.undo.at(-1)
   const currentContent = getCurrentContent()
@@ -2285,6 +2352,7 @@ async function undoCustom() {
 
 async function redoCustom() {
   if (state.activeTab === 'history') return
+  if (state.readingPreview) { state.readingPreview = false; updateWritingPreview() }
   const history = getEditHistory()
   const transaction = history.redo.at(-1)
   const currentContent = getCurrentContent()
@@ -3616,69 +3684,48 @@ function openNewContentDialog({ type = 'episode', parentId = null, actId = null 
 }
 
 async function createStructuredDocument({ type, title, parentId = null, actId = null, select = true } = {}) {
-  if (type === 'scene' && !state.structure.episodes[parentId]) return null
+  if (!['episode', 'scene'].includes(type)) return null
   const documentId = makeUniqueId(type)
   const documentData = createGenericDocument(documentId, title)
-
-  if (type === 'episode') {
-    if (!state.structure.acts.length) {
-      state.structure.acts.push({ id: 'act-1', title: '第一幕', collapsed: false, episodeIds: [] })
-    }
-    const targetAct = state.structure.acts.find((act) => act.id === actId) || state.structure.acts[0]
-    if (!targetAct) return null
-    const episodeNumber = getEpisodeIds().length + 1
-    Object.assign(documentData, {
-      breadcrumb: `第 ${episodeNumber} 集`,
-      kicker: `Episode ${String(episodeNumber).padStart(2, '0')} · draft`,
-      sceneTitle: title,
-      intent: '明确本集目标、核心冲突和结尾钩子，再拆分为可拍摄的分场。',
-      meta: ['0 场', '时长待定', '结构待完善'],
-      content: ''
-    })
-    state.documents[documentId] = documentData
-    state.structure.episodes[documentId] = { sceneIds: [] }
-    targetAct.episodeIds.push(documentId)
-  } else {
-    const episodeNumber = getEpisodeIds().indexOf(parentId) + 1
-    const sceneNumber = state.structure.episodes[parentId].sceneIds.length + 1
-    Object.assign(documentData, {
-      breadcrumb: `第 ${episodeNumber} 集 · 场 ${sceneNumber}`,
-      kicker: `${episodeNumber}-${sceneNumber} · 场景待定 · 时间待定`,
-      sceneTitle: title,
-      intent: '明确地点、出场人物，以及这场戏结束时必须发生的变化。',
-      meta: ['场景待定', '时间待定', '人物待定']
-    })
-    state.documents[documentId] = documentData
-    state.structure.episodes[parentId].sceneIds.push(documentId)
-  }
-
-  state.tabContents[documentId] = structuredClone(tabFallbacks)
-  state.versions[documentId] = []
-  state.versionCounters[documentId] = 0
-  renderProjectIdentity()
-  await persistWorkspace()
-  if (select) selectDocument(documentId)
-  return documentId
+  const episodeNumber = type === 'episode' ? getEpisodeIds().length + 1 : getEpisodeIds().indexOf(parentId) + 1
+  const sceneNumber = (state.structure.episodes[parentId]?.sceneIds.length || 0) + 1
+  Object.assign(documentData, type === 'episode' ? {
+    breadcrumb: `第 ${episodeNumber} 集`, kicker: `Episode ${String(episodeNumber).padStart(2, '0')} · draft`, sceneTitle: title,
+    intent: '明确本集目标、核心冲突和结尾钩子，再拆分为可拍摄的分场。', meta: ['0 场', '时长待定', '结构待完善'], content: ''
+  } : {
+    breadcrumb: `第 ${episodeNumber} 集 · 场 ${sceneNumber}`, kicker: `${episodeNumber}-${sceneNumber} · 场景待定 · 时间待定`, sceneTitle: title,
+    intent: '明确地点、出场人物，以及这场戏结束时必须发生的变化。', meta: ['场景待定', '时间待定', '人物待定']
+  })
+  const saved = await commitStructureChange({ type: 'create', kind: type, documentId, document: documentData, parentId, actId, select, tabContents: tabFallbacks })
+  return saved ? documentId : null
 }
 
-function refreshStructureMetadata() {
-  let episodeNumber = 0
-  state.structure.acts.forEach((act) => {
-    act.episodeIds.forEach((episodeId) => {
-      episodeNumber += 1
-      const episode = state.documents[episodeId]
-      if (!episode) return
-      episode.breadcrumb = `第 ${episodeNumber} 集`
-      const scenes = state.structure.episodes[episodeId]?.sceneIds || []
-      episode.meta[0] = `${scenes.length} 场`
-      scenes.forEach((sceneId, sceneIndex) => {
-        const scene = state.documents[sceneId]
-        if (!scene) return
-        scene.breadcrumb = `第 ${episodeNumber} 集 · 场 ${sceneIndex + 1}`
-        scene.kicker = scene.kicker.replace(/^\d+-\d+/, `${episodeNumber}-${sceneIndex + 1}`)
-      })
-    })
-  })
+async function commitStructureChange(action) {
+  if (!activeProjectId || projectTransition || state.candidateApplying || state.knowledgeBusy || state.isGenerating || state.generationInFlight || mediaWorkbench?.hasPendingWork() || mediaWorkbench?.isStoryboardBusy?.()) {
+    showToast('当前任务正在执行或保存，请稍候再调整内容结构')
+    return null
+  }
+  const owner = activeProjectId
+  setProjectTransition(true)
+  try {
+    if (!await saveImmediately({ announce: false })) return null
+    const prepared = prepareStructureChange(workspaceSnapshot(), action)
+    validateWorkspace(prepared.workspace, state.knowledge.index)
+    setSaveStatus('saving')
+    await saveProject(owner, prepared.workspace, state.knowledge.index)
+    const next = prepared.workspace
+    abandonCandidateOnContextChange(next.currentDocId, next.activeTab)
+    for (const key of ['documents', 'structure', 'tabContents', 'versions', 'versionCounters', 'currentDocId', 'activeTab']) state[key] = next[key]
+    state.workflowStep = null
+    editRevision += 1; unsavedEdits = false; state.storageFailed = false
+    renderProjectIdentity(); updateDocumentView(); mediaWorkbench?.refresh()
+    setSaveStatus('saved')
+    return prepared
+  } catch (error) {
+    state.storageFailed = true; setSaveStatus('error')
+    showToast(`操作未保存，原内容和结构已保留：${readableError(error)}`)
+    return null
+  } finally { setProjectTransition(false) }
 }
 
 function openDocumentDialog() {
@@ -3698,133 +3745,35 @@ function openDocumentDialog() {
 }
 
 async function moveCurrentDocument(direction) {
-  const position = getDocumentPosition(state.currentDocId)
-  if (!position) return
-  const currentIndex = position.kind === 'episode' ? position.episodeIndex : position.sceneIndex
-  const nextIndex = currentIndex + direction
-  if (nextIndex < 0 || nextIndex >= position.list.length) {
-    showToast(direction < 0 ? '已经是第一项' : '已经是最后一项')
-    return
-  }
-  const [documentId] = position.list.splice(currentIndex, 1)
-  position.list.splice(nextIndex, 0, documentId)
-  refreshStructureMetadata()
-  renderProjectIdentity()
-  updateDocumentView()
-  await persistWorkspace()
-  showToast(direction < 0 ? '已上移' : '已下移')
+  const saved = await commitStructureChange({ type: 'move', documentId: state.currentDocId, direction })
+  if (saved) showToast(direction < 0 ? '已上移' : '已下移')
 }
 
 async function duplicateCurrentDocument() {
-  const position = getDocumentPosition(state.currentDocId)
-  if (!position) return
-  const originalId = state.currentDocId
-  const original = state.documents[originalId]
-  const duplicateId = makeUniqueId(position.kind)
-  state.documents[duplicateId] = { ...structuredClone(original), title: `${original.title} · 副本`, badge: '待完善' }
-  state.tabContents[duplicateId] = structuredClone(state.tabContents[originalId] || tabFallbacks)
-  state.versions[duplicateId] = []
-  state.versionCounters[duplicateId] = 0
-
-  if (position.kind === 'episode') {
-    state.structure.episodes[duplicateId] = { sceneIds: [] }
-    position.list.splice(position.episodeIndex + 1, 0, duplicateId)
-  } else {
-    position.list.splice(position.sceneIndex + 1, 0, duplicateId)
-  }
+  const saved = await commitStructureChange({ type: 'duplicate', documentId: state.currentDocId, newId: makeUniqueId(getDocumentKind(state.currentDocId)) })
+  if (!saved) return
   elements.documentDialog.close()
-  refreshStructureMetadata()
-  renderProjectIdentity()
-  await persistWorkspace()
-  selectDocument(duplicateId)
-  showToast(`已创建“${state.documents[duplicateId].title}”`)
+  showToast(`已创建“${state.documents[saved.result].title}”`)
 }
 
 async function deleteCurrentDocument(button) {
   const position = getDocumentPosition(state.currentDocId)
-  if (!position) {
-    showToast('前期创作文档不能删除')
-    return
-  }
-  const childSceneCount = position.kind === 'episode'
-    ? state.structure.episodes[state.currentDocId]?.sceneIds.length || 0
-    : 0
+  if (!position) return showToast('前期创作文档不能删除')
+  const childSceneCount = position.kind === 'episode' ? state.structure.episodes[state.currentDocId]?.sceneIds.length || 0 : 0
   if (childSceneCount && button?.dataset.confirmed !== 'true') {
-    button.dataset.confirmed = 'true'
-    button.textContent = `确认删除本集与 ${childSceneCount} 个分场`
-    const warning = document.querySelector('#deleteDocumentConfirm')
-    warning.hidden = false
+    button.dataset.confirmed = 'true'; button.textContent = `确认删除本集与 ${childSceneCount} 个分场`
+    const warning = document.querySelector('#deleteDocumentConfirm'); warning.hidden = false
     warning.querySelector('span').textContent = `此操作会同时删除本集下的 ${childSceneCount} 个分场。删除后仍可在 7 秒内撤销。`
     return
   }
-  const removedIds = position.kind === 'episode'
-    ? [state.currentDocId, ...(state.structure.episodes[state.currentDocId]?.sceneIds || [])]
-    : [state.currentDocId]
-  const removedTitle = state.documents[state.currentDocId].title
-  const deletedDocumentId = state.currentDocId
-  const deletion = {
-    kind: position.kind,
-    actId: state.structure.acts[position.actIndex]?.id || null,
-    episodeId: position.episodeId || deletedDocumentId,
-    index: position.kind === 'episode' ? position.episodeIndex : position.sceneIndex,
-    episodeStructure: position.kind === 'episode' ? structuredClone(state.structure.episodes[deletedDocumentId]) : null,
-    documents: Object.fromEntries(removedIds.map((documentId) => [documentId, structuredClone(state.documents[documentId])])),
-    tabContents: Object.fromEntries(removedIds.map((documentId) => [documentId, structuredClone(state.tabContents[documentId])])),
-    versions: Object.fromEntries(removedIds.map((documentId) => [documentId, structuredClone(state.versions[documentId] || [])])),
-    versionCounters: Object.fromEntries(removedIds.map((documentId) => [documentId, state.versionCounters[documentId] || 0]))
-  }
-
-  position.list.splice(position.kind === 'episode' ? position.episodeIndex : position.sceneIndex, 1)
-  if (position.kind === 'episode') delete state.structure.episodes[state.currentDocId]
-  removedIds.forEach((documentId) => {
-    delete state.documents[documentId]
-    delete state.tabContents[documentId]
-    delete state.versions[documentId]
-    delete state.versionCounters[documentId]
-  })
+  const owner = activeProjectId, documentId = state.currentDocId, title = state.documents[documentId].title
+  const saved = await commitStructureChange({ type: 'delete', documentId })
+  if (!saved) return
   elements.documentDialog.close()
-  state.currentDocId = position.kind === 'scene' && state.documents[position.episodeId] ? position.episodeId : 'outline'
-  state.activeTab = 'script'
-  refreshStructureMetadata()
-  renderProjectIdentity()
-  updateDocumentView()
-  await persistWorkspace()
-  showToast(`已删除“${removedTitle}”`, {
-    actionLabel: '撤销',
-    duration: 7000,
-    onAction: async () => {
-      if (!await saveImmediately({ announce: false })) return
-      if (removedIds.some((documentId) => state.documents[documentId])) {
-        showToast('已有同标识的新内容，无法自动恢复；请从历史版本取回')
-        return
-      }
-      const targetAct = deletion.kind === 'episode'
-        ? state.structure.acts.find((act) => act.id === deletion.actId) || state.structure.acts[0]
-        : null
-      const parent = deletion.kind === 'scene' ? state.structure.episodes[deletion.episodeId] : null
-      if ((deletion.kind === 'episode' && !targetAct) || (deletion.kind === 'scene' && !parent)) {
-        showToast(deletion.kind === 'episode' ? '原分幕已不存在，无法自动恢复' : '原分集已不存在，无法自动恢复')
-        return
-      }
-      Object.assign(state.documents, deletion.documents)
-      Object.assign(state.tabContents, deletion.tabContents)
-      Object.assign(state.versions, deletion.versions)
-      Object.assign(state.versionCounters, deletion.versionCounters)
-      if (deletion.kind === 'episode') {
-        state.structure.episodes[deletedDocumentId] = deletion.episodeStructure
-        targetAct.episodeIds.splice(Math.min(deletion.index, targetAct.episodeIds.length), 0, deletedDocumentId)
-      } else {
-        parent.sceneIds.splice(Math.min(deletion.index, parent.sceneIds.length), 0, deletedDocumentId)
-      }
-      state.currentDocId = deletedDocumentId
-      state.activeTab = 'script'
-      refreshStructureMetadata()
-      renderProjectIdentity()
-      updateDocumentView()
-      await persistWorkspace()
-      showToast('已恢复删除的内容')
-    }
-  })
+  showToast(`已删除“${title}”`, { actionLabel: '撤销', duration: 7000, onAction: async () => {
+    if (owner !== activeProjectId) return
+    if (await commitStructureChange({ type: 'restore', documentId, removed: saved.result })) showToast('已恢复删除的内容')
+  } })
 }
 
 async function advanceStage() {
@@ -3845,10 +3794,16 @@ async function advanceStage() {
   }
   const kind = getDocumentKind(state.currentDocId)
   if (kind === 'episode') {
+    const firstScene = state.structure.episodes[state.currentDocId]?.sceneIds[0]
+    if (firstScene) { await selectDocument(firstScene); return }
     openNewContentDialog({ type: 'scene', parentId: state.currentDocId })
     return
   }
-  if (kind === 'scene') openNewContentDialog({ type: 'scene', parentId: getParentEpisodeId(state.currentDocId) })
+  if (kind === 'scene') {
+    const next = sceneNavigation(state.currentDocId, state.structure).next
+    if (next) await selectDocument(next)
+    else openNewContentDialog({ type: 'scene', parentId: getParentEpisodeId(state.currentDocId) })
+  }
 }
 
 async function handleAction(button, action) {
@@ -3934,12 +3889,17 @@ async function handleAction(button, action) {
     case 'redo': redoCustom(); break
     case 'send-prompt': if (state.isGenerating) stopGeneration(); else startGeneration(elements.promptInput.value); break
     case 'discard-candidate': discardCandidate(); break
-    case 'retry-generation': startGeneration(state.lastPrompt, { clearComposer: false, purpose: state.generationContext?.purpose || 'text', creativeAction: state.generationContext?.creativeAction || '', storyboardRevision: state.storyboard.revision, storyboardSourceFingerprint: storyboardSourceFingerprint(state.storyboard, state.currentDocId), sourceFingerprint: contentFingerprint(getCurrentContent()) }); break
+    case 'retry-generation': startGeneration(state.lastPrompt, { clearComposer: false, purpose: state.generationContext?.purpose || 'text', creativeAction: state.generationContext?.creativeAction || '', followup: state.generationContext?.followup || null, storyboardApplyMode: state.generationContext?.storyboardApplyMode || null, storyboardRevision: state.storyboard.revision, storyboardSourceFingerprint: storyboardSourceFingerprint(state.storyboard, state.currentDocId), sourceFingerprint: contentFingerprint(getCurrentContent()) }); break
     case 'review-project-plan': projectPlanUI?.open(elements.candidateContent.textContent, state.generationContext?.operationContext, { candidateId: state.activeCandidateId }); break
     case 'review-existing-plan': if (state.isGenerating) showToast('请先停止或等待当前任务'); else projectPlanUI?.open(); break
     case 'accept-candidate': acceptCandidate(); break
     case 'apply-candidate': applyCandidate(button.dataset.applyMode); break
+    case 'continue-candidate': prepareCandidateFollowup(); break
+    case 'clear-followup': state.followupContext = null; renderFollowupContext(); renderContextPreview(); break
+    case 'toggle-writing-preview': state.readingPreview = !state.readingPreview; updateWritingPreview(); break
     case 'advance-stage': advanceStage(); break
+    case 'previous-scene': { const previous = sceneNavigation(state.currentDocId, state.structure).previous; if (previous) await selectDocument(previous); break }
+    case 'new-scene': openNewContentDialog({ type: 'scene', parentId: getParentEpisodeId(state.currentDocId) }); break
     case 'edit-document': openDocumentDialog(); break
     case 'move-document-up': moveCurrentDocument(-1); break
     case 'move-document-down': moveCurrentDocument(1); break
@@ -4150,12 +4110,12 @@ document.querySelector('#contextObjectPicker').addEventListener('toggle', event 
 document.querySelector('#contextObjectPicker').addEventListener('keydown', event => {
   if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); document.querySelector('#contextObjectPicker').open = false; elements.promptInput.focus() }
 })
-for (const [id, key] of [['includeCurrentContext', 'includeCurrentContext'], ['includeSelectionContext', 'includeSelectionContext']]) {
+for (const [id, key] of [['includeCurrentContext', 'includeCurrentContext'], ['includeReferenceNotes', 'includeReferenceNotes'], ['includeSelectionContext', 'includeSelectionContext']]) {
   document.querySelector(`#${id}`).addEventListener('change', event => { state[key] = event.target.checked; renderContextPreview() })
 }
 elements.scriptEditor.addEventListener('select', () => { if (state.includeSelectionContext) renderContextPreview() })
 document.querySelector('#resetContextScope').addEventListener('click', () => {
-  state.includeCurrentContext = true; state.includeSelectionContext = false; state.excludedContextKeys.clear(); state.contextReferenceKeys = []
+  state.includeCurrentContext = true; state.includeReferenceNotes = true; state.includeSelectionContext = false; state.excludedContextKeys.clear(); state.contextReferenceKeys = []
   document.querySelectorAll('.context-chip').forEach(chip => chip.setAttribute('aria-pressed', 'true'))
   syncCurrentDocumentReferences()
   renderContextPreview()
@@ -4211,7 +4171,8 @@ function loadProjectSnapshot(snapshot) {
   window.clearTimeout(state.saveTimer)
   activeProjectId = snapshot.id
   state.workflowStep = null
-  state.contextReferenceKeys = []; state.excludedContextKeys.clear(); state.includeCurrentContext = true; state.includeSelectionContext = false
+  state.contextReferenceKeys = []; state.excludedContextKeys.clear(); state.includeCurrentContext = true; state.includeReferenceNotes = true; state.includeSelectionContext = false
+  state.followupContext = null; renderFollowupContext()
   document.querySelector('#contextObjectPicker').open = false
   const workspace = snapshot.workspace
   state.candidateDrafts = structuredClone(workspace.candidateDrafts || [])
@@ -4497,17 +4458,31 @@ async function switchProject(id) {
   } finally { setProjectTransition(false) }
 }
 
-async function exportProject(format) {
+async function exportProject(format, options = null) {
   if (!activeProjectId) return
+  if (format === 'md' && options === null) { openDialog(document.querySelector('#markdownExportDialog')); return }
   if (state.activeTab !== 'history') setCurrentContent(elements.scriptEditor.value)
   const workspace = workspaceSnapshot()
   const content = format === 'json' ? projectBackup(workspace, state.knowledge.index)
-    : projectMarkdown(workspace)
+    : projectMarkdown(workspace, options || {})
   try {
     const path = await downloadDocument(`${state.project.name}.${format}`, content)
     showToast(`已导出到：${path}`)
-  } catch (error) { showToast(readableError(error, '导出失败')) }
+    return true
+  } catch (error) { showToast(readableError(error, '导出失败')); return false }
 }
+
+document.querySelector('#markdownExportForm').addEventListener('submit', async event => {
+  event.preventDefault()
+  const button = event.currentTarget.querySelector('[type="submit"]')
+  button.disabled = true
+  try {
+    if (await exportProject('md', { includeOutline: document.querySelector('#exportIncludeOutline').checked, includeReferences: document.querySelector('#exportIncludeReferences').checked })) document.querySelector('#markdownExportDialog').close()
+  } finally { button.disabled = false }
+})
+document.querySelector('#candidateReadingPreview').addEventListener('toggle', event => {
+  if (event.currentTarget.open) renderWritingPreview(document.querySelector('#candidateMarkdownPreview'), state.generationText)
+})
 
 document.querySelector('#newProjectForm').addEventListener('submit', async (event) => {
   event.preventDefault()
@@ -4608,18 +4583,12 @@ document.querySelector('#documentForm').addEventListener('submit', async (event)
     document.querySelector('#documentName').focus()
     return
   }
-  documentData.title = title
-  documentData.sceneTitle = title
-  documentData.intent = String(formData.get('intent') || '').trim() || documentData.intent
-  documentData.kicker = String(formData.get('kicker') || '').trim() || documentData.kicker
   const meta = String(formData.get('meta') || '').split(/[，,]/).map((item) => item.trim()).filter(Boolean).slice(0, 8)
-  documentData.meta = meta.length ? meta : ['待完善']
-  documentData.badge = '创作中'
-  elements.documentDialog.close()
-  renderProjectIdentity()
-  updateDocumentView()
-  await persistWorkspace()
-  showToast('内容信息已更新')
+  const saved = await commitStructureChange({ type: 'metadata', documentId: state.currentDocId, patch: {
+    title, sceneTitle: title, intent: String(formData.get('intent') || '').trim() || documentData.intent,
+    kicker: String(formData.get('kicker') || '').trim() || documentData.kicker, meta: meta.length ? meta : ['待完善'], badge: '创作中'
+  } })
+  if (saved) { elements.documentDialog.close(); showToast('内容信息已更新') }
 })
 
 document.querySelector('#connectionKind').addEventListener('change', (event) => {
@@ -5023,6 +4992,7 @@ function initializeProjectMediaWorkbench() {
   secret: connectionSecret,
   beforeSubmit: async () => { if (!await saveImmediately({ announce: false })) throw new Error('请先保存当前项目再生成媒体') },
   stopText: stopGeneration,
+  openDocument: async documentId => selectDocument(documentId),
   requestText: async (prompt, metadata) => {
     const owner = activeProjectId
     if (state.isGenerating || state.generationInFlight) return showToast('请先等待当前文字任务完成或停止')

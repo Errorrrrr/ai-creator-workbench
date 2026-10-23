@@ -236,7 +236,7 @@ test('连续性快捷操作只准备可审阅的请求，不直接调用模型�
   const nodes = new Map(), toasts = [], started = []
   const node = selector => { if (!nodes.has(selector)) nodes.set(selector, { value: '', hidden: false, open: false, closest() { return this } }); return nodes.get(selector) }
   const state = { currentDocId: 'scene-b', activeTab: 'script' }, elements = { promptInput: { value: '' } }
-  const context = vm.createContext({ state, elements, activeProjectId: 'project-1', document: { querySelector: node }, focusAssistant() {}, renderContextPreview() {}, showToast: message => toasts.push(message), startGeneration: prompt => started.push(prompt) })
+  const context = vm.createContext({ state, elements, activeProjectId: 'project-1', document: { querySelector: node }, focusAssistant() {}, renderContextPreview() {}, renderFollowupContext() {}, showToast: message => toasts.push(message), startGeneration: prompt => started.push(prompt) })
   vm.runInContext(productionFunction('prepareAssistantAction'), context)
   context.prepareAssistantAction('核对连续性', 'continuity')
   assert.deepEqual(started, [])

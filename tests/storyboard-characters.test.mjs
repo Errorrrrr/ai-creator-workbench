@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-import { createShot, parseStoryboardCandidate, validateStoryboard, storyboardPrompt, contentFingerprint, storyboardSourceFingerprint } from '../src/storyboard.js'
+import { createShot, parseStoryboardCandidate, validateStoryboard, storyboardPrompt, contentFingerprint, storyboardSourceFingerprint, snapshotStoryboardSource } from '../src/storyboard.js'
 import { projectCharacterNames, matchShotCharacters, bindShotCharacters } from '../src/storyboard-characters.js'
 import { bindShotReferences } from '../src/storyboard-references.js'
 import { replaceSourceShots } from '../src/storyboard-scope.js'
@@ -92,10 +92,10 @@ function autoHarness() {
   const saves = [], notices = []
   const environment = {
     context: () => data, assets, candidate: null, candidateRestoredProjectId: null, invoke: true, projectId: 'project', loading: false, error: '',
-    contentFingerprint, storyboardSourceFingerprint, parseStoryboardCandidate, bindShotCharacters, bindShotReferences, SHOT_LIMIT: 120,
+    contentFingerprint, storyboardSourceFingerprint, parseStoryboardCandidate, bindShotCharacters, bindShotReferences, snapshotStoryboardSource, SHOT_LIMIT: 120,
     run: async fn => { try { return await fn() } catch (error) { notices.push(error.message) } },
     candidateHost: { querySelector: () => null },
-    changeStoryboard: async (fn, options) => { const next = structuredClone(data.storyboard); fn(next.shots); next.revision++; data.storyboard = next; saves.push(options) },
+    changeStoryboard: async (fn, options) => { const next = structuredClone(data.storyboard); fn(next.shots, next); next.revision++; data.storyboard = next; saves.push(options) },
     onCandidateResolved: null, selectedShotId: null, showSource() {}, renderSources() {}, renderCandidate() {}, renderShots() {}, notify: message => notices.push(message),
     refresh: async () => {}, navigate() {}
   }
@@ -187,5 +187,24 @@ test('追加与替换成功后清空候选，界面回调失败也不能重复�
     assert.deepEqual(h.data.storyboard.shots.find(s => s.id === other.id), other)
     await h.environment.applyCandidate(replace)
     assert.equal(h.saves.length, 1, 'double action cannot append or replace the resolved candidate again')
+  }
+})
+
+test('已有分场明确选择重做才自动替换，并完整保留旧镜头及固定素材历史', async () => {
+  const h = autoHarness(), original = h.data.storyboard.shots[0]
+  original.sourceDocumentId = 'scene'; original.selectedImageVersionId = 'pinned-image'; original.references = [{ versionId: 'lu', role: 'reference', origin: 'manual' }]
+  const before = structuredClone(original)
+  h.environment.replaceSourceShots = replaceSourceShots
+  await h.environment.receive(candidate, { projectId: 'project', documentId: 'scene', sourceFingerprint: contentFingerprint('剧本'), storyboardSourceFingerprint: storyboardSourceFingerprint(h.data.storyboard, 'scene'), storyboardApplyMode: 'replace' }, 'new-draft', { autoApply: true })
+  assert.equal(h.data.storyboard.shots.length, 2, 'redo must not append duplicate shots')
+  assert.deepEqual(h.data.storyboard.sourceVersions[0].shots[0], before)
+  assert.equal(h.saves[0].resolvedCandidateId, 'new-draft')
+})
+
+test('已有分场选择对比或旧请求无明确方式时不自动写入', async () => {
+  for (const storyboardApplyMode of ['compare', undefined]) {
+    const h = autoHarness(); h.data.storyboard.shots[0].sourceDocumentId = 'scene'
+    await h.environment.receive(candidate, { projectId: 'project', documentId: 'scene', sourceFingerprint: contentFingerprint('剧本'), storyboardApplyMode }, 'new-draft', { autoApply: true })
+    assert.equal(h.saves.length, 0); assert.equal(h.data.storyboard.shots.length, 1); assert.ok(h.environment.candidate)
   }
 })

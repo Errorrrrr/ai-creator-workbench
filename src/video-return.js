@@ -1,3 +1,4 @@
+import { shotInputFingerprint, shotInputFieldFingerprints } from './storyboard.js'
 // A filename is a suggestion, never permission to replace a selected version.
 const formats = new Set(['google-flow-handoff', 'meta-muse-chat-handoff'])
 
@@ -11,6 +12,7 @@ export function parseVideoManifest(text, projectId) {
   for (const shot of manifest.shots) {
     if (typeof shot?.id !== 'string' || !shot.id || shot.id.length > 128 || !Number.isSafeInteger(shot.number) || shot.number < 1 || ids.has(shot.id) || numbers.has(shot.number)) throw new Error('清单中的镜头编号或标识无效／重复')
     ids.add(shot.id); numbers.add(shot.number)
+    if (shot.inputFingerprint !== undefined && (typeof shot.inputFingerprint !== 'string' || shot.inputFingerprint.length > 200)) throw new Error('清单制作指纹无效')
   }
   return manifest
 }
@@ -20,7 +22,7 @@ function containsId(name, id) {
   return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i').test(name)
 }
 
-export function planVideoReturn({ shots, assets, manifest = null }) {
+export function planVideoReturn({ shots, assets, manifest = null, documents = {} }) {
   const manifestShots = manifest?.shots || []
   return assets.filter(asset => asset.kind === 'video').flatMap(asset => (asset.versions || []).filter(version => version.mimeType?.startsWith('video/')).map(version => {
     const name = version.name || asset.name
@@ -36,9 +38,18 @@ export function planVideoReturn({ shots, assets, manifest = null }) {
     const shot = shots.find(shot => shot.id === shotId)
     const source = manifestShots.find(item => item.id === shotId)
     const warnings = []
+    const verifiable = Boolean(source?.inputFingerprint)
+    const outdated = Boolean(shot && verifiable && source.inputFingerprint !== shotInputFingerprint(shot, documents))
+    if (!verifiable) warnings.push('缺少制作输入快照，无法校验导出后修改；请手动核对并勾选')
+    if (outdated) {
+      const labels = { title: '标题', visual: '画面', action: '动作', dialogue: '对白', camera: '运镜', duration: '剧情时长', videoDuration: '生成时长', references: '参考图版本', selectedImageVersionId: '分镜图', sourceFingerprint: '来源剧本', characterNames: '角色', sceneNames: '场景', propNames: '道具', entryState: '进入状态', exitState: '结束状态', transition: '衔接', aspectRatio: '画幅', imageSize: '图片尺寸', imageQuality: '图片质量', videoMode: '生成模式', sourceDocumentId: '所属分场' }
+      const current = shotInputFieldFingerprints(shot, documents)
+      const changes = source.inputSnapshotVersion === 1 && source.inputSnapshot && typeof source.inputSnapshot === 'object' ? Object.keys(current).filter(key => current[key] !== source.inputSnapshot[key]).map(key => labels[key] || key) : []
+      warnings.push(`导出后镜头已修改${changes.length ? `：${changes.join('、')}` : ''}；此视频需重新核对`)
+    }
     if (source?.sourceFingerprint && source.sourceFingerprint !== shot?.sourceFingerprint) warnings.push('拆镜来源与导出时不同，请核对内容')
     if (shot?.selectedVideoVersionId && shot.selectedVideoVersionId !== version.id) warnings.push('确认后更换选用版本，原视频仍保留')
-    return { assetId: asset.id, versionId: version.id, name, shotId, reason, warnings }
+    return { assetId: asset.id, versionId: version.id, name, shotId, reason, warnings, outdated, verifiable }
   }))
 }
 
@@ -52,7 +63,7 @@ export function applyVideoReturn(storyboard, assignments, assets) {
     seen.add(shotId)
     const exists = assets.some(asset => asset.kind === 'video' && asset.versions?.some(version => version.id === versionId && version.mimeType?.startsWith('video/')))
     if (!exists) throw new Error('视频版本已不存在，请重新导入或刷新')
-    if (shot.selectedVideoVersionId !== versionId) { shot.selectedVideoVersionId = versionId; shot.reviewedVideoVersionId = '' }
+    if (shot.selectedVideoVersionId !== versionId) { shot.selectedVideoVersionId = versionId; shot.reviewedVideoVersionId = ''; delete shot.reviewedInputFingerprint }
   }
   next.revision += 1
   return next

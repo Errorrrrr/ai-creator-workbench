@@ -1,0 +1,29 @@
+.production-dialog, .asset-compare-dialog { width: min(1080px, calc(100vw - 64px)); max-width: none; max-height: calc(100dvh - 64px); padding: 24px; }
+.production-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.production-dialog-heading h2 { margin: 0; font: 650 22px var(--font-ui); overflow-wrap: anywhere; }
+.production-dialog-heading > button { flex: 0 0 auto; }
+.production-dialog > select { margin: 8px 0 14px; max-width: 100%; }
+.production-table-scroll { overflow: auto; max-height: 56dvh; overscroll-behavior: contain; }
+.production-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.production-table th, .production-table td { padding: 10px 8px; text-align: left; border-bottom: 1px solid var(--line); }
+.production-table th { position: sticky; top: 0; background: var(--paper); color: var(--muted-strong); white-space: nowrap; }
+.production-table td:first-child { min-width: 190px; max-width: 360px; overflow-wrap: anywhere; }
+.production-table td small, .production-table td strong { display: block; }
+.production-table td small { color: var(--muted-strong); margin-bottom: 3px; }
+.production-table td button { white-space: nowrap; }
+.asset-library-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 0 0 auto; }
+.asset-library-tools input { flex: 1 1 220px; min-width: 140px; }
+.asset-library-tools select { max-width: 180px; flex: 0 1 auto; }
+.asset-usage { border-top: 1px solid var(--line); margin: 18px 0; padding-top: 12px; }
+.asset-usage h3 { margin: 0 0 8px; font-size: 14px; }
+.asset-usage-link { display: block; text-align: left; height: auto; white-space: normal; overflow-wrap: anywhere; padding: 5px 0; }
+.asset-compare-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.asset-compare-columns section { min-width: 0; }
+.asset-compare-columns select { width: 100%; margin: 8px 0 12px; }
+.asset-compare-columns .media-preview { width: 100%; max-height: 58dvh; object-fit: contain; }
+@media (max-width: 700px) {
+  .production-dialog, .asset-compare-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); padding: 16px; }
+  .asset-compare-columns { grid-template-columns: 1fr; }
+  .asset-compare-columns .media-preview { max-height: 38dvh; }
+  .asset-library-tools select { flex: 1 1 140px; max-width: none; }
+}

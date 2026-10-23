@@ -62,6 +62,7 @@ pub fn run() {
             media::media_export_version,
             video_export::media_export_flow,
             video_export::media_export_muse,
+            video_export::media_export_selected_videos,
             media::media_keyframes,
             media_jobs::media_submit,
             media_jobs::media_submit_batch,

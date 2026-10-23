@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFileSync } from 'node:fs'
 import { parseVideoManifest, planVideoReturn, applyVideoReturn } from '../src/video-return.js'
+import { shotInputFingerprint, shotInputFieldFingerprints } from '../src/storyboard.js'
 
 const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
 const appSource = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8')
@@ -41,8 +42,8 @@ function harness() {
   document.querySelector = selector => document.body.querySelector(selector)
   document.querySelectorAll = selector => document.body.querySelectorAll(selector)
   const data = { projectId: 'p1', documents: { scene1: { title: '第一场' } }, storyboard: { revision: 3, shots: [
-    { id: 's1', title: '第一镜', sourceDocumentId: 'scene1', selectedVideoVersionId: 'old-v', reviewedVideoVersionId: 'old-v' },
-    { id: 's2', title: '第二镜', sourceDocumentId: 'scene1', selectedVideoVersionId: '', reviewedVideoVersionId: '' }
+    { id: 's1', title: '第一镜', sourceDocumentId: 'scene1', references: [], selectedVideoVersionId: 'old-v', reviewedVideoVersionId: 'old-v' },
+    { id: 's2', title: '第二镜', sourceDocumentId: 'scene1', references: [], selectedVideoVersionId: '', reviewedVideoVersionId: '' }
   ] } }
   const assets = [
     { id: 'old', name: '原视频.mp4', kind: 'video', versions: [{ id: 'old-v', name: '原视频.mp4', mimeType: 'video/mp4' }] },
@@ -103,15 +104,45 @@ test('回填读取清单与导入期间 Escape 不能越过忙碌保护，空闲
   }
 })
 
+function checkFirstVideo(h) {
+  const check = h.dialog().querySelector('.video-return-row').querySelector('input')
+  check.checked = true; check.listeners.get('change')()
+}
+
+test('有效制作清单匹配默认勾选，导出后改镜头时提示具体变化且不默认关联', async () => {
+  for (const changed of [false, true]) {
+    const h = harness()
+    const manifest = { format: 'google-flow-handoff', version: 1, projectId: 'p1', shots: h.data.storyboard.shots.map((shot, index) => ({ number: index + 1, id: shot.id, inputFingerprint: shotInputFingerprint(shot, h.data.documents), inputSnapshotVersion: 1, inputSnapshot: shotInputFieldFingerprints(shot, h.data.documents) })) }
+    if (changed) h.data.storyboard.shots[0].visual = '导出后新画面'
+    await h.env.openVideoReturn()
+    const input = h.dialog().querySelectorAll('input').find(node => node.type === 'file')
+    input.files = [{ size: 1000, text: async () => JSON.stringify(manifest) }]; await input.listeners.get('change')()
+    await h.action('导入视频文件').click()
+    const row = h.dialog().querySelector('.video-return-row')
+    assert.equal(row.querySelector('input').checked, !changed)
+    assert.equal(h.action('确认关联选中的视频').disabled, changed)
+    if (changed) assert.ok(row.querySelectorAll('p').some(node => node.textContent.includes('画面')))
+  }
+})
+
+test('未使用制作清单时不默认勾选，用户需手动核对', async () => {
+  const h = harness(); await h.env.openVideoReturn(); await h.action('导入视频文件').click()
+  assert.equal(h.action('确认关联选中的视频').disabled, true)
+  assert.equal(h.dialog().querySelector('.video-return-row').querySelector('input').checked, false)
+  checkFirstVideo(h); assert.equal(h.action('确认关联选中的视频').disabled, false)
+})
+
 test('回填审阅后分镜变化必须重新核对，不能直接提交旧匹配', async () => {
   const h = harness(); await h.env.openVideoReturn()
   await h.action('导入视频文件').click()
+  checkFirstVideo(h)
   h.data.storyboard.revision++
   await h.action('确认关联选中的视频').click()
   assert.equal(h.calls.commits.length, 0)
   assert.equal(h.data.storyboard.shots[0].selectedVideoVersionId, 'old-v')
   assert.equal(h.dialog().open, true)
   assert.ok(h.calls.messages.some(message => message.includes('重新核对')))
+  checkFirstVideo(h)
   await h.action('确认关联选中的视频').click()
   assert.equal(h.calls.commits.length, 1)
   assert.equal(h.calls.commits[0].options.revision, 4)
@@ -120,6 +151,7 @@ test('回填审阅后分镜变化必须重新核对，不能直接提交旧匹�
 test('回填保存失败保持旧选用及审核，保留窗口可重试；成功后再关闭与定位', async () => {
   const h = harness(); await h.env.openVideoReturn()
   await h.action('导入视频文件').click()
+  checkFirstVideo(h)
   const before = structuredClone(h.data.storyboard), successfulCommit = h.env.commit
   h.env.commit = async () => { throw new Error('模拟保存失败') }
   await h.action('确认关联选中的视频').click()
@@ -153,7 +185,7 @@ test('清单读取期间项目切换，不产生未处理异常或启用旧项�
 
 test('回填已删除来源的镜头后定位到未归属范围', async () => {
   const h = harness(); h.data.storyboard.shots[0].sourceDocumentId = 'deleted-scene'
-  await h.env.openVideoReturn(); await h.action('导入视频文件').click(); await h.action('确认关联选中的视频').click()
+  await h.env.openVideoReturn(); await h.action('导入视频文件').click(); checkFirstVideo(h); await h.action('确认关联选中的视频').click()
   assert.equal(h.env.selectedSourceId, 'unassigned'); assert.equal(h.env.selectedEpisodeId, 'other')
   assert.equal(h.env.selectedShotId, 's1'); assert.equal(h.data.storyboard.shots[0].selectedVideoVersionId, 'new-v')
 })

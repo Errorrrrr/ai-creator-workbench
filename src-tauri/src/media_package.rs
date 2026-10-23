@@ -262,7 +262,8 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
     {
         return Err("项目工作区格式无效".into());
     }
-    if let Some(shots) = manifest.workspace["storyboard"]["shots"].as_array() {
+    let mut all_shot_ids = HashSet::new();
+    for shots in storyboard_shot_groups(&manifest.workspace)? {
         if shots.len() > 120 {
             return Err("分镜数量超限".into());
         }
@@ -273,7 +274,7 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
             if !shot_ids.insert(id) {
                 return Err("镜头标识重复".into());
             }
-            if !all_ids.insert(id) {
+            if all_shot_ids.insert(id) && !all_ids.insert(id) {
                 return Err("项目包不同对象共用了标识，拒绝模糊重映射".into());
             }
             for key in [
@@ -330,6 +331,52 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
     Ok(())
 }
 
+fn storyboard_shot_groups(workspace: &Value) -> Result<Vec<&Vec<Value>>, String> {
+    let mut groups = vec![];
+    if let Some(shots) = workspace["storyboard"]["shots"].as_array() { groups.push(shots); }
+    if let Some(history) = workspace["storyboard"].get("sourceVersions") {
+        let history = history.as_array().ok_or("分镜历史格式无效")?;
+        if history.len() > 10 { return Err("分镜历史数量超限".into()); }
+        for entry in history { groups.push(entry["shots"].as_array().ok_or("分镜历史缺少镜头")?); }
+    }
+    Ok(groups)
+}
+
+fn remap_storyboard(workspace: &mut Value, mapping: &mut HashMap<String, String>) -> Result<(), String> {
+    for shots in storyboard_shot_groups(workspace)? {
+        for shot in shots {
+            mapping.entry(shot["id"].as_str().ok_or("镜头标识缺失")?.into()).or_insert_with(media::new_id);
+        }
+    }
+    let remap = |shots: &mut Vec<Value>| -> Result<(), String> {
+        for shot in shots {
+            for key in ["id", "selectedImageVersionId", "selectedVideoVersionId", "reviewedVideoVersionId"] {
+                if let Some(id) = shot[key].as_str().filter(|id| !id.is_empty()) {
+                    shot[key] = json!(mapping.get(id).ok_or("镜头引用无法重映射")?);
+                }
+            }
+            if let Some(references) = shot["references"].as_array_mut() {
+                for reference in references {
+                    let id = reference["versionId"].as_str().ok_or("参考标识缺失")?;
+                    reference["versionId"] = json!(mapping.get(id).ok_or("参考媒体缺失")?);
+                }
+            }
+            if let Some(shot) = shot.as_object_mut() { shot.remove("reviewedInputFingerprint"); }
+        }
+        Ok(())
+    };
+    if let Some(shots) = workspace.get_mut("storyboard").and_then(|value| value.get_mut("shots")).and_then(Value::as_array_mut) { remap(shots)?; }
+    if let Some(history) = workspace.get_mut("storyboard").and_then(|value| value.get_mut("sourceVersions")).and_then(Value::as_array_mut) {
+        for entry in history {
+            entry["id"] = json!(media::new_id());
+            remap(entry["shots"].as_array_mut().ok_or("分镜历史格式无效")?)?;
+        }
+    }
+    // Document keys are kept verbatim by project import; sourceDocumentId points
+    // to those project-local keys and must remain the same in current/history shots.
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn media_export_package(
     app: tauri::AppHandle,
@@ -374,8 +421,6 @@ fn export(
             .as_ref()
             .map(|_| "历史任务未完成或曾中断；错误详情保留在原项目，不随包导出本机路径".into());
     }
-    let stage = tempfile::tempdir_in(media::media_root(app)?.join("incoming"))
-        .map_err(|e| e.to_string())?;
     let mut entries = vec![];
     for asset in &mut assets {
         for version in &mut asset.versions {
@@ -390,25 +435,17 @@ fn export(
             {
                 provenance.remove("remoteId");
             }
-            let (path, mime, bytes) = media::stored_file(app, Some(project_id), &version.file_id)?;
-            let mut output =
-                File::create(stage.path().join(&version.file_id)).map_err(|e| e.to_string())?;
-            let crc = copy_checked(
-                &mut File::open(path).map_err(|e| e.to_string())?,
-                &mut output,
-                bytes,
-            )?;
-            output.sync_all().map_err(|e| e.to_string())?;
             entries.push(Entry {
                 file_id: version.file_id.clone(),
                 version_id: version.id.clone(),
-                mime_type: mime,
-                bytes,
-                crc32: crc,
+                mime_type: version.mime_type.clone(),
+                bytes: version.bytes,
+                // Reserve the longest JSON checksum before doing any file I/O.
+                crc32: u32::MAX,
             });
         }
     }
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         format: "ai-creator-workbench-media".into(),
         version: 1,
         checksum_algorithm: "crc32".into(),
@@ -418,17 +455,19 @@ fn export(
         jobs,
         files: entries,
     };
-    validate_manifest(&manifest)?;
-    let metadata = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
-    let total = manifest
-        .files
-        .iter()
-        .try_fold(20u64 + metadata.len() as u64, |sum, entry| {
-            sum.checked_add(entry.bytes).ok_or("完整包长度溢出")
-        })?;
-    if metadata.len() as u64 > MAX_MANIFEST || total > MAX_PACKAGE {
-        return Err("完整项目包超过 64 MiB 元数据或 8 GiB 总容量限制".into());
+    preflight_export(&manifest)?;
+    let stage = tempfile::tempdir_in(media::media_root(app)?.join("incoming"))
+        .map_err(|e| e.to_string())?;
+    for entry in &mut manifest.files {
+        let (path, mime, bytes) = media::stored_file(app, Some(project_id), &entry.file_id)?;
+        if mime != entry.mime_type || bytes != entry.bytes {
+            return Err("媒体登记在导出准备后发生变化，请重新导出".into());
+        }
+        let mut output = File::create(stage.path().join(&entry.file_id)).map_err(|e| e.to_string())?;
+        entry.crc32 = copy_checked(&mut File::open(path).map_err(|e| e.to_string())?, &mut output, bytes)?;
+        output.sync_all().map_err(|e| e.to_string())?;
     }
+    let metadata = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
     let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&downloads).map_err(|e| e.to_string())?;
     let mut file = tempfile::NamedTempFile::new_in(&downloads).map_err(|e| e.to_string())?;
@@ -454,6 +493,19 @@ fn export(
     sync_directory(&downloads)
         .map_err(|_| "项目包已写入但导出目录同步失败，请核验文件后重试".to_string())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+// This runs before a staging directory or any media copy is created.
+fn preflight_export(manifest: &Manifest) -> Result<(), String> {
+    validate_manifest(manifest)?;
+    let metadata = serde_json::to_vec(manifest).map_err(|e| e.to_string())?;
+    let total = manifest.files.iter().try_fold(20u64 + metadata.len() as u64, |sum, entry| {
+        sum.checked_add(entry.bytes).ok_or("完整包长度溢出")
+    })?;
+    if metadata.len() as u64 > MAX_MANIFEST || total > MAX_PACKAGE {
+        return Err("完整项目包超过 64 MiB 元数据或 8 GiB 总容量限制；尚未复制媒体文件".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -588,32 +640,7 @@ fn stage_import(app: &tauri::AppHandle, project_id: &str, path: &Path) -> Result
         media::valid_id(&job.id)?;
         mapping.insert(job.id.clone(), media::new_id());
     }
-    if let Some(shots) = manifest.workspace["storyboard"]["shots"].as_array_mut() {
-        for shot in shots.iter() {
-            mapping.insert(
-                shot["id"].as_str().ok_or("镜头标识缺失")?.into(),
-                media::new_id(),
-            );
-        }
-        for shot in shots {
-            for key in [
-                "id",
-                "selectedImageVersionId",
-                "selectedVideoVersionId",
-                "reviewedVideoVersionId",
-            ] {
-                if let Some(id) = shot[key].as_str().filter(|id| !id.is_empty()) {
-                    shot[key] = json!(mapping.get(id).ok_or("镜头引用无法重映射")?);
-                }
-            }
-            if let Some(references) = shot["references"].as_array_mut() {
-                for reference in references {
-                    let id = reference["versionId"].as_str().ok_or("参考标识缺失")?;
-                    reference["versionId"] = json!(mapping.get(id).ok_or("参考媒体缺失")?);
-                }
-            }
-        }
-    }
+    remap_storyboard(&mut manifest.workspace, &mut mapping)?;
     for asset in &mut manifest.assets {
         asset.id = mapping[&asset.id].clone();
         asset.project_id = project_id.into();
@@ -918,4 +945,48 @@ pub(crate) fn media_get_pending_import(
         serde_json::from_str(&payload).map_err(|_| "待导入数据损坏，原文件保留")?;
     finish_pending_files(&media::media_root(&app)?, &pending)?;
     Ok(json!(pending))
+}
+
+#[cfg(test)]
+mod export_preflight_tests {
+    use super::*;
+    fn manifest(count: usize, bytes: u64) -> Manifest {
+        let files: Vec<Entry> = (0..count).map(|i| Entry { file_id: format!("f-{i}"), version_id: format!("v-{i}"), mime_type: "video/mp4".into(), bytes, crc32: u32::MAX }).collect();
+        let assets = files.iter().enumerate().map(|(i, file)| Asset {
+            id: format!("a-{i}"), project_id: "p".into(), name: "视频".into(), role: "shot".into(), kind: "video".into(), selected_version_id: file.version_id.clone(), created_at: "1".into(), updated_at: "1".into(),
+            versions: vec![media::MediaVersion { id: file.version_id.clone(), file_id: file.file_id.clone(), name: "video.mp4".into(), mime_type: file.mime_type.clone(), bytes, created_at: "1".into(), metadata: json!({}) }],
+        }).collect();
+        Manifest { format:"ai-creator-workbench-media".into(), version:1, checksum_algorithm:"crc32".into(), workspace:json!({"project":{"name":"test"},"documents":{}}), index:Value::Null, assets, jobs:vec![], files }
+    }
+    #[test]
+    fn budgets_reject_before_any_media_files_are_opened() {
+        // No source files or staging directories exist for these metadata-only inputs.
+        assert!(preflight_export(&manifest(1, 1024)).is_ok());
+        assert!(preflight_export(&manifest(MAX_FILES + 1, 1)).is_err());
+        assert!(preflight_export(&manifest(17, media::MAX_MEDIA_BYTES)).is_err());
+        assert!(preflight_export(&manifest(16, media::MAX_MEDIA_BYTES)).is_err(), "metadata also counts against the 8 GiB budget");
+    }
+    #[test]
+    fn history_media_are_validated_and_remapped_with_current_shots() {
+        let mut value = manifest(1, 1024);
+        let shot = json!({"id":"shot","sourceDocumentId":"scene","selectedImageVersionId":"","selectedVideoVersionId":"v-0","reviewedVideoVersionId":"v-0","reviewedInputFingerprint":"old","references":[{"versionId":"v-0","role":"extend"}]});
+        value.workspace["storyboard"] = json!({"shots":[shot.clone()],"sourceVersions":[{"id":"history","sourceDocumentId":"scene","shots":[shot.clone()]}]});
+        assert!(validate_manifest(&value).is_ok(), "same shot identity may appear in history and current storyboard");
+        value.workspace["storyboard"]["sourceVersions"][0]["shots"][0]["selectedVideoVersionId"] = json!("missing");
+        assert!(validate_manifest(&value).is_err());
+        value.workspace["storyboard"]["sourceVersions"][0]["shots"][0] = shot;
+        let mut mapping = HashMap::from([("v-0".into(), "new-video".into())]);
+        remap_storyboard(&mut value.workspace, &mut mapping).unwrap();
+        let current = &value.workspace["storyboard"]["shots"][0];
+        let history = &value.workspace["storyboard"]["sourceVersions"][0]["shots"][0];
+        assert_eq!(current["id"], history["id"]);
+        assert_ne!(current["id"], "shot");
+        assert_eq!(history["selectedVideoVersionId"], "new-video");
+        assert_eq!(history["references"][0]["versionId"], "new-video");
+        assert_eq!(history["sourceDocumentId"], "scene");
+        assert!(history.get("reviewedInputFingerprint").is_none());
+        let mut legacy = json!({"project":{"name":"legacy"},"documents":{}});
+        remap_storyboard(&mut legacy, &mut mapping).unwrap();
+        assert!(legacy.get("storyboard").is_none());
+    }
 }

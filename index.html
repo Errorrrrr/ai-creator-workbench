@@ -14,6 +14,8 @@
     <link rel="stylesheet" href="./src/candidate-drafts-ui.css" />
     <link rel="stylesheet" href="./src/workbench-layout.css" />
     <link rel="stylesheet" href="./src/media-layout.css" />
+    <link rel="stylesheet" href="./src/writing-preview.css" />
+    <link rel="stylesheet" href="./src/production-tools.css" />
   </head>
   <body>
     <a class="skip-link" href="#workspaceMain">跳到正文编辑区</a>
@@ -329,6 +331,8 @@
                   <svg class="icon"><use href="#icon-history"></use></svg>
                   <span>v—</span>
                 </button>
+                <button class="secondary-button compact-button" id="previousSceneButton" type="button" data-action="previous-scene" hidden>上一场</button>
+                <button class="secondary-button compact-button" id="newSceneButton" type="button" data-action="new-scene" hidden>新增分场</button>
                 <button class="secondary-button compact-button stage-advance-button" id="stageAdvanceButton" type="button" data-action="advance-stage">
                   <span>下一步</span>
                   <svg class="icon"><use href="#icon-chevron-right"></use></svg>
@@ -378,10 +382,12 @@
                     </div>
                     <h2 id="sceneTitle" hidden></h2>
                   </div>
+                  <div class="editor-reading-controls"><button class="secondary-button compact-button" id="toggleWritingPreview" type="button" data-action="toggle-writing-preview" aria-pressed="false" aria-controls="writingPreview">阅读预览</button>
                   <button class="icon-button icon-button-compact" type="button" data-action="edit-document" aria-label="编辑当前内容信息" title="编辑当前内容信息">
                     <svg class="icon"><use href="#icon-more"></use></svg>
-                  </button>
+                  </button></div>
                 </div>
+                <div id="writingPreview" class="writing-preview" tabindex="0" aria-label="当前内容阅读预览" hidden></div>
                 <textarea id="scriptEditor" spellcheck="true" aria-describedby="editorStats"></textarea>
                 <div class="editor-footer" id="editorStats">
                   <div class="editor-stats-left">
@@ -602,6 +608,7 @@
               </div>
               <div class="context-scope-controls">
                 <label><input id="includeCurrentContext" type="checkbox" checked>当前正文／大纲</label>
+                <label><input id="includeReferenceNotes" type="checkbox" checked>本场参考笔记</label>
                 <label><input id="includeSelectionContext" type="checkbox">编辑器选区</label>
                 <button class="text-button" id="addContextObject" type="button" aria-controls="contextObjectPicker" aria-expanded="false">@ 添加对象</button>
               </div>
@@ -642,6 +649,7 @@
                   <span>正在梳理场景节奏</span>
                 </div>
                 <div class="candidate-content" id="candidateContent"></div>
+                <details class="candidate-reading-preview" id="candidateReadingPreview"><summary>阅读候选</summary><div class="writing-preview" id="candidateMarkdownPreview"></div></details>
                 <details class="sent-context-preview"><summary>查看本次已提交的文字快照</summary><pre id="sentContextMessages"></pre></details>
                 <div class="generation-error" id="generationError" role="status" hidden></div>
                 <div class="candidate-citations" id="candidateCitations" hidden>
@@ -650,6 +658,7 @@
                 </div>
                 <div class="candidate-actions" id="candidateActions" hidden>
                   <button class="secondary-button" type="button" data-action="retry-generation"><svg class="icon"><use href="#icon-refresh"></use></svg>重新生成</button>
+                  <button class="secondary-button" id="continueCandidateButton" type="button" data-action="continue-candidate" hidden>继续修改此候选</button>
                   <button class="primary-button" id="reviewProjectPlan" type="button" data-action="review-project-plan" hidden>审阅修改计划</button>
                   <button class="secondary-button" type="button" data-action="apply-candidate" data-apply-mode="insert"><svg class="icon"><use href="#icon-check"></use></svg>插入光标</button>
                   <button class="secondary-button" type="button" data-action="apply-candidate" data-apply-mode="replace"><svg class="icon"><use href="#icon-refresh"></use></svg>替换正文</button>
@@ -660,6 +669,7 @@
           </div>
 
           <div class="prompt-area">
+            <div class="followup-context" id="followupContext" hidden><span></span><button class="text-button" type="button" data-action="clear-followup">改为新请求</button></div>
             <div class="assistant-request-mode">
               <label for="assistantRequestMode">本次请求</label>
               <select id="assistantRequestMode" aria-describedby="requestModeHelp"><option value="text">文字候选</option><option value="discussion">仅讨论</option><option value="project-plan">项目计划 · 编辑与任务查询</option></select>
@@ -701,6 +711,13 @@
       </footer>
     </div>
 
+    <dialog id="markdownExportDialog" class="app-dialog form-dialog" aria-labelledby="markdownExportTitle">
+      <form method="dialog" id="markdownExportForm"><div class="dialog-content">
+        <h2 id="markdownExportTitle">导出 Markdown</h2><p class="dialog-description">按分幕、分集、分场顺序导出当前项目。选择需要一起交付的资料。</p>
+        <div class="writing-export-options"><label><input type="checkbox" id="exportIncludeOutline" checked>包含各文档大纲</label><label><input type="checkbox" id="exportIncludeReferences">包含参考笔记</label></div>
+        <div class="dialog-actions"><button class="secondary-button" type="button" data-action="close-dialog">取消</button><button class="primary-button" type="submit">导出文件</button></div>
+      </div></form>
+    </dialog>
     <dialog class="app-dialog project-plan-dialog" id="projectPlanDialog" aria-labelledby="projectPlanTitle" aria-describedby="projectPlanHelp">
       <div class="dialog-header"><div><span class="eyebrow">受控项目操作</span><h2 id="projectPlanTitle">审阅项目操作计划</h2><p class="dialog-description" id="projectPlanHelp">核对文档、镜头与素材选择后一次采纳。任务查询在预览时只读本地摘要，无需保存；媒体计划须另行核对实际输入并确认生成。此处不调用供应商、不执行任意命令。</p></div><button type="button" class="icon-button" data-action="close-dialog" aria-label="关闭项目计划"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
       <details class="project-plan-targets"><summary>查看本次允许的目标与媒体版本</summary><pre id="projectPlanTargets"></pre><p>目标来自已选正文或 @ 引用。选用素材须同时引用镜头和确切媒体版本；需要其他对象时，返回添加上下文后重新制定计划。</p></details>

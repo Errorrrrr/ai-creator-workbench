@@ -9,7 +9,7 @@ export function candidateGeneratedAtLabel(createdAt) {
 const MAX_TEXT_CHARACTERS = 2 * 1024 * 1024
 const TABS = ['script', 'outline', 'references']
 const DRAFT_FIELDS = ['id', 'documentId', 'tabName', 'prompt', 'text', 'createdAt', 'status', 'context']
-const CONTEXT_FIELDS = ['projectId', 'purpose', 'creativeAction', 'sourceFingerprint', 'storyboardRevision', 'storyboardSourceFingerprint', 'operationContext', 'documentId', 'tabName', 'title', 'baseContent', 'selectionStart', 'selectionEnd', 'knowledgeChunks', 'messages']
+const CONTEXT_FIELDS = ['projectId', 'purpose', 'creativeAction', 'followup', 'storyboardApplyMode', 'sourceFingerprint', 'storyboardRevision', 'storyboardSourceFingerprint', 'operationContext', 'documentId', 'tabName', 'title', 'baseContent', 'selectionStart', 'selectionEnd', 'knowledgeChunks', 'messages']
 const CHUNK_FIELDS = ['id', 'sourceId', 'name', 'path', 'content', 'start', 'end', 'updatedAt', 'vector']
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 const SENSITIVE_KEYS = new Set(['authorization', 'proxyauthorization', 'headers', 'cookie', 'cookies', 'setcookie', 'apikey', 'key', 'secret', 'clientsecret', 'password', 'passwd', 'token', 'accesstoken', 'refreshtoken', 'idtoken', 'credential', 'credentials', 'connection', 'connections', 'connectionid', 'baseurl', 'endpoint', 'privatekey', 'env', 'environment'])
@@ -67,7 +67,14 @@ function validateContext(context, draft) {
   for (const [key, value] of Object.entries(context)) if (key !== 'operationContext') validateJson(value)
   assert(id(context.projectId) && context.documentId === draft.documentId && context.tabName === draft.tabName, '候选上下文归属无效')
   assert(['text', 'discussion', 'project-plan', 'storyboard'].includes(context.purpose), '候选用途无效')
-  if (context.creativeAction !== undefined) assert(['', 'continuity'].includes(context.creativeAction), '候选创作操作无效')
+  if (context.creativeAction !== undefined) assert(['', 'continuity', 'continuation'].includes(context.creativeAction), '候选创作操作无效')
+  if (context.storyboardApplyMode !== undefined) assert(['replace', 'append', 'compare'].includes(context.storyboardApplyMode), '候选拆镜处理方式无效')
+  if (context.followup !== undefined && context.followup !== null) {
+    fields(context.followup, ['candidateId', 'projectId', 'documentId', 'tabName', 'purpose', 'prompt', 'text'], '继续修改上下文')
+    const followup = context.followup
+    assert(id(followup.candidateId) && followup.projectId === context.projectId && followup.documentId === context.documentId && followup.tabName === context.tabName, '继续修改上下文归属无效')
+    assert(['text', 'discussion'].includes(followup.purpose) && text(followup.prompt) && text(followup.text), '继续修改上下文内容无效')
+  }
   // The output cap does not truncate an existing large document's baseline;
   // workspace storage still enforces the total library size budget.
   assert(typeof context.title === 'string' && typeof context.baseContent === 'string', '候选原文快照无效')

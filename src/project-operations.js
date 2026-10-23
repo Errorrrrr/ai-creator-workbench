@@ -181,7 +181,7 @@ export function materializeOperationPlan(plan, base, { projectId, workspace, med
       const shot = next.storyboard.shots.find(item => item.id === operation.shotId), field = operation.kind === 'image' ? 'selectedImageVersionId' : 'selectedVideoVersionId'
       if (shot[field] === version.id) continue
       shot[field] = version.id
-      if (operation.kind === 'video') shot.reviewedVideoVersionId = ''
+      if (operation.kind === 'video') { shot.reviewedVideoVersionId = ''; delete shot.reviewedInputFingerprint }
       storyboardChanged = true
       changes.push({ label: `选用${operation.kind === 'image' ? '图片' : '视频'} · ${shot.title}`, before: `选用版本：${previous[field] || '未选择'}`, after: `${JSON.stringify(version, null, 2)}\n仅选用素材，未自动审核通过；采纳前核验本地文件。`, versionId: version.id })
     } else if (operation.tool === 'prepare_media_batch') {

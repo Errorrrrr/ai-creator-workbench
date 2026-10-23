@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { parseVideoManifest, planVideoReturn, applyVideoReturn } from '../src/video-return.js'
 import { buildFlowExport, buildMuseExport } from '../src/video-export.js'
-import { createShot } from '../src/storyboard.js'
+import { createShot, shotInputFingerprint } from '../src/storyboard.js'
 import { shotReadiness, shotStagePanel } from '../src/shot-workflow.js'
 import { creationSteps } from '../src/workflow-navigation.js'
 
@@ -57,6 +57,7 @@ test('剧本路径包括参考阶段，制作阶段有明确面板，选用与�
   assert.equal(shotStagePanel('images'), 'generation'); assert.equal(shotStagePanel('videos'), 'generation'); assert.equal(shotStagePanel('export'), 'versions')
   const shot = { ...shots[0], references: [], selectedVideoVersionId: 'new-v' }, media = [asset('new')]
   assert.equal(shotReadiness(shot, media).label, '视频待审核')
-  shot.reviewedVideoVersionId = 'new-v'; assert.equal(shotReadiness(shot, media).label, '已完成')
+  shot.reviewedVideoVersionId = 'new-v'; assert.equal(shotReadiness(shot, media).label, '旧审核待复核')
+  shot.reviewedInputFingerprint = shotInputFingerprint(shot); assert.equal(shotReadiness(shot, media).label, '已完成')
   assert.equal(shotReadiness(shot, media, [{ targetId: shot.id, capability: 'video', status: 'running' }]).label, '视频生成中')
 })

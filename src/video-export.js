@@ -1,4 +1,4 @@
-import { ASSET_ROLES, findMediaVersion, mediaPrompt, shotIsStale, validateStoryboard } from './storyboard.js'
+import { ASSET_ROLES, findMediaVersion, mediaPrompt, shotIsStale, validateStoryboard, shotInputFingerprint, shotInputFieldFingerprints } from './storyboard.js'
 import { matchShotReferences, referenceBindingWarnings } from './storyboard-references.js'
 
 const extensions = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }
@@ -84,7 +84,7 @@ function buildVideoExport({ projectId, project, storyboard, documents = {} }, as
       '保留本镜头原先的角色身份、服装、场景、构图和未要求修改的动作及对白。',
       '请使用 Meta Muse Video 生成修改后的版本，并返回实际结果。若无法直接编辑上一版，请说明后按原参考和新要求重新生成。', ''
     ].join('\n') })
-    shots.push({ number: index + 1, id: shot.id, title: shot.title, duration: shot.duration, videoDuration: generationDuration, sourceFingerprint: shot.sourceFingerprint, suggestedVideoFilename: `${folder}-${shot.id}.mp4`, aspectRatio: shot.aspectRatio || '16:9', mode, promptPath: `${folder}/prompt.txt`, references, warnings })
+    shots.push({ number: index + 1, id: shot.id, title: shot.title, duration: shot.duration, videoDuration: generationDuration, sourceFingerprint: shot.sourceFingerprint, inputFingerprint: shotInputFingerprint(shot, documents), inputSnapshotVersion: 1, inputSnapshot: shotInputFieldFingerprints(shot, documents), suggestedVideoFilename: `${folder}-${shot.id}.mp4`, aspectRatio: shot.aspectRatio || '16:9', mode, promptPath: `${folder}/prompt.txt`, references, warnings })
   }
   texts.push({ path: 'manifest.json', content: JSON.stringify({ format: muse ? 'meta-muse-chat-handoff' : 'google-flow-handoff', version: 1, projectId, projectName: project.name, storyboardRevision: storyboard.revision, shots }, null, 2) })
   texts.push({ path: '使用说明.md', content: [

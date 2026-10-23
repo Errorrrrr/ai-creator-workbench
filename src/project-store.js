@@ -17,6 +17,8 @@ let database
 let library
 let archives = []
 let queue = Promise.resolve()
+let archiveBytes = 2
+let pendingProjectSave = null
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
@@ -206,7 +208,7 @@ function writeBrowser(next, revision, nextArchives, deletedProjectId = null) {
         store.put(deletedProjectId ? withoutProject(archived.result || [], deletedProjectId) : archived.result || [], 'previousArchives')
       }
       store.put(next, 'current')
-      store.put(nextArchives, 'archives')
+      if (nextArchives !== undefined) store.put(nextArchives, 'archives')
     }
     transaction.oncomplete = resolve
     transaction.onabort = () => reject(new Error(conflict ? '另一窗口已更新项目，请备份当前内容后刷新' : '保存失败，请检查可用存储空间'))
@@ -230,6 +232,8 @@ function serializedLibrary(next, nextArchives) {
 }
 
 function commit(change, { mediaImportId = null, deletedProjectId = null } = {}) {
+  // Any explicit mutation is a barrier: ordinary saves must never jump across it.
+  pendingProjectSave = null
   const operation = queue.then(async () => {
     assert(library, '项目库尚未载入，请先导出或恢复内部快照')
     const next = structuredClone(library)
@@ -244,6 +248,7 @@ function commit(change, { mediaImportId = null, deletedProjectId = null } = {}) 
     else await writeBrowser(next, library.revision, nextArchives, deletedProjectId)
     library = next
     archives = nextArchives
+    archiveBytes = byteSize(archivePayload)
     return deletedProjectId ? { cleanupPending } : result
   })
   queue = operation.catch(() => {})
@@ -276,6 +281,7 @@ export async function initializeProjects() {
   const archiveData = invoke ? await invoke('library_read_archives') : await readBrowser('archives')
   library = typeof stored === 'string' ? safeParse(stored) : stored
   archives = (typeof archiveData === 'string' ? safeParse(archiveData) : archiveData) || []
+  archiveBytes = byteSize(archives)
   if (library) validateLibrary(library, archives)
   if (!library) {
     library = { version: 1, revision: 0, activeId: null, projects: [], settings: {} }
@@ -335,16 +341,40 @@ export function saveInspiration(item) {
   })
 }
 
-export function saveProject(id, workspace, index) {
+export function saveProject(id, workspace, index, { coalesce = false } = {}) {
   const snapshot = projectSnapshot(workspace, index)
-  return commit(next => {
-    next.settings = { connections: snapshot.workspace.connections, theme: snapshot.workspace.theme }
-    if (!id) return
-    const project = next.projects.find(item => item.id === id)
-    if (!project) throw new Error('项目不存在，保存已中止')
-    if (JSON.stringify(snapshot) === JSON.stringify({ workspace: project.workspace, index: project.index })) return
-    Object.assign(project, snapshot, { updatedAt: new Date().toISOString() })
+  if (coalesce && pendingProjectSave?.id === id && !pendingProjectSave.started) {
+    pendingProjectSave.snapshot = snapshot
+    return pendingProjectSave.promise
+  }
+  const record = { id, snapshot, started: false, promise: null }
+  // Copy only the edited project. Other records and archives are immutable until
+  // an explicit transaction clones them; do not traverse archived writing here.
+  const operation = queue.then(async () => {
+    record.started = true
+    assert(library, '项目库尚未载入，请先导出或恢复内部快照')
+    const current = record.snapshot
+    if (id) validateWorkspace(current.workspace, current.index)
+    const settings = { connections: current.workspace.connections, theme: current.workspace.theme }
+    const position = id ? library.projects.findIndex(item => item.id === id) : -1
+    if (id && position < 0) throw new Error('项目不存在，保存已中止')
+    const project = library.projects[position]
+    const changed = project && JSON.stringify(current) !== JSON.stringify({ workspace: project.workspace, index: project.index })
+    if (!changed && JSON.stringify(settings) === JSON.stringify(library.settings)) return
+    const next = { ...library, settings, revision: library.revision + 1, projects: library.projects.slice() }
+    assert(Number.isSafeInteger(next.revision) && next.revision < Number.MAX_SAFE_INTEGER, '保存版本超出限制')
+    if (changed) next.projects[position] = { ...project, ...current, updatedAt: new Date().toISOString() }
+    const payload = JSON.stringify(next), activeBytes = byteSize(payload)
+    assert(activeBytes <= MAX_LIBRARY_BYTES, '活动项目库超过 64 MiB，请归档部分项目后重试')
+    assert(activeBytes + archiveBytes + 1024 <= MAX_BACKUP_BYTES, '总容量已达到完整备份预算，请先导出完整备份')
+    if (invoke) await invoke('library_write', { payload, expectedRevision: library.revision })
+    else await writeBrowser(next, library.revision, undefined)
+    library = next
   })
+  record.promise = operation
+  pendingProjectSave = coalesce ? record : null
+  queue = operation.catch(() => {})
+  return operation
 }
 
 export function createProject(workspace, index, requestedId = null, { mediaImportId = null } = {}) {
@@ -491,6 +521,15 @@ function restorePortableProject(project) {
   const copy = portableProject(project)
   // Deterministic lexical vectors are rebuilt locally; imported semantic settings are discarded.
   copy.index = deserializeKnowledgeIndex(copy.index)
+  // Text backups have no project-owned media bytes. Keep the writing/history,
+  // but never claim imported version IDs still identify usable/reviewed media.
+  for (const shots of [copy.workspace.storyboard?.shots || [], ...(copy.workspace.storyboard?.sourceVersions || []).map(entry => entry.shots)]) {
+    for (const shot of shots) {
+      shot.references = []
+      shot.selectedImageVersionId = ''; shot.selectedVideoVersionId = ''; shot.reviewedVideoVersionId = ''
+      delete shot.reviewedInputFingerprint
+    }
+  }
   return copy
 }
 
@@ -554,6 +593,7 @@ export async function readPreviousLibrary() {
 }
 
 export async function restorePreviousLibrary() {
+  pendingProjectSave = null
   const snapshot = await readPreviousLibrary()
   assert(snapshot.available, '没有可恢复的上一份内部快照')
   const operation = queue.then(async () => {
@@ -566,6 +606,7 @@ export async function restorePreviousLibrary() {
     else await writeBrowser(next, revision, snapshot.archives)
     library = next
     archives = snapshot.archives
+    archiveBytes = byteSize(archivePayload)
     return getActiveProject()
   })
   queue = operation.catch(() => {})

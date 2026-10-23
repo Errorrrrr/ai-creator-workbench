@@ -20,6 +20,38 @@ export function storyboardSourceFingerprint(storyboard, documentId) {
   return contentFingerprint(JSON.stringify(storyboard.shots.filter(shot => shot.sourceDocumentId === documentId)))
 }
 
+// Capture creative inputs, not output selection, review flags or UI metadata.
+export function shotProductionInputs(shot, documents = {}) {
+  const fields = [...TEXT_FIELDS, 'duration', 'transition', 'characterNames', 'sceneNames', 'propNames', 'selectedImageVersionId', 'aspectRatio', 'imageSize', 'imageQuality', 'videoMode', 'videoDuration']
+  return { ...Object.fromEntries(fields.map(field => [field, shot[field] ?? null])),
+    references: shot.references.map(({ versionId, role, scope }) => ({ versionId, role, scope: scope || '' })),
+    sourceDocumentId: shot.sourceDocumentId,
+    sourceFingerprint: shot.sourceDocumentId ? contentFingerprint(documents[shot.sourceDocumentId]?.content ?? '') : '' }
+}
+
+export function shotInputFingerprint(shot, documents = {}) {
+  return `v1:${contentFingerprint(JSON.stringify(shotProductionInputs(shot, documents)))}`
+}
+
+export function shotInputFieldFingerprints(shot, documents = {}) {
+  return Object.fromEntries(Object.entries(shotProductionInputs(shot, documents)).map(([key, value]) => [key, contentFingerprint(JSON.stringify(value))]))
+}
+
+export function videoReviewState(shot, documents = {}) {
+  const recorded = Boolean(shot.selectedVideoVersionId && shot.reviewedVideoVersionId === shot.selectedVideoVersionId)
+  const legacy = recorded && !shot.reviewedInputFingerprint
+  const reviewed = recorded && shot.reviewedInputFingerprint === shotInputFingerprint(shot, documents)
+  return { reviewed, outdated: recorded && !reviewed, legacy }
+}
+
+export function snapshotStoryboardSource(storyboard, sourceDocumentId, label = '重做前的分镜') {
+  const shots = storyboard.shots.filter(shot => shot.sourceDocumentId === sourceDocumentId)
+  if (!shots.length) return null
+  const version = { id: id(), createdAt: new Date().toISOString(), sourceDocumentId, label, shots: structuredClone(shots) }
+  storyboard.sourceVersions = [version, ...(storyboard.sourceVersions || [])].slice(0, 10)
+  return version
+}
+
 export function emptyStoryboard() { return { revision: 0, shots: [] } }
 
 export function normalizeWorkflow(value = {}) {
@@ -46,6 +78,16 @@ export function createShot(value = {}, source = {}) {
 export function validateStoryboard(value) {
   if (!object(value) || !Number.isSafeInteger(value.revision) || value.revision < 0 || !Array.isArray(value.shots) || value.shots.length > SHOT_LIMIT) throw new Error('分镜结构或修订号无效')
   const ids = new Set()
+  if (value.sourceVersions !== undefined) {
+    if (!Array.isArray(value.sourceVersions) || value.sourceVersions.length > 10) throw new Error('分镜历史版本无效')
+    const versionIds = new Set()
+    for (const version of value.sourceVersions) {
+      if (!object(version) || typeof version.id !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(version.id) || versionIds.has(version.id) || typeof version.createdAt !== 'string' || !Number.isFinite(Date.parse(version.createdAt)) || typeof version.sourceDocumentId !== 'string' || version.sourceDocumentId.length > 200 || typeof version.label !== 'string' || version.label.length > 200) throw new Error('分镜历史记录无效')
+      versionIds.add(version.id)
+      validateStoryboard({ revision: 0, shots: version.shots })
+      if (version.shots.some(shot => shot.sourceDocumentId !== version.sourceDocumentId)) throw new Error('分镜历史来源不一致')
+    }
+  }
   for (const shot of value.shots) {
     if (!object(shot) || typeof shot.id !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(shot.id) || ids.has(shot.id)) throw new Error('镜头标识无效或重复')
     ids.add(shot.id)
@@ -57,6 +99,7 @@ export function validateStoryboard(value) {
     for (const [key, values] of Object.entries({ aspectRatio: ['16:9', '9:16', '1:1'], imageSize: ['auto', '1024x1024', '1536x1024', '1024x1536'], imageQuality: ['auto', 'low', 'medium', 'high'], videoMode: ['image-to-video', 'reference-to-video', 'first-last', 'extend'] })) if (shot[key] !== undefined && !values.includes(shot[key])) throw new Error('镜头生成参数无效')
     for (const field of ['sourceDocumentId', 'sourceFingerprint', 'selectedImageVersionId', 'selectedVideoVersionId']) if (typeof shot[field] !== 'string' || shot[field].length > 200) throw new Error('镜头引用无效')
     if (shot.reviewedVideoVersionId !== undefined && (typeof shot.reviewedVideoVersionId !== 'string' || shot.reviewedVideoVersionId.length > 200)) throw new Error('镜头审核版本无效')
+    if (shot.reviewedInputFingerprint !== undefined && (typeof shot.reviewedInputFingerprint !== 'string' || shot.reviewedInputFingerprint.length > 200)) throw new Error('镜头审核输入指纹无效')
     if (!Array.isArray(shot.references) || shot.references.length > 16 || shot.references.some(ref => !object(ref) || typeof ref.versionId !== 'string' || !ref.versionId || ref.versionId.length > 96 || !REFERENCE_ROLES.includes(ref.role))) throw new Error('镜头参考素材无效')
     if (shot.references.some(ref => ref.scope !== undefined && !['continuity', 'video'].includes(ref.scope))) throw new Error('镜头参考适用范围无效')
     if (shot.references.some(ref => ref.origin !== undefined && !['auto', 'manual'].includes(ref.origin))) throw new Error('镜头参考来源无效')
@@ -191,13 +234,13 @@ export function validateVideoParameters(shot, assets, connection, input) {
   return state
 }
 
-export function jobResult(job, assets, shots) {
+export function jobResult(job, assets, shots, documents = {}) {
   const asset = assets.find(item => item.id === job.assetId)
   const versions = asset?.versions?.filter(version => version.metadata?.provenance?.jobId === job.id) || []
   const shot = shots.find(item => item.id === job.targetId)
   const selectedId = shot ? job.capability === 'video' ? shot.selectedVideoVersionId : shot.selectedImageVersionId : asset?.selectedVersionId
   const selected = versions.some(version => version.id === selectedId)
-  const reviewed = job.capability === 'video' && selected && shot?.reviewedVideoVersionId === selectedId
+  const reviewed = job.capability === 'video' && selected && shot && videoReviewState(shot, documents).reviewed
   const status = job.status !== 'completed' ? JOB_STATUSES[job.status] || job.status
     : !asset ? '已收录 · 素材未找到' : !versions.length ? '已收录 · 版本待核对'
       : reviewed ? '已收录 · 视频已审核' : selected ? '已收录 · 已选用' : '已收录 · 待选用'

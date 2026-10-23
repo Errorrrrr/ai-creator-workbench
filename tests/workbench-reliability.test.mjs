@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFileSync } from 'node:fs'
-import { prepareShotInputs, jobResult, ASSET_ROLES } from '../src/storyboard.js'
+import { prepareShotInputs, jobResult, ASSET_ROLES, shotInputFingerprint } from '../src/storyboard.js'
 import { bindShotReferences } from '../src/storyboard-references.js'
 import { shotReadiness } from '../src/shot-workflow.js'
 
@@ -57,6 +57,7 @@ test('任务结果按实际 job 版本判断选用和审核，不把同素材的
   s.selectedVideoVersionId = 'j1-v'
   assert.equal(jobResult(job, [asset], [s]).status, '已收录 · 已选用')
   s.reviewedVideoVersionId = 'j1-v'
+  s.reviewedInputFingerprint = shotInputFingerprint(s)
   assert.equal(jobResult(job, [asset], [s]).status, '已收录 · 视频已审核')
   assert.equal(jobResult(job, [], [s]).status, '已收录 · 素材未找到')
   assert.equal(jobResult({ ...job, id: 'unknown' }, [asset], [s]).status, '已收录 · 版本待核对')
@@ -67,25 +68,27 @@ test('任务结果按实际 job 版本判断选用和审核，不把同素材的
 function harness() {
   const doc = { activeElement: null, listeners: new Map(), addEventListener(type, fn) { this.listeners.set(type, fn) } }
   class Node {
-    constructor(tag = 'div', className = '', text = '') { Object.assign(this, { tag, className, textContent: text, children: [], dataset: {}, listeners: new Map(), attrs: new Map(), open: false, scrollTop: 0, value: '', disabled: false, paused: true }); this.classList = { toggle() {} } }
+    constructor(tag = 'div', className = '', text = '') { Object.assign(this, { tag, className, textContent: text, children: [], dataset: {}, listeners: new Map(), attrs: new Map(), open: false, scrollTop: 0, value: '', disabled: false, paused: true }); this.classList = { toggle() {}, add() {} } }
     append(...children) { for (const child of children) { child.parent = this; this.children.push(child) } }
     prepend(...children) { for (const child of children.reverse()) { child.parent = this; this.children.unshift(child) } }
     replaceChildren(...children) { if (this.contains(doc.activeElement)) doc.activeElement = null; this.children.forEach(child => { child.parent = null }); this.children = []; this.append(...children) }
     setAttribute(name, value) { this.attrs.set(name, value) }
     addEventListener(type, callback) { this.listeners.set(type, callback) }
     contains(target) { for (let node = target; node; node = node.parent) if (node === this) return true; return false }
-    querySelectorAll(selector) { return this.children.flatMap(child => [child, ...child.querySelectorAll('*')]).filter(node => selector === '*' || node.tag === selector || (selector === '[data-shot-focus]' && node.dataset.shotFocus) || (selector === '[data-version-id]' && node.dataset.versionId)) }
+    querySelectorAll(selector) { return this.children.flatMap(child => [child, ...child.querySelectorAll('*')]).filter(node => selector === '*' || node.tag === selector || selector.split(', ').some(value => value.startsWith('.') && node.className.split(' ').includes(value.slice(1))) || (selector === '[data-shot-focus]' && node.dataset.shotFocus) || (selector === '[data-version-id]' && node.dataset.versionId)) }
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null }
     focus() { if (!this.disabled) doc.activeElement = this }
     scrollIntoView() { this.scrolled = true }
     close() { this.open = false }
+    remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); this.parent = null }
+    insertBefore(child, before) { child.remove(); child.parent = this; const index = this.children.indexOf(before); this.children.splice(index < 0 ? this.children.length : index, 0, child) }
     async click() { this.focus(); return this.listeners.get('click')?.({ target: this }) }
   }
   const el = (...args) => new Node(...args)
   const data = { projectId: 'p1', currentDocId: 'scene1', documents: { scene1: { title: '第一场' } }, storyboard: { shots: [shot(), { ...shot(), id: 's2', title: '镜头2' }] } }
   const env = {
     document: doc, el, Option: class extends Node { constructor(text, value) { super('option', '', text); this.value = value } },
-    context: () => data, assets: structuredClone(assets), assetDrafts: new Map(), resultVersionId: '', selectedAssetId: '小舟',
+    context: () => data, assets: structuredClone(assets), assetDrafts: new Map(), assetCards: new Map(), assetLibraryTools: { filter: values => values, detail: () => el('section') }, resultVersionId: '', selectedAssetId: '小舟',
     assetGrid: el('div'), assetDetail: el('section'), assetBody: el('div'), assetNotice: el('p'), roleFilter: el('select'),
     shotList: el('div'), shotBody: el('div'), shotStatus: el('p'), selectedShotId: 's1', selectedSourceId: 'scene1', selectedEpisodeId: 'episode1',
     jobsDialog: el('dialog'), lastContextDocId: null, OTHER_EPISODE: 'other', UNASSIGNED_SOURCE: 'unassigned',
@@ -135,6 +138,21 @@ test('素材保存期间继续输入，包括改回旧名称，不被成功回�
     assert.equal(h.env.assetDrafts.get('p1:小舟').name, next)
     assert.equal(h.input().value, next)
   }
+})
+
+test('任务轮询保留素材卡片与焦点，正在播放的预览不被新结果重建', () => {
+  const h = harness(), { env } = h
+  env.preview = version => h.el(version?.mimeType?.startsWith('video/') ? 'video' : 'img')
+  env.renderAssets()
+  const card = env.assetCards.get('p1:clip'), select = card.querySelector('button'), video = card.querySelector('video')
+  select.focus(); video.paused = false; video.currentTime = 3.5
+  env.assets = structuredClone(env.assets); env.assets.push(image('新结果'))
+  env.renderAssets()
+  assert.equal(env.assetCards.get('p1:clip'), card)
+  assert.equal(card.querySelector('video'), video); assert.equal(video.currentTime, 3.5)
+  assert.equal(h.doc.activeElement, select)
+  assert.equal(env.assetCards.size, env.assets.length, 'new results appear without replacing existing cards')
+  const input = h.input(); env.renderAssets(); assert.equal(h.input(), input, 'unchanged detail is not rebuilt on polling')
 })
 
 test('镜头列表点击、轮询和排序后恢复同一操作焦点及滚动位置，详情输入不被抢焦点', async () => {
