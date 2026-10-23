@@ -27,7 +27,7 @@ export function filterLibraryAssets(assets, data, { query = '', usage = 'all', k
   return sort === 'name' ? [...result].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')) : result
 }
 
-export function createAssetLibraryTools({ getAssets, getContext, onFilterChange, onSelectShot, preview }) {
+export function createAssetLibraryTools({ getAssets, getContext, onFilterChange, onReset, onSelectShot, preview }) {
   const node = (tag, text = '', className = '') => { const result = document.createElement(tag); result.textContent = text; result.className = className; return result }
   const element = node('div', '', 'asset-library-tools')
   const search = node('input'); search.type = 'search'; search.placeholder = '搜索素材名称或版本'; search.setAttribute('aria-label', '搜索素材名称或版本')
@@ -39,7 +39,7 @@ export function createAssetLibraryTools({ getAssets, getContext, onFilterChange,
   element.append(search, usage, kind, sort, reset)
   search.addEventListener('input', onFilterChange)
   for (const select of [usage, kind, sort]) select.addEventListener('change', onFilterChange)
-  reset.addEventListener('click', () => { search.value = ''; usage.value = 'all'; kind.value = ''; sort.value = 'recent'; onFilterChange(); search.focus() })
+  reset.addEventListener('click', () => { search.value = ''; usage.value = 'all'; kind.value = ''; sort.value = 'recent'; onReset?.(); onFilterChange(); search.focus() })
   function openCompare(asset) {
     const owner = getContext().projectId, opener = document.activeElement
     const dialog = node('dialog', '', 'app-dialog asset-compare-dialog'), header = node('div', '', 'production-dialog-heading'), title = node('h2', `${asset.name} · 版本对比`)

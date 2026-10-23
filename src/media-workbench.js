@@ -157,7 +157,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   }
   const productionOverview = createProductionOverview({ getContext: context, getAssets: () => assets, getJobs: () => jobs, onSelectScene: focusProductionScene })
   primaryActions.append(button('制作进度', () => productionOverview.open()))
-  const assetLibraryTools = createAssetLibraryTools({ getAssets: () => assets, getContext: context, onFilterChange: renderAssets, onSelectShot: (shotId) => { const shot = context().storyboard.shots.find(item => item.id === shotId); if (shot) focusProductionScene(context().documents[shot.sourceDocumentId] ? shot.sourceDocumentId : UNASSIGNED_SOURCE, { shotId }) }, preview })
+  const assetLibraryTools = createAssetLibraryTools({ getAssets: () => assets, getContext: context, onFilterChange: renderAssets, onReset: () => { roleFilter.value = '' }, onSelectShot: (shotId) => { const shot = context().storyboard.shots.find(item => item.id === shotId); if (shot) focusProductionScene(context().documents[shot.sourceDocumentId] ? shot.sourceDocumentId : UNASSIGNED_SOURCE, { shotId }) }, preview })
   assetNotice.setAttribute('role', 'status')
   assetsView.querySelector('.media-view-content').append(assetToolbar, assetLibraryTools.element, pendingHost, assetNotice, assetBody)
   const jobsList = jobsDialog.querySelector('.media-jobs-list')
