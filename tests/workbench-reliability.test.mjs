@@ -75,6 +75,7 @@ function harness() {
     setAttribute(name, value) { this.attrs.set(name, value) }
     addEventListener(type, callback) { this.listeners.set(type, callback) }
     contains(target) { for (let node = target; node; node = node.parent) if (node === this) return true; return false }
+    closest(selector) { for (let node = this; node; node = node.parent) if (node.tag === selector) return node; return null }
     querySelectorAll(selector) { return this.children.flatMap(child => [child, ...child.querySelectorAll('*')]).filter(node => selector === '*' || node.tag === selector || selector.split(', ').some(value => value.startsWith('.') && node.className.split(' ').includes(value.slice(1))) || (selector === '[data-shot-focus]' && node.dataset.shotFocus) || (selector === '[data-version-id]' && node.dataset.versionId)) }
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null }
     focus() { if (!this.disabled) doc.activeElement = this }
@@ -178,6 +179,27 @@ test('菜单 Escape 在本地消费并恢复菜单焦点，不向全局停止生
   assert.equal(menu.open, false)
   assert.equal(prevented, true); assert.equal(stopped, true)
   assert.equal(h.doc.activeElement, menu.querySelector('summary'))
+})
+
+test('macOS 菜单鼠标按下保留内部焦点，导出动作执行后才收起', async () => {
+  const h = harness(); let exported = 0, prevented = false
+  const action = h.env.button('Muse 聊天素材包', () => { exported += 1 })
+  const menu = h.env.actionMenu('导出', [action]), summary = menu.querySelector('summary')
+  menu.open = true; summary.focus()
+  const label = h.el('span'); action.append(label)
+  menu.listeners.get('mousedown')({ target: label, button: 0, preventDefault() { prevented = true } })
+  assert.equal(prevented, true, 'prevent WebKit from moving focus to the page on mouse down')
+  assert.equal(h.doc.activeElement, action)
+  menu.listeners.get('focusout')({ relatedTarget: h.doc.activeElement })
+  assert.equal(menu.open, true, 'action must remain visible until mouse up and click')
+  await action.click()
+  menu.listeners.get('click')({ target: label })
+  assert.equal(exported, 1)
+  assert.equal(menu.open, false)
+  assert.equal(h.doc.activeElement, summary)
+  menu.open = true
+  menu.listeners.get('focusout')({ relatedTarget: h.el('input') })
+  assert.equal(menu.open, false, 'keyboard focus leaving the menu still closes it')
 })
 
 test('任务定位镜头切到对应分场，查看结果切换用途过滤，不改变选用或参考版本', () => {

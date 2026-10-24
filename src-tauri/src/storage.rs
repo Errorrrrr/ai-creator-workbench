@@ -312,26 +312,13 @@ pub(crate) fn export_document(
     } else {
         "md"
     };
-    let stem: String = name
-        .trim_end_matches(&format!(".{extension}"))
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .take(60)
-        .collect();
-    let directory = app.path().download_dir().map_err(|e| e.to_string())?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_nanos();
-    let path = directory.join(format!("{stem}-{stamp}.{extension}"));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
+    let stem = crate::export_location::name(name.trim_end_matches(&format!(".{extension}")), "", if extension == "json" { "文字备份" } else { "Markdown" });
+    let directory = crate::export_location::directory(&app)?;
+    let mut file = tempfile::NamedTempFile::new_in(&directory).map_err(|e| e.to_string())?;
     file.write_all(content.as_bytes())
-        .and_then(|_| file.sync_all())
+        .and_then(|_| file.as_file().sync_all())
         .map_err(|e| e.to_string())?;
+    let path = crate::export_location::publish_file(file, &directory, &stem, extension)?;
     Ok(path.to_string_lossy().into_owned())
 }
 

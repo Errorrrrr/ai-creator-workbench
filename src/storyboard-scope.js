@@ -21,6 +21,16 @@ export function scopeForDocument(data, documentId) {
   return group ? { episodeId: group.id, sourceId: documentId === group.id ? '' : documentId } : null
 }
 
+export function storyboardExportScope(data, episodeId, sourceId) {
+  const group = storyboardGroups(data).find(item => item.id === episodeId)
+  if (sourceId === UNASSIGNED_SOURCE) return '未归属镜头'
+  if (sourceId) {
+    const scene = data.documents[sourceId]?.title || '未归属镜头'
+    return group && group.id !== OTHER_EPISODE && !scene.startsWith(group.title) ? `${group.title}_${scene}` : scene
+  }
+  return `${group?.title || '分镜'}_全集`
+}
+
 export function scopedShots(data, episodeId, sourceId) {
   const group = storyboardGroups(data).find(group => group.id === episodeId)
   if (!group) return []

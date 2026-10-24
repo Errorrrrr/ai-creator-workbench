@@ -20,6 +20,7 @@ import { creationSteps, initializeCreationNavigation } from './workflow-navigati
 import { candidateGeneratedAtLabel, MAX_CANDIDATE_DRAFTS, candidateDraftsFor, upsertCandidateDraft, removeCandidateDraft } from './candidate-drafts.js'
 import { createReviewDiff } from './review-diff.js'
 import { renderWritingPreview } from './writing-preview.js'
+import { initializeExportSettings } from './export-settings.js'
 
 let mediaWorkbench = null
 let projectPlanUI = null
@@ -3831,6 +3832,7 @@ async function handleAction(button, action) {
       break
     }
     case 'project-library': await openProjectLibrary(); break
+    case 'export-settings': await exportSettingsUI.open(); break
     case 'toggle-archived-projects': showingArchivedProjects = !showingArchivedProjects; await openProjectLibrary(); break
     case 'archive-project': await archiveCurrentProject(); break
     case 'delete-project': await deleteSelectedProject(button.dataset.projectId); break
@@ -5069,6 +5071,7 @@ const updatesUI = initializeUpdates({
     } catch (error) { unlock(); throw error }
   }
 })
+const exportSettingsUI = initializeExportSettings({ invoke: isDesktopRuntime ? invokeDesktop : null, openDialog, notify: showToast })
 mediaWorkbench = initializeProjectMediaWorkbench()
 mediaWorkbench.refresh()
 creationNavigation = initializeCreationNavigation({

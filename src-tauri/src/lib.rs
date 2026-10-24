@@ -1,4 +1,5 @@
 mod credentials;
+mod export_location;
 mod media;
 mod media_adapters;
 mod media_codex;
@@ -52,6 +53,9 @@ pub fn run() {
             storage::library_current_revision,
             storage::library_write,
             storage::export_document,
+            export_location::export_location_get,
+            export_location::export_location_choose,
+            export_location::export_location_reset,
             media::media_list,
             media_adapters::media_adapter_catalog,
             media::media_verify_versions,

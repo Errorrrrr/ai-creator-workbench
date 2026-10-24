@@ -753,6 +753,7 @@
       <div class="library-management"><button class="text-button" type="button" id="archiveViewButton" data-action="toggle-archived-projects" aria-pressed="false">查看归档项目</button><span class="storage-summary" id="storageSummary"></span></div>
       <div id="projectList" class="project-list"></div>
       <div class="project-library-footer"><p class="project-actions-label">当前项目操作</p>
+      <div class="library-management"><button class="secondary-button" type="button" data-action="export-settings">设置导出文件夹</button><span class="dialog-description">未设置时保存到系统下载文件夹。</span></div>
       <div class="dialog-actions project-actions">
         <button class="secondary-button" type="button" data-action="rename-project">重命名</button>
         <button class="secondary-button" type="button" data-action="backup-project">文字／结构 JSON 备份</button>
@@ -760,6 +761,16 @@
         <button class="secondary-button" type="button" data-action="archive-project">归档当前项目</button>
       </div>
       <div class="library-management"><button class="text-button" type="button" data-action="backup-library">备份全部文字项目与灵感</button><button class="text-button" type="button" data-action="recover-library">恢复上一份内部快照</button><button class="text-button" type="button" data-action="pending-media-imports">恢复待完成的媒体导入</button></div><p class="dialog-description">JSON 备份包含活动项目、归档与灵感的文字／结构，不含实际媒体或密钥。含图片、视频的项目请在素材库导出 .acwpack 完整项目包。恢复会新增副本；归档项目随时可恢复。</p></div>
+    </dialog>
+    <dialog class="app-dialog form-dialog" id="exportSettingsDialog" aria-labelledby="exportSettingsTitle">
+      <form method="dialog">
+      <div class="dialog-header"><h2 id="exportSettingsTitle">导出文件夹</h2><button class="icon-button" type="button" data-action="close-dialog" aria-label="关闭导出设置"><svg class="icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div>
+      <p class="dialog-description">用于素材包、选用视频包、完整项目包、单个素材及文字导出；全部项目共用，仅保存在本机。</p>
+      <p class="export-directory-path" id="exportDirectoryPath"></p>
+      <p class="dialog-description" id="exportDirectoryStatus" role="status">正在读取导出位置…</p>
+      <p class="dialog-description">未设置时使用系统下载文件夹。更改位置只影响之后的导出，已有文件保留在原处。</p>
+      <div class="dialog-actions"><button class="secondary-button" type="button" id="resetExportDirectory">恢复默认位置</button><button class="primary-button" type="button" id="chooseExportDirectory">选择文件夹</button></div>
+      </form>
     </dialog>
     <dialog class="app-dialog form-dialog" id="deleteProjectDialog" aria-labelledby="deleteProjectTitle" aria-describedby="deleteProjectDescription">
       <form method="dialog">

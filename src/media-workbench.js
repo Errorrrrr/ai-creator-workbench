@@ -7,7 +7,7 @@ import { mediaAdapterFor, useMediaAdapterCatalog } from './media-adapters.js'
 import { biographyCharacters, characterImagePrompt, characterTargetId, prepareCharacterRequest } from './character-images.js'
 import { projectCharacterNames } from './storyboard-characters.js'
 import { REFERENCE_ENTITY_FIELDS, referenceCatalog, bindShotReferences, referenceBindingWarnings, manualReferencePatch, planReferenceBackfill } from './storyboard-references.js'
-import { OTHER_EPISODE, UNASSIGNED_SOURCE, storyboardGroups, scopeForDocument, scopedShots, moveSourceShot, replaceSourceShots } from './storyboard-scope.js'
+import { OTHER_EPISODE, UNASSIGNED_SOURCE, storyboardGroups, scopeForDocument, scopedShots, moveSourceShot, replaceSourceShots, storyboardExportScope } from './storyboard-scope.js'
 
 import { createStoryboardTasks, STORYBOARD_TASK_PHASES } from './storyboard-tasks.js'
 import { createProductionOverview } from './production-overview.js'
@@ -42,6 +42,14 @@ function actionMenu(label, actions) {
   const panel = el('div', 'media-action-menu-panel')
   panel.append(...actions)
   node.append(panel)
+  node.addEventListener('mousedown', event => {
+    const action = event.target.closest('button')
+    if (!action || action.disabled || event.button !== 0) return
+    // macOS WebKit can blur the summary to the page before firing the button's
+    // click. Keep focus inside so focusout does not hide the pending action.
+    event.preventDefault()
+    action.focus({ preventScroll: true })
+  })
   node.addEventListener('click', event => {
     if (!event.target.closest('button')) return
     const restoreFocus = node.contains(document.activeElement)
@@ -49,8 +57,8 @@ function actionMenu(label, actions) {
     if (restoreFocus) node.querySelector('summary').focus()
   })
   node.addEventListener('keydown', event => { if (event.key === 'Escape' && node.open) { event.preventDefault(); event.stopPropagation(); node.open = false; node.querySelector('summary').focus() } })
-  node.addEventListener('focusout', event => { if (event.relatedTarget && !node.contains(event.relatedTarget)) node.open = false })
-  document.addEventListener('pointerdown', event => { if (!node.contains(event.target)) node.open = false })
+  node.addEventListener('focusout', event => { if (node.open && event.relatedTarget && !node.contains(event.relatedTarget)) node.open = false })
+  document.addEventListener('pointerdown', event => { if (node.open && !node.contains(event.target)) node.open = false })
   return node
 }
 function mediaTimeLabel(value) {
@@ -1410,7 +1418,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       if (!ready.length) throw new Error('当前范围尚无选用视频，请先回填或生成并选用')
       const missing = entries.length - ready.length, unreviewed = ready.filter(({ shot }) => !videoReviewState(shot, data.documents).reviewed).length
       if ((missing || unreviewed) && !window.confirm(`当前范围 ${entries.length} 镜：${missing} 镜缺少选用视频，${unreviewed} 镜尚未通过当前内容审核。仅导出已有的 ${ready.length} 个选用视频，并在清单保留对应镜头信息。继续？`)) return
-      const path = await invoke('media_export_selected_videos', { projectId: data.projectId, projectName: data.project.name, shots: ready.map(({ shot }) => ({ id: shot.id, title: shot.title, sourceDocumentId: shot.sourceDocumentId, sourceTitle: data.documents[shot.sourceDocumentId]?.title || '', videoVersionId: shot.selectedVideoVersionId, dialogue: shot.dialogue, duration: shot.duration })) })
+      const path = await invoke('media_export_selected_videos', { projectId: data.projectId, projectName: data.project.name, scopeName: storyboardExportScope(data, selectedEpisodeId, selectedSourceId), shots: ready.map(({ shot }) => ({ id: shot.id, title: shot.title, sourceDocumentId: shot.sourceDocumentId, sourceTitle: data.documents[shot.sourceDocumentId]?.title || '', videoVersionId: shot.selectedVideoVersionId, dialogue: shot.dialogue, duration: shot.duration })) })
       if (path) notify(`已导出当前范围 ${ready.length} 个选用视频：${path}`)
     })
   }
@@ -1452,6 +1460,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     await run(async () => {
       requireProject(); desktop()
       const data = structuredClone(context())
+      data.exportScope = storyboardExportScope(data, selectedEpisodeId, selectedSourceId)
       data.storyboard.shots = visibleShots(data)
       if (!data.storyboard.shots.length) throw new Error('尚无分镜，请先拆镜或新建镜头再导出')
       const latest = await invoke('media_list', { projectId: data.projectId })

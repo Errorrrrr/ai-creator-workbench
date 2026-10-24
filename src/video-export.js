@@ -27,7 +27,7 @@ function museMessage(shot, project, references, starts, ends, number) {
 }
 
 // Export only the current storyboard and its explicitly pinned versions, never connections or jobs.
-function buildVideoExport({ projectId, project, storyboard, documents = {} }, assets, target) {
+function buildVideoExport({ projectId, project, storyboard, documents = {}, exportScope = '' }, assets, target) {
   const muse = target === 'muse', platform = muse ? 'Muse' : 'Flow'
   validateStoryboard(storyboard)
   if (!storyboard.shots.length) throw new Error('尚无分镜，请先拆镜或新建镜头再导出')
@@ -102,5 +102,5 @@ function buildVideoExport({ projectId, project, storyboard, documents = {} }, as
     '', ...(muse ? ['官方产品介绍：https://ai.meta.com/muse/', '官方模型介绍：https://ai.meta.com/blog/introducing-muse-image-muse-video-msl/', '本包的聊天模板为工作台整理的使用建议，不是官方 API 参数或已验证的账号能力。'] : ['官方操作说明：https://support.google.com/flow/answer/16353334']), '', '## 镜头清单',
     ...shots.map(shot => `- ${String(shot.number).padStart(3, '0')} ${shot.title}：${shot.references.length} 张图片${shot.warnings.length ? `；${shot.warnings.join(' ')}` : ''}`), ''
   ].join('\n') })
-  return { texts, images }
+  return { projectName: project.name, scopeName: exportScope, texts, images }
 }

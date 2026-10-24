@@ -4,7 +4,7 @@ import vm from 'node:vm'
 import { readFileSync } from 'node:fs'
 import { createShot, findMediaVersion, videoReviewState, snapshotStoryboardSource, SHOT_LIMIT } from '../src/storyboard.js'
 import { shotReadiness } from '../src/shot-workflow.js'
-import { replaceSourceShots } from '../src/storyboard-scope.js'
+import { replaceSourceShots, storyboardExportScope, OTHER_EPISODE, UNASSIGNED_SOURCE } from '../src/storyboard-scope.js'
 
 const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
 function productionFunction(name) {
@@ -32,6 +32,7 @@ function harness() {
   const assets = ['v1', 'v2'].map(id => ({ id, kind: 'video', versions: [{ id, fileId: `file-${id}`, mimeType: 'video/mp4' }] }))
   const calls = { invoke: [], messages: [], confirmations: [], saved: false }
   const env = { el, document: { body }, Option: class extends Node { constructor(text, value) { super('option', '', text); this.value = value } },
+    storyboardExportScope, selectedEpisodeId: OTHER_EPISODE, selectedSourceId: UNASSIGNED_SOURCE,
     context: () => data, assets, findMediaVersion, videoReviewState, shotReadiness, error: '', visibleShots: value => (value || data).storyboard.shots,
     run: async callback => callback(), requireProject() {}, desktop() {}, refresh: async () => {}, fileUrl: version => `local:${version.fileId}`,
     beforeSubmit: async () => { calls.saved = true }, invoke: async (command, args) => { assert.equal(calls.saved, true); calls.invoke.push({ command, args }); return '/tmp/package' },
@@ -45,6 +46,7 @@ test('选用视频包先保存，按当前范围顺序传真实版本，缺片�
   const h = harness(); await h.env.exportSelectedVideos()
   assert.match(h.calls.confirmations[0], /1 镜缺少/)
   assert.equal(h.calls.invoke[0].command, 'media_export_selected_videos')
+  assert.equal(h.calls.invoke[0].args.scopeName, '未归属镜头')
   assert.deepEqual(Array.from(h.calls.invoke[0].args.shots, shot => shot.videoVersionId), ['v1', 'v2'])
   assert.ok(h.calls.invoke[0].args.shots.every(shot => shot.sourceTitle === ''))
 })

@@ -1,5 +1,5 @@
 //! Portable handoff folder; all media resolves through project-owned version IDs.
-use crate::{media, media_integrity::{copy_checked, sync_directory}};
+use crate::{export_location, media, media_integrity::{copy_checked, sync_directory}};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -8,7 +8,6 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use tauri::Manager;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -23,8 +22,12 @@ pub(crate) struct ImageEntry {
     version_id: String,
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Export {
+    #[serde(default)]
+    project_name: String,
+    #[serde(default)]
+    scope_name: String,
     texts: Vec<TextEntry>,
     images: Vec<ImageEntry>,
 }
@@ -79,6 +82,7 @@ fn validate_selected_snapshot(library: &Value, project_id: &str, project_name: &
 fn write_selected_folder(
     project_id: &str,
     project_name: &str,
+    scope_name: &str,
     shots: &[SelectedShot],
     destination: &Path,
     resolve: impl Fn(&str) -> Result<(PathBuf, String, u64), String>,
@@ -120,9 +124,7 @@ fn write_selected_folder(
     }
     sync_directory(staging.path())?;
     // Atomically reserve a unique directory; never rename over a prior export.
-    let path = destination.join(format!("选用视频-{}", media::new_id()));
-    fs::create_dir(&path).map_err(|e| e.to_string())?;
-    if let Err(error) = fs::rename(staging.path(), &path) { let _ = fs::remove_dir(&path); return Err(error.to_string()); }
+    let path = export_location::publish_folder(staging.path(), destination, &export_location::name(project_name, scope_name, "选用视频包"))?;
     if let Err(error) = sync_directory(destination) {
         let _ = fs::remove_dir_all(&path);
         return Err(format!("视频包目录同步失败，未交付导出结果：{error}"));
@@ -131,13 +133,13 @@ fn write_selected_folder(
 }
 
 #[tauri::command]
-pub(crate) async fn media_export_selected_videos(app: tauri::AppHandle, project_id: String, project_name: String, shots: Vec<SelectedShot>) -> Result<String, String> {
+pub(crate) async fn media_export_selected_videos(app: tauri::AppHandle, project_id: String, project_name: String, scope_name: String, shots: Vec<SelectedShot>) -> Result<String, String> {
     media::valid_id(&project_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let library: Value = serde_json::from_str(&crate::storage::library_read(app.clone())?.ok_or("项目库不存在")?).map_err(|_| "项目库格式无效")?;
         validate_selected_snapshot(&library, &project_id, &project_name, &shots)?;
-        let directory = app.path().download_dir().map_err(|e| e.to_string())?;
-        let path = write_selected_folder(&project_id, &project_name, &shots, &directory, |id| {
+        let directory = export_location::directory(&app)?;
+        let path = write_selected_folder(&project_id, &project_name, &scope_name, &shots, &directory, |id| {
             let (version, path) = media::version_file(&app, &project_id, id)?;
             Ok((path, version.mime_type, version.bytes))
         }, |path| {
@@ -154,12 +156,6 @@ enum Target {
     Muse,
 }
 impl Target {
-    fn folder_prefix(self) -> &'static str {
-        match self {
-            Self::Flow => "Google-Flow",
-            Self::Muse => "Meta-Muse",
-        }
-    }
     fn label(self) -> &'static str {
         match self {
             Self::Flow => "Google Flow 素材包",
@@ -199,6 +195,9 @@ fn valid_path(path: &str, image: bool) -> bool {
 }
 
 fn validate(export: &Export) -> Result<(), String> {
+    if export.project_name.chars().count() > 100 || export.scope_name.chars().count() > 2200 {
+        return Err("导出项目名或范围过长".into());
+    }
     if export.texts.is_empty() || export.texts.len() > 362 || export.images.len() > 2040 {
         return Err("导出内容数量无效".into());
     }
@@ -265,8 +264,12 @@ fn write_folder(
         )?;
         output.sync_all().map_err(|e| e.to_string())?;
     }
-    let path = destination.join(format!("{}-{}", target.folder_prefix(), media::new_id()));
-    fs::rename(staging.path(), &path).map_err(|e| e.to_string())?;
+    sync_directory(staging.path())?;
+    let path = export_location::publish_folder(staging.path(), destination, &export_location::name(&export.project_name, &export.scope_name, target.label()))?;
+    if let Err(error) = sync_directory(destination) {
+        let _ = fs::remove_dir_all(&path);
+        return Err(format!("素材包目录同步失败，未交付导出结果：{error}"));
+    }
     Ok(path)
 }
 
@@ -296,7 +299,7 @@ async fn export_for(
 ) -> Result<String, String> {
     media::valid_id(&project_id)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let directory = app.path().download_dir().map_err(|e| e.to_string())?;
+        let directory = export_location::directory(&app)?;
         let path = write_folder(&bundle, &directory, target, |id| {
             let (version, source) = media::version_file(&app, &project_id, id)?;
             Ok((source, version.mime_type, version.bytes))
@@ -321,7 +324,7 @@ mod tests {
         fs::write(&source, original).unwrap();
         let destination = root.path().join("downloads");
         let shots = [selected("second"), selected("first")];
-        let result = write_selected_folder("project", "剧本", &shots, &destination, |_| Ok((source.clone(), "video/mp4".into(), original.len() as u64)), |_| Ok(6.25)).unwrap();
+        let result = write_selected_folder("project", "剧本", "第一场", &shots, &destination, |_| Ok((source.clone(), "video/mp4".into(), original.len() as u64)), |_| Ok(6.25)).unwrap();
         assert_eq!(fs::read(result.join("shot-001.mp4")).unwrap(), original);
         let manifest: Value = serde_json::from_slice(&fs::read(result.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest["shots"][0]["id"], "second");
@@ -331,10 +334,10 @@ mod tests {
         assert_eq!(manifest["shots"][0]["dialogue"], "第一句\n第二句");
         assert!(fs::read_to_string(result.join("镜头清单.txt")).unwrap().contains("视频实际时长：6.250 秒"));
         for fail_probe in [false, true] {
-            assert!(write_selected_folder("project", "剧本", &shots, &destination, |_| if fail_probe { Ok((source.clone(), "video/mp4".into(), original.len() as u64)) } else { Err("视频不属于项目".into()) }, |_| Err("无法解码".into())).is_err());
+            assert!(write_selected_folder("project", "剧本", "第一场", &shots, &destination, |_| if fail_probe { Ok((source.clone(), "video/mp4".into(), original.len() as u64)) } else { Err("视频不属于项目".into()) }, |_| Err("无法解码".into())).is_err());
             assert_eq!(fs::read_dir(&destination).unwrap().count(), 1, "failed export removes staging and never touches previous package");
         }
-        assert!(write_selected_folder("project", "剧本", &[selected("same"), selected("same")], &destination, |_| unreachable!(), |_| unreachable!()).is_err());
+        assert!(write_selected_folder("project", "剧本", "第一场", &[selected("same"), selected("same")], &destination, |_| unreachable!(), |_| unreachable!()).is_err());
     }
 
     #[test]
@@ -351,12 +354,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("pretend.mp4"); fs::write(&source, b"not a video").unwrap();
         let destination = root.path().join("downloads");
-        assert!(write_selected_folder("p", "剧本", &[shot], &destination, |_| Ok((source.clone(), "video/mp4".into(), 11)), |_| unreachable!()).is_err());
+        assert!(write_selected_folder("p", "剧本", "第一场", &[shot], &destination, |_| Ok((source.clone(), "video/mp4".into(), 11)), |_| unreachable!()).is_err());
         assert_eq!(fs::read_dir(destination).unwrap().count(), 0);
     }
 
     fn bundle() -> Export {
         Export {
+            project_name: "狂澜之上".into(),
+            scope_name: "EP01-SC001".into(),
             texts: vec![TextEntry {
                 path: "shot-001/prompt.txt".into(),
                 content: "人物走入画面".into(),
@@ -434,7 +439,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap()
-            .starts_with("Meta-Muse-"));
+            .starts_with("狂澜之上_EP01-SC001_Muse 聊天素材包_"));
         assert_eq!(
             fs::read_to_string(result.join("shot-001/修改消息.txt")).unwrap(),
             "请修改上一版视频"

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { storyboardGroups, scopeForDocument, scopedShots, moveSourceShot, replaceSourceShots, OTHER_EPISODE, UNASSIGNED_SOURCE } from '../src/storyboard-scope.js'
+import { storyboardGroups, scopeForDocument, scopedShots, moveSourceShot, replaceSourceShots, OTHER_EPISODE, UNASSIGNED_SOURCE, storyboardExportScope } from '../src/storyboard-scope.js'
 
 const shot = (id, sourceDocumentId) => ({ id, sourceDocumentId, references: [{ versionId: `${id}-ref`, role: 'reference' }] })
 const data = {
@@ -8,6 +8,16 @@ const data = {
   structure: { acts: [{ episodeIds: ['ep1', 'ep2'] }], episodes: { ep1: { sceneIds: ['s1', 's2'] }, ep2: { sceneIds: ['s3'] } } },
   storyboard: { shots: [shot('second', 's2'), shot('first-a', 's1'), shot('other-episode', 's3'), shot('first-b', 's1'), shot('missing', 'deleted'), shot('manual', ''), shot('episode', 'ep1')] }
 }
+
+test('导出范围名称区分分场、全集与未归属镜头', () => {
+  assert.equal(storyboardExportScope(data, 'ep1', 's1'), '标题 ep1_标题 s1')
+  assert.equal(storyboardExportScope(data, 'ep1', ''), '标题 ep1_全集')
+  assert.equal(storyboardExportScope(data, OTHER_EPISODE, UNASSIGNED_SOURCE), '未归属镜头')
+  const renamed = structuredClone(data)
+  renamed.documents.ep1.title = 'EP01 深海垂钓者'
+  renamed.documents.s1.title = 'EP01-SC001 烈日暴晒'
+  assert.equal(storyboardExportScope(renamed, 'ep1', 's1'), 'EP01 深海垂钓者_EP01-SC001 烈日暴晒')
+})
 
 test('分场过滤、全集按场次顺序显示，不混入其他集或未归属镜头', () => {
   assert.deepEqual(scopedShots(data, 'ep1', 's1').map(s => s.id), ['first-a', 'first-b'])

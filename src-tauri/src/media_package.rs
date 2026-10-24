@@ -14,7 +14,6 @@ use std::{
     io::{Read, Write},
     path::Path,
 };
-use tauri::Manager;
 
 const MAGIC: &[u8; 8] = b"ACWMPK1\n";
 const MAX_MANIFEST: u64 = 64 * 1024 * 1024;
@@ -468,8 +467,7 @@ fn export(
         output.sync_all().map_err(|e| e.to_string())?;
     }
     let metadata = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
-    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
-    fs::create_dir_all(&downloads).map_err(|e| e.to_string())?;
+    let downloads = crate::export_location::directory(app)?;
     let mut file = tempfile::NamedTempFile::new_in(&downloads).map_err(|e| e.to_string())?;
     file.write_all(MAGIC)
         .and_then(|_| file.write_all(&(metadata.len() as u64).to_le_bytes()))
@@ -487,9 +485,8 @@ fn export(
         }
     }
     file.as_file().sync_all().map_err(|e| e.to_string())?;
-    let path = downloads.join(format!("创作项目-{}.acwpack", media::new_id()));
-    file.persist_noclobber(&path)
-        .map_err(|e| e.error.to_string())?;
+    let stem = crate::export_location::name(manifest.workspace["project"]["name"].as_str().unwrap_or("未命名项目"), "", "完整项目包");
+    let path = crate::export_location::publish_file(file, &downloads, &stem, "acwpack")?;
     sync_directory(&downloads)
         .map_err(|_| "项目包已写入但导出目录同步失败，请核验文件后重试".to_string())?;
     Ok(path.to_string_lossy().into_owned())

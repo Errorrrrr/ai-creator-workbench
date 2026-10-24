@@ -810,6 +810,14 @@ pub(crate) async fn choose_files(
     prompt: &str,
     multiple: bool,
 ) -> Result<Vec<PathBuf>, String> {
+    choose_paths(app, prompt, multiple, false).await
+}
+
+pub(crate) async fn choose_folder(app: &tauri::AppHandle, prompt: &str) -> Result<Option<PathBuf>, String> {
+    Ok(choose_paths(app, prompt, false, true).await?.into_iter().next())
+}
+
+async fn choose_paths(app: &tauri::AppHandle, prompt: &str, multiple: bool, folder: bool) -> Result<Vec<PathBuf>, String> {
     let window = app.get_webview_window("main").ok_or("主窗口已关闭")?;
     let runtime = app.state::<FileChooserRuntime>();
     {
@@ -831,7 +839,9 @@ pub(crate) async fn choose_files(
         let _ = sender.send(files);
     };
     let picker = app.dialog().file().set_parent(&window).set_title(prompt);
-    if multiple {
+    if folder {
+        picker.pick_folder(move |file| complete(file.map(|file| vec![file])));
+    } else if multiple {
         picker
             .add_filter(
                 "图片或视频",
@@ -988,31 +998,16 @@ pub(crate) fn media_export_version(
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("bin");
-    let directory = app.path().download_dir().map_err(|e| e.to_string())?;
-    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    let stem: String = version
-        .name
-        .chars()
-        .filter(|character| character.is_alphanumeric() || ['-', '_', ' '].contains(character))
-        .take(60)
-        .collect();
-    let path = directory.join(format!(
-        "{}-{}.{}",
-        if stem.is_empty() { "素材" } else { &stem },
-        new_id(),
-        extension
-    ));
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
+    let directory = crate::export_location::directory(&app)?;
+    let stem = crate::export_location::name(&version.name, "", "素材");
+    let mut output = tempfile::NamedTempFile::new_in(&directory).map_err(|e| e.to_string())?;
     std::io::copy(
         &mut File::open(&source).map_err(|e| e.to_string())?,
         &mut output,
     )
     .map_err(|e| format!("导出失败，原文件保留：{e}"))?;
-    output.sync_all().map_err(|e| e.to_string())?;
+    output.as_file().sync_all().map_err(|e| e.to_string())?;
+    let path = crate::export_location::publish_file(output, &directory, &stem, extension)?;
     Ok(path.to_string_lossy().into_owned())
 }
 

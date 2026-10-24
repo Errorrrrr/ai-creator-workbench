@@ -5,6 +5,7 @@ import vm from 'node:vm'
 import { buildFlowExport, buildMuseExport } from '../src/video-export.js'
 import { createShot } from '../src/storyboard.js'
 import { planReferenceBackfill } from '../src/storyboard-references.js'
+import { storyboardExportScope } from '../src/storyboard-scope.js'
 
 const asset = { name: '角色甲', role: 'character', selectedVersionId: 'new', versions: [{ id: 'fixed', mimeType: 'image/png' }, { id: 'new', mimeType: 'image/jpeg' }, { id: 'video', mimeType: 'video/mp4' }] }
 function context(shots) { return { project: { name: '测试项目', type: '短剧' }, storyboard: { revision: 3, shots }, documents: {}, connections: [{ apiKey: 'DO-NOT-EXPORT' }] } }
@@ -54,7 +55,7 @@ test('UI exports a snapshot without any video connection and refuses a project s
   for (const target of ['flow', 'muse']) for (const switched of [false, true]) {
     const state = { ...context([createShot({ visual: '当前未保存的修改' }), createShot({ visual: '另一场不应导出' })]), projectId: 'project-1', connections: [] }
     const calls = [], notices = []
-    const env = { planReferenceBackfill, visibleShots: data => data.storyboard.shots.slice(0, 1), structuredClone, buildFlowExport, buildMuseExport, context: () => state, desktop() {}, requireProject() {}, notify: message => notices.push(message), run: async action => { try { await action() } catch (error) { notices.push(error.message) } }, invoke: async (command, payload) => {
+    const env = { storyboardExportScope, selectedEpisodeId: 'ep1', selectedSourceId: 'scene1', planReferenceBackfill, visibleShots: data => data.storyboard.shots.slice(0, 1), structuredClone, buildFlowExport, buildMuseExport, context: () => state, desktop() {}, requireProject() {}, notify: message => notices.push(message), run: async action => { try { await action() } catch (error) { notices.push(error.message) } }, invoke: async (command, payload) => {
       calls.push({ command, payload })
       if (command === 'media_list') { if (switched) state.projectId = 'project-2'; return { assets: [] } }
       return '已导出'
