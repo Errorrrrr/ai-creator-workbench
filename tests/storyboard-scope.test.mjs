@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { storyboardGroups, scopeForDocument, scopedShots, moveSourceShot, replaceSourceShots, OTHER_EPISODE, UNASSIGNED_SOURCE, storyboardExportScope } from '../src/storyboard-scope.js'
+import { storyboardGroups, scopeForDocument, scopedShots, moveSourceShot, replaceSourceShots, OTHER_EPISODE, UNASSIGNED_SOURCE, storyboardExportScope, storyboardSceneEntries, shotsForScenes, singleSceneExport } from '../src/storyboard-scope.js'
 
 const shot = (id, sourceDocumentId) => ({ id, sourceDocumentId, references: [{ versionId: `${id}-ref`, role: 'reference' }] })
 const data = {
@@ -17,6 +17,27 @@ test('导出范围名称区分分场、全集与未归属镜头', () => {
   renamed.documents.ep1.title = 'EP01 深海垂钓者'
   renamed.documents.s1.title = 'EP01-SC001 烈日暴晒'
   assert.equal(storyboardExportScope(renamed, 'ep1', 's1'), 'EP01 深海垂钓者_EP01-SC001 烈日暴晒')
+})
+
+test('跨分场列表和镜头顺序遵循分集分场结构，未归属镜头单列且不重复', () => {
+  const entries = storyboardSceneEntries(data)
+  assert.deepEqual(entries.map(entry => entry.sourceId), ['s1', 's2', 'ep1', 's3', UNASSIGNED_SOURCE])
+  assert.deepEqual(entries.at(-1).shots.map(shot => shot.id), ['missing', 'manual'])
+  assert.deepEqual(shotsForScenes(data, new Set(['s3', 's1'])).map(shot => shot.id), ['first-a', 'first-b', 'other-episode'])
+  assert.deepEqual(shotsForScenes(data, ['s1', 's1', 'deleted-scene']).map(shot => shot.id), ['first-a', 'first-b'])
+})
+
+test('单场导出保留固定引用和镜头ID，独立于当前全集状态，拒绝空分场或已删除分场', () => {
+  const before = structuredClone(data), result = singleSceneExport(data, 's2')
+  assert.deepEqual(result.storyboard.shots.map(shot => shot.id), ['second'])
+  assert.equal(result.storyboard.shots[0].references[0].versionId, 'second-ref')
+  assert.equal(result.exportScope, '标题 ep1_标题 s2')
+  result.storyboard.shots[0].title = '导出副本'
+  assert.deepEqual(data, before)
+  assert.throws(() => singleSceneExport(data, 'removed'), /已不存在/)
+  const empty = structuredClone(data); empty.storyboard.shots = []
+  assert.throws(() => singleSceneExport(empty, 's2'), /尚无分镜/)
+  assert.deepEqual(singleSceneExport(data, UNASSIGNED_SOURCE).storyboard.shots.map(shot => shot.id), ['missing', 'manual'])
 })
 
 test('分场过滤、全集按场次顺序显示，不混入其他集或未归属镜头', () => {

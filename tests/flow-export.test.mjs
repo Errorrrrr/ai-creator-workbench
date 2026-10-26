@@ -5,7 +5,7 @@ import vm from 'node:vm'
 import { buildFlowExport, buildMuseExport } from '../src/video-export.js'
 import { createShot } from '../src/storyboard.js'
 import { planReferenceBackfill } from '../src/storyboard-references.js'
-import { storyboardExportScope } from '../src/storyboard-scope.js'
+import { storyboardExportScope, singleSceneExport } from '../src/storyboard-scope.js'
 
 const asset = { name: '角色甲', role: 'character', selectedVersionId: 'new', versions: [{ id: 'fixed', mimeType: 'image/png' }, { id: 'new', mimeType: 'image/jpeg' }, { id: 'video', mimeType: 'video/mp4' }] }
 function context(shots) { return { project: { name: '测试项目', type: '短剧' }, storyboard: { revision: 3, shots }, documents: {}, connections: [{ apiKey: 'DO-NOT-EXPORT' }] } }
@@ -65,5 +65,33 @@ test('UI exports a snapshot without any video connection and refuses a project s
     assert.deepEqual(calls.map(call => call.command), switched ? ['media_list'] : ['media_list', `media_export_${target}`])
     if (switched) assert.match(notices[0], /项目已切换/)
     else { assert.match(calls[1].payload.bundle.texts[0].content, /当前未保存的修改/); assert.equal(calls[1].payload.projectId, 'project-1'); assert.ok(!JSON.stringify(calls[1].payload.bundle).includes('另一场不应导出')) }
+  }
+})
+
+test('单场导出入口无视当前全集范围，使用点击时的分场快照和固定参考图', async () => {
+  const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
+  const handler = source.slice(source.indexOf('  async function exportFlow() {'), source.indexOf('  async function exportPackage() {'))
+  for (const target of ['flow', 'muse']) {
+    const selected = createShot({ title: '目标场镜头', visual: '目标场画面' }); selected.sourceDocumentId = 's2'; selected.references = [{ role: 'reference', versionId: 'fixed' }]
+    const other = createShot({ title: '其他场镜头', visual: '不应导出' }); other.sourceDocumentId = 's1'
+    const state = { ...context([other, selected]), projectId: 'project-1', documents: { ep: { title: '第一集' }, s1: { title: '场一' }, s2: { title: '场二' } }, structure: { episodes: { ep: { sceneIds: ['s1', 's2'] } } } }
+    const calls = []
+    const env = { singleSceneExport, structuredClone, storyboardExportScope, selectedEpisodeId: 'ep', selectedSourceId: '', planReferenceBackfill, visibleShots: data => data.storyboard.shots, buildFlowExport, buildMuseExport,
+      context: () => state, desktop() {}, requireProject() {}, notify() {}, run: action => action(), invoke: async (command, payload) => {
+        calls.push({ command, payload })
+        if (command === 'media_list') { selected.visual = '加载素材期间的另一修改'; return { assets: [asset] } }
+        return '/导出/场二'
+      } }
+    vm.createContext(env); vm.runInContext(handler, env)
+    assert.equal(await env.exportVideoBundle(target === 'flow' ? buildFlowExport : buildMuseExport, `media_export_${target}`, { projectId: 'project-1', sourceId: 's2' }), '/导出/场二')
+    const bundle = calls[1].payload.bundle, manifest = JSON.parse(bundle.texts.find(file => file.path === 'manifest.json').content)
+    assert.equal(bundle.scopeName, '第一集_场二')
+    assert.deepEqual(manifest.shots.map(shot => shot.id), [selected.id])
+    assert.deepEqual(bundle.images.map(image => image.versionId), ['fixed'])
+    assert.ok(JSON.stringify(bundle).includes('目标场画面'))
+    assert.ok(!JSON.stringify(bundle).includes('不应导出'))
+    assert.ok(!JSON.stringify(bundle).includes('加载素材期间的另一修改'))
+    await assert.rejects(env.exportVideoBundle(buildFlowExport, 'media_export_flow', { projectId: 'other-project', sourceId: 's1' }), /项目已切换/)
+    assert.equal(calls.length, 2)
   }
 })

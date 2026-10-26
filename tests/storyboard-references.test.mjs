@@ -1,6 +1,7 @@
+import { planShotImageResults, imageResultCheckpoint } from '../src/shot-image-results.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createShot, validateStoryboard, storyboardPrompt, parseStoryboardCandidate } from '../src/storyboard.js'
+import { createShot, validateStoryboard, storyboardPrompt, parseStoryboardCandidate, findMediaVersion } from '../src/storyboard.js'
 import { bindShotReferences, matchShotReferences, referenceBindingWarnings, manualReferencePatch, planReferenceBackfill } from '../src/storyboard-references.js'
 import { buildFlowExport, buildMuseExport } from '../src/video-export.js'
 
@@ -71,11 +72,11 @@ test('自动补齐入口在刷新后保存，拆镜中暂缓，失败不改原�
   for (const mode of ['ready', 'task', 'generating', 'transition', 'foreign', 'failure']) {
     const data = { projectId: 'p', documents, storyboard: { revision: 2, shots: [oldShot()] }, textGenerating: mode === 'generating', mutationBusy: mode === 'transition' }
     const calls = [], notices = [], scheduled = []
-    const env = { context: () => data, referenceSyncBusy: false, loading: false, error: '', operationBusy: false, storyboardTasks: { active: () => mode === 'task' }, invoke: true, projectId: mode === 'foreign' ? 'another' : 'p', assets, planReferenceBackfill, scheduleReferenceSync: () => scheduled.push(true), commit: async (patch, options) => { calls.push(options); if (mode === 'failure') throw new Error('磁盘不可写'); data.storyboard = patch.storyboard }, renderShots() {}, refreshReferenceDetails() {}, notify: message => notices.push(message) }
+    const env = { context: () => data, referenceSyncBusy: false, loading: false, error: '', operationBusy: false, storyboardTasks: { active: () => mode === 'task' }, invoke: true, projectId: mode === 'foreign' ? 'another' : 'p', assets, jobs: [], planReferenceBackfill, planShotImageResults, scheduleReferenceSync: () => scheduled.push(true), commit: async (patch, options) => { calls.push(options); if (mode === 'failure') throw new Error('磁盘不可写'); data.storyboard = patch.storyboard }, renderShots() {}, refreshReferenceDetails() {}, notify: message => notices.push(message) }
     vm.createContext(env); vm.runInContext(`${handler}\nthis.sync = synchronizeReferences`, env)
     await env.sync()
     assert.equal(calls.length, ['ready', 'failure'].includes(mode) ? 1 : 0)
-    assert.equal(scheduled.length, mode === 'transition' ? 1 : 0)
+    assert.equal(scheduled.length, ['transition', 'task', 'generating'].includes(mode) ? 1 : 0)
     assert.equal(data.storyboard.shots[0].references.length, mode === 'ready' ? 3 : 0)
     assert.equal(env.referenceSyncBusy, false)
     if (mode === 'ready') { assert.equal(calls[0].atomic, true); assert.equal(calls[0].revision, 2); await env.sync(); assert.equal(calls.length, 1) }
@@ -136,4 +137,158 @@ test('旧引用不猜测来源并提示未匹配项；同一实体的已固定�
   validateStoryboard({ revision: 0, shots: [original] })
   const corrupt = structuredClone(original); corrupt.references[0].origin = 'guess'
   assert.throws(() => validateStoryboard({ revision: 0, shots: [corrupt] }), /来源/)
+})
+
+async function imageSyncHarness({ fail = false, blocked = false, candidateFocused = false, videoPlaying = false } = {}) {
+  const { readFileSync } = await import('node:fs'), vm = await import('node:vm')
+  const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
+  const handler = source.slice(source.indexOf('  async function synchronizeReferences()'), source.indexOf('  function reserveStoryboardTask('))
+  const refreshCandidates = source.slice(source.indexOf('  function refreshShotCandidates()'), source.indexOf('  function renderShotReferenceInputs('))
+  const current = oldShot(), data = { projectId: 'p', documents, storyboard: { revision: 8, shots: [current] } }
+  const generated = { id: 'generated-asset', projectId: 'p', kind: 'image', role: 'shot', name: '新分镜图', selectedVersionId: 'new-image', versions: [{ id: 'new-image', mimeType: 'image/png', metadata: { provenance: { jobId: 'image-job', artifact: 'output-1.png' } } }] }
+  const jobs = [{ id: 'image-job', targetId: current.id, projectId: 'p', capability: 'image', status: 'completed', createdAt: '1793066400000', assetId: generated.id, request: {} }]
+  const calls = { commits: [], notices: [], renders: [], previews: [], candidateRenders: [], jobs: 0, overview: 0 }
+  let release
+  const gate = blocked ? new Promise(resolve => { release = resolve }) : Promise.resolve()
+  const candidates = {
+    dataset: {},
+    contains: () => candidateFocused,
+    querySelectorAll: () => videoPlaying ? [{ paused: false }] : [],
+    replaceWith: content => calls.candidateRenders.push(content),
+  }
+  const host = { replaceChildren: (...children) => calls.previews.push(children) }
+  const env = {
+    context: () => data, referenceSyncBusy: false, loading: false, error: '', operationBusy: false,
+    storyboardTasks: { active: () => false }, invoke: true, projectId: 'p', assets: [...assets, generated], jobs,
+    planReferenceBackfill, planShotImageResults, findMediaVersion, scheduleReferenceSync() {},
+    fail, commit: async (patch, options) => {
+      calls.commits.push({ patch, options }); await gate
+      if (env.fail) throw new Error('模拟磁盘写入失败')
+      data.storyboard = patch.storyboard
+    },
+    renderShots: options => calls.renders.push({ options, selected: data.storyboard.shots[0].selectedImageVersionId }),
+    refreshReferenceDetails() {}, notify: message => calls.notices.push(message), selectedShot: () => data.storyboard.shots[0],
+    shotDetail: { querySelector: selector => selector.startsWith('.shot-selected-media') ? host : selector === '.shot-candidates' ? candidates : null },
+    document: { activeElement: {} }, el: (tag, className, text) => ({ tag, className, text }),
+    preview: (version, title) => ({ versionId: version?.id, title }), button: (text, action) => ({ text, action }),
+    renderShotDetail() {}, selectDetailPanel() {}, rememberShotDisclosures() {}, restoreShotDisclosures() {},
+    renderShotCandidates: item => ({ selected: item.selectedImageVersionId }),
+    renderJobs: () => { calls.jobs++ }, productionOverview: { refresh: () => { calls.overview++ } },
+  }
+  vm.createContext(env); vm.runInContext(`${refreshCandidates}\n${handler}\nthis.sync = synchronizeReferences`, env)
+  return { env, data, calls, release, original: structuredClone(data.storyboard) }
+}
+
+test('真实同步入口将生成图和参考一次原子保存，保存成功前不更新选用状态和UI', async () => {
+  const h = await imageSyncHarness({ blocked: true })
+  const syncing = h.env.sync()
+  assert.equal(h.calls.commits.length, 1)
+  assert.equal(h.calls.commits[0].options.atomic, true)
+  assert.equal(h.calls.commits[0].options.projectId, 'p')
+  assert.equal(h.calls.commits[0].options.revision, 8)
+  assert.equal(h.calls.commits[0].patch.storyboard.revision, 9, '图片与参考合并只增加一次修订')
+  assert.deepEqual(h.data.storyboard, h.original)
+  assert.equal(h.calls.renders.length, 0); assert.equal(h.calls.previews.length, 0)
+  assert.equal(h.env.referenceSyncBusy, true)
+  h.release(); await syncing
+  const saved = h.data.storyboard.shots[0]
+  assert.equal(saved.selectedImageVersionId, 'new-image')
+  assert.deepEqual(saved.imageResultCheckpoint, { jobId: 'image-job', createdAt: '1793066400000' })
+  assert.deepEqual(saved.references.map(ref => ref.versionId), ['lu', 'day', 'knife'])
+  assert.equal(h.calls.renders[0].selected, 'new-image')
+  assert.equal(h.calls.previews[0][1].versionId, 'new-image')
+  assert.equal(h.calls.candidateRenders[0].selected, 'new-image')
+  assert.equal(h.calls.jobs, 1); assert.equal(h.calls.overview, 1)
+  assert.equal(h.env.referenceSyncBusy, false)
+  assert.ok(h.calls.notices.some(message => /1 张新生成图片关联并选用/.test(message)))
+  await h.env.sync(); assert.equal(h.calls.commits.length, 1, '重复同步不再保存同一结果')
+})
+
+test('真实同步入口写入失败保留镜头和水位，之后重试仍能关联同一结果', async () => {
+  const h = await imageSyncHarness({ fail: true })
+  await h.env.sync()
+  assert.deepEqual(h.data.storyboard, h.original)
+  assert.equal(h.data.storyboard.shots[0].imageResultCheckpoint, undefined)
+  assert.equal(h.calls.renders.length, 0); assert.equal(h.calls.previews.length, 0)
+  assert.equal(h.calls.jobs, 0); assert.equal(h.env.referenceSyncBusy, false)
+  assert.match(h.calls.notices[0], /未保存.*模拟磁盘写入失败/)
+  h.env.fail = false
+  await h.env.sync()
+  assert.equal(h.calls.commits.length, 2)
+  assert.equal(h.calls.commits[1].options.revision, 8)
+  assert.equal(h.data.storyboard.shots[0].selectedImageVersionId, 'new-image')
+  assert.equal(h.data.storyboard.shots[0].imageResultCheckpoint.jobId, 'image-job')
+  assert.equal(h.calls.jobs, 1)
+  await h.env.sync(); assert.equal(h.calls.commits.length, 2)
+})
+
+test('图片同步保存仍执行，候选区有焦点或视频正在播放时保持原节点', async () => {
+  for (const options of [{ candidateFocused: true }, { videoPlaying: true }]) {
+    const h = await imageSyncHarness(options)
+    await h.env.sync()
+    assert.equal(h.data.storyboard.shots[0].selectedImageVersionId, 'new-image')
+    assert.equal(h.calls.previews[0][1].versionId, 'new-image')
+    assert.equal(h.calls.candidateRenders.length, 0)
+    assert.equal(h.calls.jobs, 1)
+  }
+})
+
+test('候选区等焦点离开或视频暂停结束后局部刷新，避免最终任务完成后留下旧状态', async () => {
+  const { readFileSync } = await import('node:fs'), vm = await import('node:vm')
+  const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
+  const handler = source.slice(source.indexOf('  function renderShotCandidates('), source.indexOf('  function renderShotReferenceInputs('))
+  for (const event of ['focusout', 'pause', 'ended']) {
+    let focused = event === 'focusout', playing = !focused, current, replacements = 0
+    const node = () => ({
+      dataset: {}, children: [], listeners: new Map(), isConnected: true,
+      append(...children) { this.children.push(...children) }, setAttribute() {},
+      addEventListener(name, action, capture) { this.listeners.set(name, { action, capture }) },
+      contains: () => focused, querySelectorAll: () => playing ? [{ paused: false }] : [],
+      replaceWith(next) { this.isConnected = false; current = next; replacements++ },
+    })
+    const env = {
+      assets: [], jobs: [], el: node, disclosure: node, field: node, button: node,
+      Option: function (text, value) { this.text = text; this.value = value },
+      selectedShot: oldShot, shotDetail: { querySelector: () => current },
+      document: { activeElement: {} }, queueMicrotask, rememberShotDisclosures() {}, restoreShotDisclosures() {},
+    }
+    vm.createContext(env); vm.runInContext(`${handler}\nthis.render = renderShotCandidates; this.refresh = refreshShotCandidates`, env)
+    current = env.render(oldShot())
+    env.refresh()
+    const previous = current
+    assert.equal(previous.dataset.needsRefresh, 'true'); assert.equal(replacements, 0)
+    if (event !== 'focusout') assert.equal(previous.listeners.get(event).capture, true)
+    focused = false; playing = false
+    previous.listeners.get(event).action()
+    assert.equal(replacements, 0, '等待事件后微任务再读取最新焦点和播放状态')
+    await Promise.resolve()
+    assert.equal(replacements, 1); assert.notEqual(current, previous)
+    previous.listeners.get(event).action(); await Promise.resolve()
+    assert.equal(replacements, 1, '已脱离页面的旧节点不重复刷新')
+  }
+})
+
+test('真实手选入口记录尚在运行的生成任务水位，之后完成不覆盖手选图', async () => {
+  const { readFileSync } = await import('node:fs'), vm = await import('node:vm')
+  const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
+  const handler = source.slice(source.indexOf('  function editShot('), source.indexOf('  function rememberShotDisclosures('))
+  const selected = oldShot(), data = { projectId: 'p', documents, storyboard: { revision: 2, shots: [selected] } }
+  const job = { id: 'running-image', projectId: 'p', targetId: selected.id, capability: 'image', status: 'running', createdAt: '1793066400000', assetId: 'generated', request: {} }
+  const generated = { id: 'generated', projectId: 'p', kind: 'image', versions: [{ id: 'result', mimeType: 'image/png', metadata: { provenance: { jobId: job.id } } }] }
+  const env = {
+    context: () => data, jobs: [job], assets: [generated], projectId: 'p', loading: false, error: '',
+    imageResultCheckpoint, manualReferencePatch, bindShotReferences, REFERENCE_ENTITY_FIELDS: {},
+    changeStoryboard: async action => { const next = structuredClone(data.storyboard); action(next.shots); next.revision++; data.storyboard = next },
+    renderShots() {}, refreshReferenceDetails() {}, renderGenerationReadiness() {}, notify(message) { throw new Error(message) },
+  }
+  vm.createContext(env); vm.runInContext(`${handler}\nthis.edit = editShot`, env)
+  await env.edit(selected.id, { selectedImageVersionId: 'manually-imported' })
+  assert.equal(data.storyboard.shots[0].selectedImageVersionId, 'manually-imported')
+  assert.deepEqual(data.storyboard.shots[0].imageResultCheckpoint, { jobId: job.id, createdAt: job.createdAt })
+  job.status = 'completed'
+  const plan = planShotImageResults(data.storyboard, [generated], [job], 'p')
+  assert.equal(plan.changed, 0)
+  assert.equal(plan.storyboard.shots[0].selectedImageVersionId, 'manually-imported')
+  await env.edit(selected.id, { visual: '改写画面' })
+  assert.deepEqual(data.storyboard.shots[0].imageResultCheckpoint, { jobId: job.id, createdAt: job.createdAt })
 })

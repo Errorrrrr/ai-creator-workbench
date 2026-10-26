@@ -84,14 +84,14 @@ function harness(shots) {
   const env = {
     context: () => data, connectionFor: capability => capability === 'video' ? connection : { id: 'images', kind: 'image-api', adapter: 'openai-images' },
     prepareShotInputs, videoParameterState, validateVideoParameters, mediaAdapterFor, findMediaVersion, mediaPrompt, resolveConnectionRoute,
-    assets, loading: false, error: '', jobs: [], terminal: () => true, BATCH_LIMIT: 20, batchSelection: new Set(shots.map(value => value.id)),
+    assets, loading: false, error: '', jobs: [], terminal: () => true, BATCH_LIMIT: 20, batchScopeIds: shots.map(value => value.id), batchSelection: new Set(shots.map(value => value.id)),
     invoke: async () => { calls.invoke++; return {} }, secret: async () => { calls.secret++; return 'test-only' }, requireProject() {}, desktop() {}, requireAdapterCatalog: async () => {},
     run: callback => callback(), batchSignature: requests => JSON.stringify(requests), beforeSubmit: null,
     changeStoryboard: async edit => { const next = structuredClone(data.storyboard.shots); edit(next); data.storyboard.shots = next; data.storyboard.revision++ },
     renderShots() {}, refreshReferenceDetails() {}, renderGenerationReadiness() {}, renderBatchSelection() {}, invalidateBatchPlan: text => notices.push(text)
   }
   vm.createContext(env)
-  vm.runInContext(['prepareShotRequest', 'batchRequests', 'setBatchVideoDuration', 'submitShot'].map(productionFunction).join('\n'), env)
+  vm.runInContext(['prepareShotRequest', 'batchScopeShots', 'batchRequests', 'setBatchVideoDuration', 'submitShot'].map(productionFunction).join('\n'), env)
   return { env, data, calls, notices }
 }
 

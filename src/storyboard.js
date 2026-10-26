@@ -100,6 +100,10 @@ export function validateStoryboard(value) {
     for (const field of ['sourceDocumentId', 'sourceFingerprint', 'selectedImageVersionId', 'selectedVideoVersionId']) if (typeof shot[field] !== 'string' || shot[field].length > 200) throw new Error('镜头引用无效')
     if (shot.reviewedVideoVersionId !== undefined && (typeof shot.reviewedVideoVersionId !== 'string' || shot.reviewedVideoVersionId.length > 200)) throw new Error('镜头审核版本无效')
     if (shot.reviewedInputFingerprint !== undefined && (typeof shot.reviewedInputFingerprint !== 'string' || shot.reviewedInputFingerprint.length > 200)) throw new Error('镜头审核输入指纹无效')
+    if (shot.imageResultCheckpoint !== undefined) {
+      const checkpoint = shot.imageResultCheckpoint
+      if (!object(checkpoint) || typeof checkpoint.jobId !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(checkpoint.jobId) || typeof checkpoint.createdAt !== 'string' || checkpoint.createdAt.length > 100 || !Number.isFinite(/^\d+$/.test(checkpoint.createdAt) ? Number(checkpoint.createdAt) : Date.parse(checkpoint.createdAt))) throw new Error('镜头图片关联记录无效')
+    }
     if (!Array.isArray(shot.references) || shot.references.length > 16 || shot.references.some(ref => !object(ref) || typeof ref.versionId !== 'string' || !ref.versionId || ref.versionId.length > 96 || !REFERENCE_ROLES.includes(ref.role))) throw new Error('镜头参考素材无效')
     if (shot.references.some(ref => ref.scope !== undefined && !['continuity', 'video'].includes(ref.scope))) throw new Error('镜头参考适用范围无效')
     if (shot.references.some(ref => ref.origin !== undefined && !['auto', 'manual'].includes(ref.origin))) throw new Error('镜头参考来源无效')

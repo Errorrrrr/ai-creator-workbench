@@ -31,6 +31,38 @@ export function storyboardExportScope(data, episodeId, sourceId) {
   return `${group?.title || '分镜'}_全集`
 }
 
+// One row per source, in project order; unknown sources share an explicit row.
+export function storyboardSceneEntries(data) {
+  const shots = data.storyboard?.shots || []
+  return storyboardGroups(data).flatMap(group => {
+    const entries = group.sourceIds.filter(id => (group.sceneIds.includes(id) && group.id !== OTHER_EPISODE) || shots.some(shot => shot.sourceDocumentId === id)).map(sourceId => ({
+      sourceId, episodeId: group.id, episodeTitle: group.title,
+      title: data.documents[sourceId]?.title || '未归属镜头',
+      shots: shots.filter(shot => shot.sourceDocumentId === sourceId)
+    }))
+    if (group.id === OTHER_EPISODE) {
+      const orphaned = shots.filter(shot => !data.documents[shot.sourceDocumentId])
+      if (orphaned.length) entries.push({ sourceId: UNASSIGNED_SOURCE, episodeId: group.id, episodeTitle: group.title, title: '未归属镜头', shots: orphaned })
+    }
+    return entries
+  })
+}
+
+export function shotsForScenes(data, sourceIds) {
+  const selected = new Set(sourceIds)
+  return storyboardSceneEntries(data).filter(entry => selected.has(entry.sourceId)).flatMap(entry => entry.shots)
+}
+
+export function singleSceneExport(data, sourceId) {
+  const entry = storyboardSceneEntries(data).find(item => item.sourceId === sourceId)
+  if (!entry) throw new Error('所选分场已不存在，请重新选择')
+  if (!entry.shots.length) throw new Error('所选分场尚无分镜，请先拆镜或新建镜头')
+  const snapshot = structuredClone(data)
+  snapshot.storyboard.shots = structuredClone(entry.shots)
+  snapshot.exportScope = storyboardExportScope(data, entry.episodeId, entry.sourceId)
+  return snapshot
+}
+
 export function scopedShots(data, episodeId, sourceId) {
   const group = storyboardGroups(data).find(group => group.id === episodeId)
   if (!group) return []

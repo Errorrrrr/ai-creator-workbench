@@ -909,11 +909,13 @@
 
     <dialog class="app-dialog media-jobs-dialog media-batch-dialog" id="mediaBatchDialog" aria-labelledby="mediaBatchTitle" aria-describedby="mediaBatchHelp">
       <div class="dialog-header"><div><span class="eyebrow">先预览 · 一次确认范围</span><h2 id="mediaBatchTitle">批量生成计划</h2></div><button type="button" class="secondary-button compact-button" data-media-batch-close>关闭</button></div>
-      <p class="media-help" id="mediaBatchHelp">只生成本次选定的图片或视频，不自动进入下一阶段。预览不调用生成，也不读取密钥；每个镜头产生一个候选。</p>
+      <p class="media-help" id="mediaBatchHelp">只生成本次选定的图片或视频，不自动进入下一阶段。预览不调用生成，也不读取密钥；新图片完成后自动选用到原镜头，视频需手动选用与审核。</p>
       <div class="media-batch-controls">
         <label class="media-field"><span>本批次生成内容</span><select id="mediaBatchCapability"><option value="image">图片候选</option><option value="video">视频候选</option></select></label>
+        <label class="media-field"><span>镜头范围</span><select id="mediaBatchScope"><option value="current">当前查看范围</option><option value="scenes">选择多个分场（可跨集）</option><option value="specified" hidden>指定镜头</option></select></label>
         <div class="media-field"><span>当前步骤执行端</span><p class="media-help" id="mediaBatchConnection"></p></div>
       </div>
+      <fieldset class="media-batch-selection" id="mediaBatchSceneFieldset" hidden><legend>选择分场</legend><p class="media-help">可跨分集选择。每个分场的镜头在下方分别列出；每批最多 20 个镜头，最多 3 个任务同时执行，其余排队。</p><div class="media-batch-checklist" id="mediaBatchScenes"></div></fieldset>
       <fieldset class="media-batch-selection"><legend>选择镜头 · 每批最多 20 个</legend><div class="media-toolbar"><button type="button" class="text-button" data-media-batch-select>选择前 20 个镜头</button><button type="button" class="text-button" data-media-batch-clear>清空选择</button></div><div class="media-batch-checklist" id="mediaBatchShots"></div></fieldset>
       <p class="media-notice" id="mediaBatchStatus" role="status"></p>
       <button type="button" class="secondary-button" data-media-batch-preview>预览固定输入</button>

@@ -4,6 +4,7 @@ import vm from 'node:vm'
 import { readFileSync } from 'node:fs'
 import { createShot, findMediaVersion, videoReviewState, snapshotStoryboardSource, SHOT_LIMIT } from '../src/storyboard.js'
 import { shotReadiness } from '../src/shot-workflow.js'
+import { imageResultCheckpoint } from '../src/shot-image-results.js'
 import { replaceSourceShots, storyboardExportScope, OTHER_EPISODE, UNASSIGNED_SOURCE } from '../src/storyboard-scope.js'
 
 const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
@@ -78,7 +79,7 @@ test('恢复历史先保留当前版本，保存失败不修改原镜头与历�
   data.storyboard.shots[0].visual = '当前新内容'
   const other = createShot({ visual: '另一场' }, { documentId: 'other' }); data.storyboard.shots.push(other)
   const before = structuredClone(data.storyboard)
-  Object.assign(env, { structuredClone, snapshotStoryboardSource, replaceSourceShots, SHOT_LIMIT, selectedSourceId: 'scene', selectedEpisodeId: 'ep1', selectedShotId: null,
+  Object.assign(env, { structuredClone, snapshotStoryboardSource, replaceSourceShots, imageResultCheckpoint, jobs: [], SHOT_LIMIT, selectedSourceId: 'scene', selectedEpisodeId: 'ep1', selectedShotId: null,
     storyboardGroups: () => [], mediaTimeLabel: value => value, showSource() {}, renderSources() {}, renderShots() {}, commit: async () => { throw new Error('保存失败') } })
   vm.runInContext(['disclosure', 'changeStoryboard', 'showStoryboardVersions'].map(productionFunction).join('\n'), env)
   env.showStoryboardVersions()
