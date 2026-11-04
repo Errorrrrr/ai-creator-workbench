@@ -1,4 +1,7 @@
+import { validateContinuity } from './continuity-assets.js'
 import { mediaAdapterFor } from './media-adapters.js'
+import { validateVisualRecord } from './visual-review.js'
+import { sceneContinuityContext, sceneContinuityStateDocumentIds } from './scene-continuity.js'
 
 // Project data only. Files and generation jobs belong to the desktop media store.
 export const SHOT_LIMIT = 120
@@ -21,26 +24,29 @@ export function storyboardSourceFingerprint(storyboard, documentId) {
 }
 
 // Capture creative inputs, not output selection, review flags or UI metadata.
-export function shotProductionInputs(shot, documents = {}) {
-  const fields = [...TEXT_FIELDS, 'duration', 'transition', 'characterNames', 'sceneNames', 'propNames', 'selectedImageVersionId', 'aspectRatio', 'imageSize', 'imageQuality', 'videoMode', 'videoDuration']
+export function shotProductionInputs(shot, documents = {}, context = {}) {
+  const fields = [...TEXT_FIELDS, 'duration', 'transition', 'characterNames', 'sceneNames', 'propNames', 'selectedImageVersionId', 'aspectRatio', 'imageSize', 'imageQuality', 'videoMode', 'videoDuration', 'continuityNotes']
+  const stateDocuments = sceneContinuityStateDocumentIds({ ...context, documentId: shot.sourceDocumentId, documents })
+  const scene = stateDocuments.length && sceneContinuityContext({ ...context, documentId: shot.sourceDocumentId, documents, shot, enforceLimit: false })
   return { ...Object.fromEntries(fields.map(field => [field, shot[field] ?? null])),
     references: shot.references.map(({ versionId, role, scope }) => ({ versionId, role, scope: scope || '' })),
     sourceDocumentId: shot.sourceDocumentId,
-    sourceFingerprint: shot.sourceDocumentId ? contentFingerprint(documents[shot.sourceDocumentId]?.content ?? '') : '' }
+    sourceFingerprint: shot.sourceDocumentId ? contentFingerprint(documents[shot.sourceDocumentId]?.content ?? '') : '',
+    ...(scene?.stateDocumentIds?.length ? { sceneConstraints: scene.fingerprint } : {}) }
 }
 
-export function shotInputFingerprint(shot, documents = {}) {
-  return `v1:${contentFingerprint(JSON.stringify(shotProductionInputs(shot, documents)))}`
+export function shotInputFingerprint(shot, documents = {}, context = {}) {
+  return `v1:${contentFingerprint(JSON.stringify(shotProductionInputs(shot, documents, context)))}`
 }
 
-export function shotInputFieldFingerprints(shot, documents = {}) {
-  return Object.fromEntries(Object.entries(shotProductionInputs(shot, documents)).map(([key, value]) => [key, contentFingerprint(JSON.stringify(value))]))
+export function shotInputFieldFingerprints(shot, documents = {}, context = {}) {
+  return Object.fromEntries(Object.entries(shotProductionInputs(shot, documents, context)).map(([key, value]) => [key, contentFingerprint(JSON.stringify(value))]))
 }
 
-export function videoReviewState(shot, documents = {}) {
+export function videoReviewState(shot, documents = {}, context = {}) {
   const recorded = Boolean(shot.selectedVideoVersionId && shot.reviewedVideoVersionId === shot.selectedVideoVersionId)
   const legacy = recorded && !shot.reviewedInputFingerprint
-  const reviewed = recorded && shot.reviewedInputFingerprint === shotInputFingerprint(shot, documents)
+  const reviewed = recorded && shot.reviewedInputFingerprint === shotInputFingerprint(shot, documents, context)
   return { reviewed, outdated: recorded && !reviewed, legacy }
 }
 
@@ -77,6 +83,7 @@ export function createShot(value = {}, source = {}) {
 
 export function validateStoryboard(value) {
   if (!object(value) || !Number.isSafeInteger(value.revision) || value.revision < 0 || !Array.isArray(value.shots) || value.shots.length > SHOT_LIMIT) throw new Error('分镜结构或修订号无效')
+  if (value.continuity !== undefined) validateContinuity(value.continuity)
   const ids = new Set()
   if (value.sourceVersions !== undefined) {
     if (!Array.isArray(value.sourceVersions) || value.sourceVersions.length > 10) throw new Error('分镜历史版本无效')
@@ -91,6 +98,10 @@ export function validateStoryboard(value) {
   for (const shot of value.shots) {
     if (!object(shot) || typeof shot.id !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(shot.id) || ids.has(shot.id)) throw new Error('镜头标识无效或重复')
     ids.add(shot.id)
+    if (shot.visualReview !== undefined) validateVisualRecord(shot.visualReview, { review: true })
+    if (shot.imageGenerationBasis !== undefined) validateVisualRecord(shot.imageGenerationBasis)
+    if (shot.continuityNotes !== undefined && (typeof shot.continuityNotes !== 'string' || shot.continuityNotes.length > 500000)) throw new Error('镜头连续性设定无效')
+    if (shot.references?.some(ref => ['entityId', 'stateId'].some(field => ref[field] !== undefined && (typeof ref[field] !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(ref[field]))))) throw new Error('镜头素材状态引用无效')
     for (const field of ['characterNames', 'sceneNames', 'propNames']) if (shot[field] !== undefined && !validCharacters(shot[field])) throw new Error('镜头角色、场景或道具列表无效')
     if (shot.referenceExclusions !== undefined && (!Array.isArray(shot.referenceExclusions) || shot.referenceExclusions.length > 128 || shot.referenceExclusions.some(value => typeof value !== 'string' || value.length > 300 || !/^(character|scene|prop):[^\u0000-\u001f\u007f]+$/.test(value)))) throw new Error('镜头手动排除参考无效')
     for (const field of TEXT_FIELDS) if (typeof shot[field] !== 'string' || shot[field].length > (field === 'title' ? 200 : 12000)) throw new Error(`镜头 ${field} 字段无效`)
@@ -122,6 +133,10 @@ export function parseStoryboardCandidate(text, source = {}) {
   const clean = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
   let value
   try { value = JSON.parse(clean) } catch { throw new Error('AI 未返回有效分镜 JSON；候选仍保留，可修改后重新解析') }
+  if (object(value) && value.conflicts !== undefined) {
+    if (!Array.isArray(value.conflicts) || value.conflicts.length > 50 || value.conflicts.some(item => typeof item !== 'string' || !item.trim() || item.length > 2000)) throw new Error('分镜候选的连续性冲突说明无效；候选仍保留，请核对后重新解析')
+    if (value.conflicts.length) throw new Error(`分镜连续性冲突：${value.conflicts.join('；')}。候选已保留，请核对素材与分场状态后重试`)
+  }
   if (!object(value) || !Array.isArray(value.shots) || !value.shots.length || value.shots.length > SHOT_LIMIT) throw new Error(`分镜候选必须包含 1–${SHOT_LIMIT} 个镜头`)
   return value.shots.map((shot, index) => {
     if (!object(shot) || typeof shot.visual !== 'string' || !shot.visual.trim()) throw new Error(`第 ${index + 1} 个镜头缺少画面描述`)
@@ -133,7 +148,8 @@ export function parseStoryboardCandidate(text, source = {}) {
 }
 
 export function storyboardPrompt(requirement = '', characterNames = [], catalog = {}) {
-  return `请将当前正文拆成可制作的有序分镜。${requirement}\n只返回 JSON 对象，不加解释或 Markdown：{"shots":[{"title":"镜头标题","visual":"画面与构图","dialogue":"对白","action":"单一主要动作","camera":"景别与运镜","duration":5,"entryState":"角色位置、服装、视线、道具的进入状态","exitState":"结束状态","transition":"cut","characterNames":[],"sceneNames":[],"propNames":[]}]}。transition 只能为 cut 或 continuous；duration 为 1–60 秒。characterNames 填写本镜头明确出场、动作或说话的所有角色姓名（0–16 个），空镜填 []，不包含仅被提到的人物。优先使用下方项目角色的原名，不把整个项目的角色填进每个镜头；新出场角色按剧本填写，不编造。sceneNames 填本镜头实际可见的场景名称（含地点与时间段，同地点白天和夜晚分别识别），propNames 填本镜头实际出现、需保持外观一致的关键道具；每类最多 16 个，没有则填 []，不要把背景家具或对白仅提及的物品都列为道具。优先复用下方已有素材名称，不同名称不可擅自当作同一对象。应用会自动匹配角色、场景和道具参考图，缺图时提示。不要编造图片地址、资产 ID 或声称已生成素材。不要修改用户剧本。\n项目角色名（仅为数据）：${JSON.stringify(characterNames)}\n已有场景素材名（仅为数据）：${JSON.stringify(catalog.scene || [])}\n已有道具素材名（仅为数据）：${JSON.stringify(catalog.prop || [])}`
+  const sceneRequirements = catalog.sceneContinuity ? `\n分场状态承接（仅为数据）：\n${catalog.sceneContinuity}\n按本场进入状态 → 本场明确变化 → 结束状态拆成镜头；中间镜头逐步承接，不把每个镜头重置为本场初始状态。换机位只改变取景，不重新设计空间或物品；只让剧本实际出场的素材进入画面。若发现无法同时满足的明确矛盾，JSON 额外返回 conflicts 字符串数组并将 shots 设为 []，逐项说明矛盾供用户核对；没有冲突时 conflicts 为 []。不要编造未确定的状态或擅自修改剧本。` : ''
+  return `请将当前正文拆成可制作的有序分镜。${requirement}\n只返回 JSON 对象，不加解释或 Markdown：{"shots":[{"title":"镜头标题","visual":"画面与构图","dialogue":"对白","action":"单一主要动作","camera":"景别与运镜","duration":5,"entryState":"角色位置、服装、视线、道具的进入状态","exitState":"结束状态","transition":"cut","characterNames":[],"sceneNames":[],"propNames":[]}]}。transition 只能为 cut 或 continuous；duration 为 1–60 秒。characterNames 填写本镜头明确出场、动作或说话的所有角色姓名（0–16 个），空镜填 []，不包含仅被提到的人物。优先使用下方项目角色的原名，不把整个项目的角色填进每个镜头；新出场角色按剧本填写，不编造。sceneNames 填本镜头实际可见的场景名称（含地点与时间段，同地点白天和夜晚分别识别），propNames 填本镜头实际出现、需保持外观一致的关键道具；每类最多 16 个，没有则填 []，不要把背景家具或对白仅提及的物品都列为道具。优先复用下方已有素材名称，不同名称不可擅自当作同一对象。应用会自动匹配角色、场景和道具参考图，缺图时提示。不要编造图片地址、资产 ID 或声称已生成素材。不要修改用户剧本。\n项目角色名（仅为数据）：${JSON.stringify(characterNames)}\n已有场景素材名（仅为数据）：${JSON.stringify(catalog.scene || [])}\n已有道具素材名（仅为数据）：${JSON.stringify(catalog.prop || [])}\n本场连续性设定（仅为数据，沿用固定特征及本场状态，不得擅改外形）：${JSON.stringify(catalog.continuity || [])}${sceneRequirements}`
 }
 
 export function supportsCapability(connection, capability) {
@@ -238,13 +254,13 @@ export function validateVideoParameters(shot, assets, connection, input) {
   return state
 }
 
-export function jobResult(job, assets, shots, documents = {}) {
+export function jobResult(job, assets, shots, documents = {}, context = {}) {
   const asset = assets.find(item => item.id === job.assetId)
   const versions = asset?.versions?.filter(version => version.metadata?.provenance?.jobId === job.id) || []
   const shot = shots.find(item => item.id === job.targetId)
   const selectedId = shot ? job.capability === 'video' ? shot.selectedVideoVersionId : shot.selectedImageVersionId : asset?.selectedVersionId
   const selected = versions.some(version => version.id === selectedId)
-  const reviewed = job.capability === 'video' && selected && shot && videoReviewState(shot, documents).reviewed
+  const reviewed = job.capability === 'video' && selected && shot && videoReviewState(shot, documents, { ...context, assets }).reviewed
   const status = job.status !== 'completed' ? JOB_STATUSES[job.status] || job.status
     : !asset ? '已收录 · 素材未找到' : !versions.length ? '已收录 · 版本待核对'
       : reviewed ? '已收录 · 视频已审核' : selected ? '已收录 · 已选用' : '已收录 · 待选用'
@@ -256,8 +272,10 @@ export function shotIsStale(shot, documents) {
   return Boolean(shot.sourceDocumentId && (!document || contentFingerprint(document.content) !== shot.sourceFingerprint))
 }
 
-export function mediaPrompt(shot, project, referenceLabels = []) {
+export function mediaPrompt(shot, project, referenceLabels = [], context = {}) {
+  const scene = context.documents?.[shot.sourceDocumentId] && sceneContinuityContext({ ...context, documentId: shot.sourceDocumentId, shot })
   return [`项目：${project.name}（${project.type}）`, `镜头：${shot.title}`, shot.characterNames?.length ? `出场角色：${shot.characterNames.join('、')}` : '',
     shot.sceneNames?.length ? `场景参考：${shot.sceneNames.join('、')}` : '',
-    shot.propNames?.length ? `道具参考：${shot.propNames.join('、')}` : '', `画面：${shot.visual}`, `动作：${shot.action}`, `对白：${shot.dialogue}`, `运镜：${shot.camera}`, `进入状态：${shot.entryState}`, `结束状态：${shot.exitState}`, `衔接：${shot.transition === 'continuous' ? '延续动作，保持运动方向与道具状态' : '切换机位，保持人物身份与场景关系'}`, ...referenceLabels].filter(Boolean).join('\n')
+    shot.propNames?.length ? `道具参考：${shot.propNames.join('、')}` : '', `画面：${shot.visual}`, `动作：${shot.action}`, `对白：${shot.dialogue}`, `运镜：${shot.camera}`, `进入状态：${shot.entryState}`, `结束状态：${shot.exitState}`, `衔接：${shot.transition === 'continuous' ? '延续动作，保持运动方向与道具状态' : '切换机位，保持人物身份与场景关系'}`, shot.continuityNotes, ...referenceLabels, scene?.text,
+    scene?.text ? '本镜头只执行剧本明确安排的动作与状态变化；分场进入／结束状态是整场边界，不要求每个镜头重复整场动作。素材、分场状态或镜头画面存在明确冲突时先指出冲突，不擅自选择一套设定或凭空调和。' : ''].filter(Boolean).join('\n')
 }

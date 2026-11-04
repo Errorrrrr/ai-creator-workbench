@@ -1,3 +1,4 @@
+import { matchContinuityEntities, continuityNotes, continuityIdentityName, planLegacyContinuityReferences } from './continuity-linking.js'
 import { projectCharacterNames } from './storyboard-characters.js'
 
 export const REFERENCE_ENTITY_FIELDS = { character: 'characterNames', scene: 'sceneNames', prop: 'propNames' }
@@ -46,7 +47,7 @@ export function referenceCatalog(assets) {
   return Object.fromEntries(Object.keys(REFERENCE_ENTITY_FIELDS).map(role => [role, [...new Set(assets.filter(asset => eligible(asset) && asset.role === role).map(referenceAssetName))]]))
 }
 
-export function matchShotReferences(shot, assets, documents = {}) {
+function matchLegacyReferences(shot, assets, documents = {}) {
   const catalog = referenceCatalog(assets)
   catalog.character = [...new Set([...catalog.character, ...projectCharacterNames(documents, assets)])]
   const text = [shot.title, shot.visual, shot.action, shot.camera, shot.entryState, shot.exitState].filter(Boolean).join('\n')
@@ -88,28 +89,41 @@ export function matchShotReferences(shot, assets, documents = {}) {
   return targets
 }
 
-export function bindShotReferences(shot, assets, documents = {}) {
-  const needed = new Set(matchShotReferences(shot, assets, documents).flatMap(match => match.assetIds))
+export function matchShotReferences(shot, assets, documents = {}, continuity) {
+  const entities = matchContinuityEntities(shot, assets, documents, continuity)
+  const registered = new Set((continuity?.entities || []).flatMap(entity => [entity.name, ...entity.aliases].map(name => `${entity.kind}:${continuityIdentityName(name)}`)))
+  const entityAssets = new Set(assets.filter(asset => asset.versions?.some(version => version.metadata?.provenance?.entity)).map(asset => asset.id))
+  const legacy = matchLegacyReferences(shot, assets.filter(asset => !entityAssets.has(asset.id)), documents).filter(match => !registered.has(`${match.role}:${continuityIdentityName(match.name)}`))
+  return [...legacy, ...entities]
+}
+
+export function bindShotReferences(shot, assets, documents = {}, continuity) {
+  const entityMatches = matchContinuityEntities(shot, assets, documents, continuity)
+  const needed = new Set(matchShotReferences(shot, assets, documents, continuity).flatMap(match => match.assetIds))
   // Only references created by this reconciler may be removed automatically.
   // Legacy references and unavailable files keep their fixed versions for review.
   const references = structuredClone(shot.references.filter(ref => {
     if (ref.origin !== 'auto' || ref.role !== 'reference' || ref.scope === 'video') return true
+    if (ref.entityId) return entityMatches.some(match => match.entityId === ref.entityId && match.stateId === ref.stateId && match.versionId === ref.versionId && !['excluded', 'manual', 'missing', 'stale'].includes(match.status))
     const asset = assets.find(asset => asset.versions?.some(version => version.id === ref.versionId))
+    // Migrate legacy automatic entries to the precise entity/state version.
+    // Keeping an asset-level match would retain both its old and new states.
+    if (asset && entityMatches.some(match => match.assetIds.includes(asset.id))) return false
     return !asset || needed.has(asset.id)
   }))
   const removed = shot.references.length - references.length
-  const matches = matchShotReferences({ ...shot, references }, assets, documents)
+  const matches = matchShotReferences({ ...shot, references }, assets, documents, continuity)
   let added = 0
   for (const match of matches) {
     if (match.status !== 'ready' || references.some(ref => ref.versionId === match.versionId)) continue
     if (references.length >= 16) { match.status = 'limit'; continue }
-    references.push({ versionId: match.versionId, role: 'reference', scope: 'continuity', origin: 'auto' }); added++
+    references.push({ versionId: match.versionId, role: 'reference', scope: 'continuity', origin: 'auto', ...(match.entityId ? { entityId: match.entityId, stateId: match.stateId } : {}) }); added++
   }
-  return { references, matches, added, removed }
+  return { references, matches, added, removed, continuityNotes: continuityNotes(entityMatches, continuity?.style) }
 }
 
-export function referenceBindingWarnings(shot, assets, documents = {}) {
-  const needed = new Set(matchShotReferences(shot, assets, documents).flatMap(match => match.assetIds))
+export function referenceBindingWarnings(shot, assets, documents = {}, continuity) {
+  const needed = new Set(matchShotReferences(shot, assets, documents, continuity).flatMap(match => match.assetIds))
   const legacy = [], unmatched = []
   for (const ref of shot.references) {
     const asset = assets.find(asset => eligible(asset) && asset.versions?.some(version => version.id === ref.versionId))
@@ -123,7 +137,13 @@ export function referenceBindingWarnings(shot, assets, documents = {}) {
 // Manual removal is a durable opt-out for that entity, including future versions.
 // Names survive portable-project remapping, unlike local asset/version IDs.
 export function manualReferencePatch(shot, references, assets) {
-  const exclusions = new Set(shot.referenceExclusions || [])
+  const entityExclusions = shot.references.filter(ref => !references.some(next => next.versionId === ref.versionId)).flatMap(ref => {
+    const asset = assets.find(asset => asset.versions?.some(v => v.id === ref.versionId))
+    const entityId = ref.entityId || asset?.versions.find(version => version.id === ref.versionId)?.metadata?.provenance?.entity?.entityId
+    if (!entityId) return []
+    return (Object.hasOwn(REFERENCE_ENTITY_FIELDS, asset?.role) ? [asset.role] : Object.keys(REFERENCE_ENTITY_FIELDS)).map(kind => `${kind}:@${entityId}`)
+  })
+  const exclusions = new Set([...(shot.referenceExclusions || []), ...entityExclusions])
   for (const asset of assets.filter(eligible)) {
     const contains = refs => refs.some(ref => asset.versions?.some(version => version.id === ref.versionId))
     const entityKey = key(asset.role, referenceAssetName(asset))
@@ -131,6 +151,11 @@ export function manualReferencePatch(shot, references, assets) {
     if (contains(references)) {
       exclusions.delete(entityKey)
       if (asset.role === 'scene') exclusions.delete(key('scene', sceneLocation(referenceAssetName(asset))))
+      for (const ref of references) {
+        const version = asset.versions?.find(version => version.id === ref.versionId)
+        if (!version) continue
+        for (const id of [ref.entityId, version.metadata?.provenance?.entity?.entityId].filter(Boolean)) exclusions.delete(`${asset.role}:@${id}`)
+      }
     }
   }
   const marked = references.map(ref => {
@@ -140,13 +165,15 @@ export function manualReferencePatch(shot, references, assets) {
   return { references: marked, referenceExclusions: [...exclusions].slice(-128) }
 }
 
-export function planReferenceBackfill(storyboard, assets, documents = {}) {
-  let added = 0, removed = 0, changed = 0
+export function planReferenceBackfill(storyboard, assets, documents = {}, projectId) {
+  const available = projectId === undefined ? assets : assets.filter(asset => asset.projectId === projectId)
+  const legacy = planLegacyContinuityReferences(storyboard.continuity, available, projectId)
+  let added = 0, removed = 0, changed = legacy.changed
   const shots = storyboard.shots.map(shot => {
-    const result = bindShotReferences(shot, assets, documents)
-    if (!result.added && !result.removed) return shot
+    const result = bindShotReferences(shot, available, documents, legacy.continuity)
+    if (!result.added && !result.removed && (shot.continuityNotes || '') === result.continuityNotes) return shot
     added += result.added; removed += result.removed; changed++
-    return { ...shot, references: result.references }
+    return { ...shot, references: result.references, continuityNotes: result.continuityNotes }
   })
-  return { storyboard: { ...storyboard, shots, revision: storyboard.revision + (changed ? 1 : 0) }, added, removed, changed }
+  return { storyboard: { ...storyboard, ...(legacy.changed ? { continuity: legacy.continuity } : {}), shots, revision: storyboard.revision + (changed ? 1 : 0) }, added, removed, changed, linked: legacy.linked, issues: legacy.issues }
 }

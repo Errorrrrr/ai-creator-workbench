@@ -11,7 +11,7 @@ function latestImageJobs(jobs, projectId) {
   const latest = new Map()
   if (!projectId) return latest
   for (const job of jobs) {
-    if (job.projectId !== projectId || job.capability !== 'image' || job.restored || job.request?.character || !job.id || !Number.isFinite(timestamp(job.createdAt))) continue
+    if (job.projectId !== projectId || job.capability !== 'image' || job.restored || job.request?.character || job.request?.entity || !job.id || !Number.isFinite(timestamp(job.createdAt))) continue
     const candidate = { jobId: job.id, createdAt: job.createdAt }
     const previous = latest.get(job.targetId)
     if (!previous || compare(candidate, { jobId: previous.id, createdAt: previous.createdAt }) > 0) latest.set(job.targetId, job)

@@ -2,9 +2,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import vm from 'node:vm'
 import { readFileSync } from 'node:fs'
-import { prepareShotInputs, jobResult, ASSET_ROLES, shotInputFingerprint } from '../src/storyboard.js'
+import { prepareShotInputs, jobResult, ASSET_ROLES, shotInputFingerprint, findMediaVersion } from '../src/storyboard.js'
 import { bindShotReferences } from '../src/storyboard-references.js'
-import { shotReadiness } from '../src/shot-workflow.js'
+import { shotReadiness, shotImageReadiness, storyboardNextAction } from '../src/shot-workflow.js'
+import { createEntity, entityStateFingerprint } from '../src/continuity-assets.js'
+import { makeVisualReview } from '../src/visual-review.js'
+import { isSceneDocument } from '../src/episode-scenes.js'
 
 const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
 function productionFunction(name) {
@@ -76,7 +79,7 @@ function harness() {
     addEventListener(type, callback) { this.listeners.set(type, callback) }
     contains(target) { for (let node = target; node; node = node.parent) if (node === this) return true; return false }
     closest(selector) { for (let node = this; node; node = node.parent) if (node.tag === selector) return node; return null }
-    querySelectorAll(selector) { return this.children.flatMap(child => [child, ...child.querySelectorAll('*')]).filter(node => selector === '*' || node.tag === selector || selector.split(', ').some(value => value.startsWith('.') && node.className.split(' ').includes(value.slice(1))) || (selector === '[data-shot-focus]' && node.dataset.shotFocus) || (selector === '[data-version-id]' && node.dataset.versionId)) }
+    querySelectorAll(selector) { return this.children.flatMap(child => [child, ...child.querySelectorAll('*')]).filter(node => selector === '*' || node.tag === selector || selector.split(', ').some(value => value.startsWith('.') && node.className.split(' ').includes(value.slice(1))) || (selector === '[data-shot-focus]' && node.dataset.shotFocus) || (selector === '[data-version-id]' && node.dataset.versionId) || (selector === '[data-shot-panel-tab]' && node.dataset.shotPanelTab) || (selector === '[data-shot-panel]' && node.dataset.shotPanel)) }
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null }
     focus() { if (!this.disabled) doc.activeElement = this }
     scrollIntoView() { this.scrolled = true }
@@ -86,20 +89,27 @@ function harness() {
     async click() { this.focus(); return this.listeners.get('click')?.({ target: this }) }
   }
   const el = (...args) => new Node(...args)
-  const data = { projectId: 'p1', currentDocId: 'scene1', documents: { scene1: { title: '第一场' } }, storyboard: { shots: [shot(), { ...shot(), id: 's2', title: '镜头2' }] } }
+  const data = { projectId: 'p1', currentDocId: 'scene1', documents: { episode1: { title: '第一集' }, scene1: { title: '第一场' } }, structure: { episodes: { episode1: { sceneIds: ['scene1'] } } }, storyboard: { shots: [shot(), { ...shot(), id: 's2', title: '镜头2' }] } }
   const env = {
+    continuityUI: { pendingDraft: () => null, discardDraft() {}, saveDraft: async () => true, showDraft: () => true, refresh() {}, hasPendingWork: () => false },
     document: doc, el, Option: class extends Node { constructor(text, value) { super('option', '', text); this.value = value } },
-    context: () => data, assets: structuredClone(assets), assetDrafts: new Map(), assetCards: new Map(), assetLibraryTools: { filter: values => values, detail: () => el('section') }, resultVersionId: '', selectedAssetId: '小舟',
+    context: () => data, isSceneDocument, organizeScenes: null, assets: structuredClone(assets), assetDrafts: new Map(), assetCards: new Map(), assetLibraryTools: { filter: values => values, detail: () => el('section') }, resultVersionId: '', selectedAssetId: '小舟',
     assetGrid: el('div'), assetDetail: el('section'), assetBody: el('div'), assetNotice: el('p'), roleFilter: el('select'),
-    shotList: el('div'), shotBody: el('div'), shotStatus: el('p'), selectedShotId: 's1', selectedSourceId: 'scene1', selectedEpisodeId: 'episode1',
+    storyboardView: el('section'), shotList: el('div'), shotBody: el('div'), shotStatus: el('p'), shotDetail: el('section'), nextActionButton: el('button'), generateButton: el('button'), organizeScenesButton: el('button'),
+    selectedShotId: 's1', selectedSourceId: 'scene1', selectedEpisodeId: 'episode1', shotDetailOpen: false, detailPanel: 'picture', mediaStage: 'storyboard', operationBusy: false,
     jobsDialog: el('dialog'), lastContextDocId: null, OTHER_EPISODE: 'other', UNASSIGNED_SOURCE: 'unassigned',
-    loading: false, error: '', recoveryIssues: [], ASSET_ROLES, jobs: [], shotReadiness,
+    loading: false, error: '', recoveryIssues: [], ASSET_ROLES, jobs: [], shotReadiness, shotImageReadiness, storyboardNextAction,
     preview: () => el('div'), notify() {}, desktop() {}, run: async callback => callback(), invoke: async () => {},
     renderShotDetail() {}, visibleShots: () => data.storyboard.shots, storyboardGroups: () => [{ id: 'episode1' }],
     shotIsStale: () => false, findMediaVersion: () => null, jobResult, reorder() {}, addShot() {}, renderSources() {}
   }
+  for (const panel of ['picture', 'versions']) {
+    const tab = el('button', '', panel); tab.dataset.shotPanelTab = panel
+    const content = el('section'); content.dataset.shotPanel = panel
+    env.shotDetail.append(tab, content)
+  }
   vm.createContext(env)
-  vm.runInContext(['button', 'field', 'disclosure', 'actionMenu', 'renderAssets', 'renderAssetDetail', 'renderShots', 'openJobResult', 'pendingAssetDraft', 'showAssetDraft'].map(productionFunction).join('\n'), env)
+  vm.runInContext(['button', 'field', 'disclosure', 'actionMenu', 'renderAssets', 'renderAssetDetail', 'nextStoryboardAction', 'renderNextAction', 'openShotDetail', 'closeShotDetail', 'selectDetailPanel', 'renderShots', 'openJobResult', 'pendingAssetDraft', 'showAssetDraft'].map(productionFunction).join('\n'), env)
   const descendants = node => node.querySelectorAll('*')
   const input = () => env.assetDetail.querySelector('input')
   const changeName = value => { input().value = value; input().listeners.get('input')() }
@@ -107,6 +117,36 @@ function harness() {
   env.refresh = async () => { doc.activeElement = null; env.renderAssets() }
   return { env, data, doc, el, descendants, input, changeName, action }
 }
+
+test('实际镜头卡片使用当前设定状态，已关联新物品图不会误报参考待补齐', () => {
+  const h = harness(), { env, data } = h
+  const entity = createEntity({ id: 'raft', kind: 'prop', name: '木筏', traits: '四块平板与油桶结构', sourceDocumentIds: ['scene1'], states: [{ id: 'raft-initial', name: '初始状态', referenceVersionId: 'raft-reference' }] })
+  const state = entity.states[0]
+  state.referenceFingerprint = entityStateFingerprint(entity, state)
+  data.storyboard.continuity = { version: 1, style: '', entities: [entity] }
+  const current = { ...shot(), title: '木筏近景', visual: '木筏漂在海面', characterNames: [], sceneNames: [], propNames: ['木筏'], selectedImageVersionId: '', references: [{ versionId: state.referenceVersionId, role: 'reference', scope: 'continuity', origin: 'auto', entityId: entity.id, stateId: state.id }] }
+  data.storyboard.shots = [current]
+  env.assets = [{ id: 'raft-asset', name: '木筏 · 初始状态 · 道具设定图', role: 'prop', kind: 'image', selectedVersionId: state.referenceVersionId, versions: [{ id: state.referenceVersionId, mimeType: 'image/png', metadata: { provenance: { entity: { entityId: entity.id, stateId: state.id, kind: entity.kind } } } }] }, image('shot')]
+  env.findMediaVersion = findMediaVersion
+  const badge = () => env.shotList.querySelector('.shot-readiness')
+  env.renderShots()
+  assert.equal(badge().textContent, '待准备图片')
+  assert.match(badge().className, /is-pending/)
+  current.selectedImageVersionId = 'shot-v1'
+  env.renderShots({ detail: false })
+  assert.equal(badge().textContent, '待检查画面')
+  assert.match(badge().className, /is-review/)
+  current.visualReview = makeVisualReview(current, env.assets, data.documents, data.storyboard.continuity, { decision: 'approved' })
+  env.renderShots({ detail: false })
+  assert.equal(badge().textContent, '画面已确认')
+  assert.match(badge().className, /is-complete/)
+  assert.equal(env.nextActionButton.textContent, '导出素材包')
+  entity.traits = '木筏横梁已改变'
+  env.renderShots({ detail: false })
+  assert.equal(badge().textContent, '需要重新检查', '真正过期的状态图仍须提示，不能一律隐藏警告')
+  assert.match(badge().className, /is-warning/)
+  assert.equal(env.nextActionButton.textContent, '检查画面 · 1')
+})
 
 test('素材名称与用途草稿跨轮询、切换素材和项目保留；保存失败不清理', async () => {
   const h = harness(), { env } = h
@@ -156,13 +196,25 @@ test('任务轮询保留素材卡片与焦点，正在播放的预览不被新�
   const input = h.input(); env.renderAssets(); assert.equal(h.input(), input, 'unchanged detail is not rebuilt on polling')
 })
 
-test('镜头列表点击、轮询和排序后恢复同一操作焦点及滚动位置，详情输入不被抢焦点', async () => {
+test('镜头大图聚焦画面标签，返回、轮询和排序恢复列表焦点及滚动位置，详情输入不被抢焦点', async () => {
   const h = harness(), { env } = h
   env.renderShots(); env.shotList.scrollTop = 95
   const control = key => env.shotList.querySelectorAll('[data-shot-focus]').find(node => node.dataset.shotFocus === key)
   // macOS WebKit does not focus buttons on mouse click by default.
   await control('s2:select').listeners.get('click')({ target: control('s2:select') })
+  const pictureTab = env.shotDetail.querySelectorAll('[data-shot-panel-tab]').find(node => node.dataset.shotPanelTab === 'picture')
+  assert.equal(env.shotDetailOpen, true)
+  assert.equal(env.selectedShotId, 's2')
+  assert.equal(env.shotDetail.hidden, false)
+  assert.equal(h.doc.activeElement, pictureTab)
+  assert.equal(pictureTab.attrs.get('aria-selected'), 'true')
+  env.renderShots({ detail: false })
+  assert.equal(h.doc.activeElement, pictureTab, 'polling does not move focus from the picture tab')
+  env.closeShotDetail()
+  assert.equal(env.shotDetailOpen, false)
+  assert.equal(env.shotDetail.hidden, true)
   assert.equal(h.doc.activeElement, control('s2:select'))
+  assert.equal(control('s2:select').scrolled, true)
   env.renderShots({ detail: false })
   assert.equal(h.doc.activeElement, control('s2:select'))
   assert.equal(env.shotList.scrollTop, 95)
@@ -217,6 +269,9 @@ test('任务定位镜头切到对应分场，查看结果切换用途过滤，�
   assert.equal(env.selectedEpisodeId, 'correct-episode')
   assert.equal(env.lastContextDocId, 'scene1')
   assert.equal(env.selectedShotId, 's2')
+  assert.equal(env.shotDetailOpen, true)
+  assert.equal(env.detailPanel, 'picture')
+  assert.equal(h.doc.activeElement.dataset.shotPanelTab, 'picture')
   env.openJobResult(job, 'asset')
   assert.equal(destination, 'assets')
   assert.equal(env.roleFilter.value, 'character')

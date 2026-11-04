@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(8);
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const ASSET_EXTRACTION_TIMEOUT: Duration = Duration::from_secs(600);
 const PROVIDER_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 const PROVIDER_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVIDER_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
@@ -173,7 +174,7 @@ const ANTIGRAVITY_GENERATE_ARGS: &[&str] = &[
     "--sandbox",
     "--disable-slash-commands",
     "--print-timeout",
-    "110s",
+    "0",
 ];
 
 fn cli_drivers() -> [CliDriverDefinition; 4] {
@@ -273,6 +274,38 @@ struct MessageInput {
     content: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum GenerationPurpose {
+    Text,
+    Discussion,
+    ProjectPlan,
+    ScenePlan,
+    Storyboard,
+    AssetExtraction,
+}
+
+#[derive(Clone, Copy)]
+struct CliExecutionBudget {
+    timeout: Duration,
+    timeout_error: &'static str,
+}
+
+impl CliExecutionBudget {
+    fn for_purpose(purpose: Option<GenerationPurpose>) -> Self {
+        match purpose {
+            Some(GenerationPurpose::AssetExtraction) => Self {
+                timeout: ASSET_EXTRACTION_TIMEOUT,
+                timeout_error: "CLI 素材提取已超过 10 分钟，已停止执行；请减少本次分场数量后重试",
+            },
+            _ => Self {
+                timeout: GENERATION_TIMEOUT,
+                timeout_error: "CLI 生成已超过 2 分钟，已停止执行；请缩小本次创作范围后重试",
+            },
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GenerationRequest {
@@ -284,6 +317,8 @@ pub(crate) struct GenerationRequest {
     driver_id: Option<String>,
     #[serde(default)]
     allow_user_profile: bool,
+    #[serde(default)]
+    purpose: Option<GenerationPurpose>,
     messages: Vec<MessageInput>,
 }
 
@@ -1404,77 +1439,13 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
             command.env(name, value);
         }
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
-    }
-    if token.is_cancelled() {
-        return Err("生成已取消".into());
-    }
-    let mut child = command.spawn().map_err(|_| "无法启动 CLI")?;
-    let process_group_id = child.id();
-    let Some(mut stdin) = child.stdin.take() else {
-        terminate_and_reap(&mut child, process_group_id).await;
-        return Err("无法向 CLI 写入请求".into());
-    };
-    let deadline = TokioInstant::now() + GENERATION_TIMEOUT;
-    let write_result: Result<(), String> = tokio::select! {
-        _ = token.cancelled() => Err("生成已取消".into()),
-        _ = sleep_until(deadline) => Err("CLI 生成超时".into()),
-        result = stdin.write_all(prompt.as_bytes()) => {
-            result.map_err(|_| "无法向 CLI 写入请求".into())
-        },
-    };
-    if let Err(error) = write_result {
-        terminate_and_reap(&mut child, process_group_id).await;
-        return Err(error);
-    }
-    drop(stdin);
-    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        terminate_and_reap(&mut child, process_group_id).await;
-        return Err("无法读取 CLI 输出".into());
-    };
-    let mut stdout_task = tokio::spawn(read_limited(stdout, MAX_STDOUT_BYTES));
-    let mut stderr_task = tokio::spawn(read_limited(stderr, MAX_STDERR_BYTES));
-    let status_result: Result<_, String> = tokio::select! {
-        _ = token.cancelled() => Err("生成已取消".into()),
-        _ = sleep_until(deadline) => Err("CLI 生成超时".into()),
-        result = child.wait() => result.map_err(|_| "CLI 运行失败".into()),
-    };
-    let status = match status_result {
-        Ok(status) => status,
-        Err(error) => {
-            terminate_and_reap(&mut child, process_group_id).await;
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(error);
-        }
-    };
-    terminate_process_group(&mut child, process_group_id);
-    let drain_result: Result<_, String> = tokio::select! {
-        _ = token.cancelled() => Err("生成已取消".into()),
-        _ = sleep_until(deadline) => Err("CLI 生成超时".into()),
-        result = async { tokio::join!(&mut stdout_task, &mut stderr_task) } => {
-            match result {
-                (Ok(stdout), Ok(stderr)) => Ok((stdout, stderr)),
-                (Err(_), _) => Err("CLI 输出读取失败".into()),
-                (_, Err(_)) => Err("CLI 状态读取失败".into()),
-            }
-        },
-    };
-    let ((stdout, stdout_exceeded), (stderr, stderr_exceeded)) = match drain_result {
-        Ok(outputs) => outputs,
-        Err(error) => {
-            terminate_process_group(&mut child, process_group_id);
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(error);
-        }
-    };
-    if stdout_exceeded || stderr_exceeded {
-        return Err("CLI 输出超过限制".into());
-    }
+    let (status, stdout, stderr) = execute_cli_command(
+        command,
+        &prompt,
+        token,
+        CliExecutionBudget::for_purpose(request.purpose),
+    )
+    .await?;
     if !status.success() {
         if driver_id == "codex" {
             return Err(crate::media_codex::execution_error(
@@ -1513,6 +1484,86 @@ async fn run_cli(request: &GenerationRequest, token: &CancellationToken) -> Resu
         return Err("CLI 未返回内容".into());
     }
     Ok(output)
+}
+
+async fn execute_cli_command(
+    mut command: Command,
+    prompt: &str,
+    token: &CancellationToken,
+    budget: CliExecutionBudget,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    if token.is_cancelled() {
+        return Err("生成已取消".into());
+    }
+    let mut child = command.spawn().map_err(|_| "无法启动 CLI")?;
+    let process_group_id = child.id();
+    let Some(mut stdin) = child.stdin.take() else {
+        terminate_and_reap(&mut child, process_group_id).await;
+        return Err("无法向 CLI 写入请求".into());
+    };
+    let deadline = TokioInstant::now() + budget.timeout;
+    let write_result: Result<(), String> = tokio::select! {
+        _ = token.cancelled() => Err("生成已取消".into()),
+        _ = sleep_until(deadline) => Err(budget.timeout_error.into()),
+        result = stdin.write_all(prompt.as_bytes()) => {
+            result.map_err(|_| "无法向 CLI 写入请求".into())
+        },
+    };
+    if let Err(error) = write_result {
+        terminate_and_reap(&mut child, process_group_id).await;
+        return Err(error);
+    }
+    drop(stdin);
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        terminate_and_reap(&mut child, process_group_id).await;
+        return Err("无法读取 CLI 输出".into());
+    };
+    let mut stdout_task = tokio::spawn(read_limited(stdout, MAX_STDOUT_BYTES));
+    let mut stderr_task = tokio::spawn(read_limited(stderr, MAX_STDERR_BYTES));
+    let status_result: Result<_, String> = tokio::select! {
+        _ = token.cancelled() => Err("生成已取消".into()),
+        _ = sleep_until(deadline) => Err(budget.timeout_error.into()),
+        result = child.wait() => result.map_err(|_| "CLI 运行失败".into()),
+    };
+    let status = match status_result {
+        Ok(status) => status,
+        Err(error) => {
+            terminate_and_reap(&mut child, process_group_id).await;
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(error);
+        }
+    };
+    terminate_process_group(&mut child, process_group_id);
+    let drain_result: Result<_, String> = tokio::select! {
+        _ = token.cancelled() => Err("生成已取消".into()),
+        _ = sleep_until(deadline) => Err(budget.timeout_error.into()),
+        result = async { tokio::join!(&mut stdout_task, &mut stderr_task) } => {
+            match result {
+                (Ok(stdout), Ok(stderr)) => Ok((stdout, stderr)),
+                (Err(_), _) => Err("CLI 输出读取失败".into()),
+                (_, Err(_)) => Err("CLI 状态读取失败".into()),
+            }
+        },
+    };
+    let ((stdout, stdout_exceeded), (stderr, stderr_exceeded)) = match drain_result {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            terminate_process_group(&mut child, process_group_id);
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(error);
+        }
+    };
+    if stdout_exceeded || stderr_exceeded {
+        return Err("CLI 输出超过限制".into());
+    }
+    Ok((status, stdout, stderr))
 }
 
 fn antigravity_execution_error(diagnostics: &str, output: &str) -> &'static str {
@@ -1556,7 +1607,7 @@ fn parse_antigravity_output(output: &str) -> Result<String, String> {
     let text = result["response"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
-        .ok_or("Antigravity 未返回内容")?;
+        .ok_or("Antigravity 本轮已结束，但没有返回最终答复；未生成可采纳内容，请缩小范围后重试")?;
     Ok(text.trim().to_owned())
 }
 
@@ -1609,6 +1660,191 @@ pub(crate) fn cancel_generation(state: State<'_, RuntimeState>, task_id: String)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_budget_is_backwards_compatible_and_only_extends_asset_extraction() {
+        let request = json!({
+            "taskId": "policy-test", "kind": "cli", "baseUrl": "", "model": "",
+            "messages": [{"role": "user", "content": "test"}]
+        });
+        let legacy: GenerationRequest = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(legacy.purpose, None);
+        assert_eq!(
+            CliExecutionBudget::for_purpose(legacy.purpose).timeout,
+            Duration::from_secs(120)
+        );
+        for purpose in [
+            "text",
+            "discussion",
+            "project-plan",
+            "scene-plan",
+            "storyboard",
+            "asset-extraction",
+        ] {
+            let mut payload = request.clone();
+            payload["purpose"] = json!(purpose);
+            let parsed: GenerationRequest = serde_json::from_value(payload).unwrap();
+            let budget = CliExecutionBudget::for_purpose(parsed.purpose);
+            assert_eq!(
+                budget.timeout,
+                Duration::from_secs(if purpose == "asset-extraction" {
+                    600
+                } else {
+                    120
+                })
+            );
+            if purpose == "asset-extraction" {
+                assert!(budget.timeout_error.contains("10 分钟"));
+                assert!(budget.timeout_error.contains("分场"));
+            }
+        }
+        let mut payload = request;
+        payload["purpose"] = json!("asset-extraction-unlimited");
+        assert!(serde_json::from_value::<GenerationRequest>(payload).is_err());
+        assert!(ANTIGRAVITY_GENERATE_ARGS
+            .windows(2)
+            .any(|pair| pair == ["--print-timeout", "0"]));
+    }
+
+    #[cfg(unix)]
+    fn fake_cli(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", script, "fake-cli"])
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        command
+    }
+
+    #[cfg(unix)]
+    fn short_cli_budget(timeout: Duration) -> CliExecutionBudget {
+        CliExecutionBudget {
+            timeout,
+            timeout_error: "test execution deadline",
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_keeps_successful_final_output_within_budget() {
+        let (status, stdout, stderr) = execute_cli_command(
+            fake_cli("/bin/cat; printf diagnostic >&2"),
+            "final response",
+            &CancellationToken::new(),
+            short_cli_budget(Duration::from_secs(2)),
+        )
+        .await
+        .unwrap();
+        assert!(status.success());
+        assert_eq!(stdout, b"final response");
+        assert_eq!(stderr, b"diagnostic");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_uses_one_deadline_for_input_and_execution() {
+        let result = execute_cli_command(
+            fake_cli("/bin/sleep 0.2; /bin/cat >/dev/null; /bin/sleep 0.2; printf too-late"),
+            &"x".repeat(2 * 1024 * 1024),
+            &CancellationToken::new(),
+            short_cli_budget(Duration::from_millis(300)),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "test execution deadline");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_timeout_covers_blocked_input_and_reaps_process() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let mut command = fake_cli("printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 30");
+        command.arg(&pid_file);
+        let result = execute_cli_command(
+            command,
+            &"x".repeat(2 * 1024 * 1024),
+            &CancellationToken::new(),
+            short_cli_budget(Duration::from_millis(100)),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "test execution deadline");
+        let pid: i32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "timed-out CLI is still alive"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_cancellation_reaps_process_and_pre_cancel_does_not_spawn() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let token = CancellationToken::new();
+        let run_token = token.clone();
+        let mut command = fake_cli("printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 30");
+        command.arg(&pid_file);
+        let execution = tokio::spawn(async move {
+            execute_cli_command(
+                command,
+                "test",
+                &run_token,
+                CliExecutionBudget::for_purpose(Some(GenerationPurpose::AssetExtraction)),
+            )
+            .await
+        });
+        let pid = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = pid.parse::<i32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+        let result = timeout(Duration::from_secs(2), execution)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err(), "生成已取消");
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "cancelled CLI is still alive"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+
+        let not_spawned = directory.path().join("not-spawned");
+        let mut command = fake_cli("printf started > \"$1\"");
+        command.arg(&not_spawned);
+        assert_eq!(
+            execute_cli_command(
+                command,
+                "test",
+                &token,
+                short_cli_budget(Duration::from_secs(2))
+            )
+            .await
+            .unwrap_err(),
+            "生成已取消"
+        );
+        assert!(!not_spawned.exists());
+    }
 
     #[test]
     fn local_urls_include_ipv6_and_custom_ports_but_exclude_remote_http() {
@@ -1808,6 +2044,27 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_print_timeout_success_without_a_final_response_is_rejected() {
+        // Observed with agy 1.4.8 and --print-timeout 1s: exit 0 with no final answer.
+        let output = json!({"event":"result","result":{
+            "conversation_id":"synthetic-test-id", "status":"SUCCESS", "response":"",
+            "duration_seconds":0, "num_turns":1, "usage":{}
+        }})
+        .to_string();
+        let message = parse_antigravity_output(&output).unwrap_err();
+        assert!(message.contains("没有返回最终答复"));
+        assert!(message.contains("未生成可采纳内容"));
+        assert!(!message.contains("synthetic-test-id"));
+        // Intermediate events never substitute for a missing or empty final response.
+        let partial = json!({"event":"step","response":"intermediate text"}).to_string();
+        assert!(parse_antigravity_output(&partial).is_err());
+        assert_eq!(
+            parse_antigravity_output(&format!("{partial}\n{output}")).unwrap_err(),
+            message
+        );
+    }
+
+    #[test]
     fn antigravity_reports_region_refusal_without_exposing_raw_diagnostics() {
         for error in [
             json!("User location is not supported for the API use. secret-token"),
@@ -1848,7 +2105,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
             let mut request = [0u8; 4096];
-            socket.read(&mut request).unwrap();
+            assert!(socket.read(&mut request).unwrap() > 0);
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n").unwrap();
             socket.flush().unwrap();
             // The second event is not sent until the client has shown the first delta.
@@ -1904,7 +2161,7 @@ mod tests {
             socket
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
-            socket.read(&mut [0u8; 4096]).unwrap();
+            assert!(socket.read(&mut [0u8; 4096]).unwrap() > 0);
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{\"message\":{\"content\":\"partial\"},\"done\":false}\n").unwrap();
             socket.flush().unwrap();
             delta_receiver.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -1943,7 +2200,7 @@ mod tests {
             socket
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
-            socket.read(&mut [0u8; 4096]).unwrap();
+            assert!(socket.read(&mut [0u8; 4096]).unwrap() > 0);
             let body = body.to_string();
             let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             socket.write_all(response.as_bytes()).unwrap();
@@ -1984,6 +2241,7 @@ mod tests {
             api_key: Some("mock-only".into()),
             driver_id: None,
             allow_user_profile: false,
+            purpose: None,
             messages: vec![MessageInput {
                 role: "user".into(),
                 content: "mock request".into(),

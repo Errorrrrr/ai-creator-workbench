@@ -6,6 +6,7 @@ import { prepareGeneration, projectMarkdown, prepareStructureChange, sceneNaviga
 import { validateWorkspace } from '../src/project-store.js'
 import { upsertCandidateDraft, validateCandidateDrafts } from '../src/candidate-drafts.js'
 import { renderWritingPreview } from '../src/writing-preview.js'
+import { creationSteps } from '../src/workflow-navigation.js'
 
 const source = await readFile(new URL('../src/app.js', import.meta.url), 'utf8')
 function productionFunction(name) {
@@ -88,15 +89,18 @@ test('结构落盘成功后才切换新场，取消锁并更新保存状态', as
   assert.equal(h.state.storageFailed, false)
 })
 
-test('已有分场导航按幕集顺序，下一场直接进入而不触发新建', async () => {
-  const data = workspace(), opened = [], created = []
+test('分场主流程进入人物与场景确认，末场不会默认新增；原场次导航仍可定位相邻场', async () => {
+  const data = workspace(), opened = [], created = [], stages = []
   const sandbox = { state: { ...data, workflow: { preset: 'script' }, currentDocId: 'scene-a' }, sceneNavigation,
-    getDocumentKind: () => 'scene', selectDocument: async id => { opened.push(id); return true }, openNewContentDialog: options => created.push(options), getParentEpisodeId: () => 'ep' }
+    getDocumentKind: () => 'scene', creationSteps, navigateCreationStep: async step => stages.push(step.id),
+    selectDocument: async id => { opened.push(id); return true }, openNewContentDialog: options => created.push(options), getParentEpisodeId: () => 'ep' }
   vm.createContext(sandbox); vm.runInContext(productionFunction('advanceStage'), sandbox)
   await sandbox.advanceStage()
-  assert.deepEqual(opened, ['scene-b']); assert.deepEqual(created, [])
+  assert.deepEqual(stages, ['references']); assert.deepEqual(opened, []); assert.deepEqual(created, [])
   sandbox.state.currentDocId = 'scene-b'; await sandbox.advanceStage()
-  assert.equal(created[0].type, 'scene'); assert.equal(sceneNavigation('scene-b', data.structure).previous, 'scene-a')
+  assert.deepEqual(stages, ['references', 'references']); assert.deepEqual(created, [])
+  assert.equal(sceneNavigation('scene-b', data.structure).previous, 'scene-a')
+  assert.equal(sceneNavigation('scene-a', data.structure).next, 'scene-b')
 })
 
 test('长文续写优先结尾，选区仍在预算内，常规改写继续读取当前正文', () => {

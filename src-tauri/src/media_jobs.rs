@@ -155,6 +155,66 @@ pub(crate) struct CharacterOutput {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct EntityOutput {
+    pub entity_id: String,
+    pub state_id: String,
+    pub kind: String,
+    pub name: String,
+    pub state_name: String,
+    pub definition_fingerprint: String,
+}
+
+impl EntityOutput {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        media::valid_id(&self.entity_id)?;
+        media::valid_id(&self.state_id)?;
+        media::valid_id(&self.target_id())?;
+        if !["character", "scene", "prop"].contains(&self.kind.as_str())
+            || [&self.name, &self.state_name].iter().any(|name| {
+                name.trim().is_empty()
+                    || name.chars().count() > 80
+                    || name.chars().any(char::is_control)
+            })
+            || self.definition_fingerprint.trim().is_empty()
+            || self.definition_fingerprint.len() > 128
+            || self.definition_fingerprint.chars().any(char::is_control)
+        {
+            return Err("设定图的实体、状态、名称或设定指纹无效".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn target_id(&self) -> String {
+        format!("entity-{}", self.state_id)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct VisualBasis {
+    pub version: u8,
+    pub fingerprint: String,
+    pub snapshot: Value,
+}
+
+impl VisualBasis {
+    fn validate(&self) -> Result<(), String> {
+        if self.version != 1
+            || self.fingerprint.is_empty()
+            || self.fingerprint.len() > 200
+            || self.fingerprint.chars().any(char::is_control)
+            || !self.snapshot.is_object()
+            || self.snapshot["version"] != 1
+            || serde_json::to_vec(&self.snapshot).map_err(|e| e.to_string())?.len() > 64 * 1024
+        {
+            return Err("分镜图视觉生成依据无效或过长".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Request {
     pub project_id: String,
     pub target_id: String,
@@ -169,10 +229,29 @@ pub(crate) struct Request {
     pub allow_user_profile: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character: Option<CharacterOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<EntityOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_basis: Option<VisualBasis>,
 }
 
 impl Request {
-    fn validate_output(&self) -> Result<(), String> {
+    pub(crate) fn validate_output(&self) -> Result<(), String> {
+        if let Some(basis) = &self.visual_basis {
+            basis.validate()?;
+            if self.capability != "image" || self.character.is_some() || self.entity.is_some() {
+                return Err("视觉生成依据只适用于分镜图片任务".into());
+            }
+        }
+        if let Some(entity) = &self.entity {
+            entity.validate()?;
+            if self.character.is_some()
+                || self.capability != "image"
+                || self.target_id != entity.target_id()
+            {
+                return Err("设定图必须使用对应状态的图片任务，不能同时指定旧角色输出".into());
+            }
+        }
         if let Some(character) = &self.character {
             if self.capability != "image"
                 || character.name.trim().is_empty()
@@ -189,7 +268,9 @@ impl Request {
     }
 
     pub(crate) fn output_role(&self) -> &str {
-        if self.character.is_some() {
+        if let Some(entity) = &self.entity {
+            &entity.kind
+        } else if self.character.is_some() {
             "character"
         } else {
             "shot"
@@ -197,6 +278,19 @@ impl Request {
     }
 
     fn output_name(&self, artifact: &str) -> String {
+        if let Some(entity) = &self.entity {
+            let kind = match entity.kind.as_str() {
+                "character" => "角色",
+                "scene" => "场景",
+                _ => "道具",
+            };
+            return format!(
+                "{} · {} · {}设定图",
+                entity.name.trim(),
+                entity.state_name.trim(),
+                kind
+            );
+        }
         self.character.as_ref().map_or_else(
             || artifact.to_owned(),
             |character| format!("{} · 正脸与三视图", character.name.trim()),
@@ -854,8 +948,14 @@ async fn collect(
             continue;
         }
         let mut provenance = json!({"source":job.request.connection.kind,"connectionId":job.request.connection.id,"model":job.request.connection.model,"jobId":job.id,"artifact":artifact,"remoteId":job.remote_id,"parameters":job.request.parameters,"references":job.request.references});
+        if let Some(basis) = &job.request.visual_basis {
+            provenance["visualBasis"] = serde_json::to_value(basis).map_err(|e| e.to_string())?;
+        }
         if let Some(character) = &job.request.character {
             provenance["character"] = serde_json::to_value(character).map_err(|e| e.to_string())?;
+        }
+        if let Some(entity) = &job.request.entity {
+            provenance["entity"] = serde_json::to_value(entity).map_err(|e| e.to_string())?;
         }
         if let Some(receipt) = &native_receipt {
             provenance["toolVerified"] = json!(true);
@@ -1162,6 +1262,22 @@ mod character_tests {
     }
 
     #[test]
+    fn visual_basis_roundtrips_and_rejects_invalid_or_non_shot_inputs() {
+        let mut request = request();
+        request.visual_basis = Some(VisualBasis { version: 1, fingerprint: "visual-v1:12:123".into(), snapshot: json!({"version":1,"references":[]}) });
+        assert!(request.validate_output().is_ok());
+        let restored: Request = serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        assert_eq!(restored.visual_basis.unwrap().snapshot["version"], 1);
+        request.capability = "video".into();
+        assert!(request.validate_output().is_err());
+        request.capability = "image".into();
+        request.visual_basis.as_mut().unwrap().snapshot = json!({"version":1,"data":"x".repeat(65536)});
+        assert!(request.validate_output().is_err());
+        request.visual_basis.as_mut().unwrap().snapshot = json!([]);
+        assert!(request.validate_output().is_err());
+    }
+
+    #[test]
     fn legacy_jobs_keep_shot_destination_and_serialize_without_character() {
         let request = request();
         assert!(request.validate_output().is_ok());
@@ -1210,5 +1326,79 @@ mod character_tests {
         request.character.as_mut().unwrap().name = "苏遥".into();
         request.character.as_mut().unwrap().source_document_id = "world".into();
         assert!(request.validate_output().is_err());
+    }
+
+    fn entity_request(kind: &str) -> Request {
+        let mut value = request();
+        value.target_id = "entity-state-raft".into();
+        value.entity = Some(EntityOutput {
+            entity_id: "raft".into(),
+            state_id: "state-raft".into(),
+            kind: kind.into(),
+            name: "木筏".into(),
+            state_name: "初始完整".into(),
+            definition_fingerprint: "42:shape".into(),
+        });
+        value
+    }
+
+    #[test]
+    fn entity_output_survives_durable_request_recovery_for_every_kind() {
+        for (kind, label) in [("character", "角色"), ("scene", "场景"), ("prop", "道具")] {
+            let mut request = entity_request(kind);
+            request.api_key = Some("fixture-secret".into());
+            assert!(request.validate_output().is_ok());
+            let stored = serde_json::to_value(&request).unwrap();
+            assert!(stored.get("apiKey").is_none());
+            assert!(stored.get("character").is_none());
+            let recovered: Request = serde_json::from_value(stored).unwrap();
+            assert!(recovered.validate_output().is_ok());
+            assert_eq!(recovered.output_role(), kind);
+            assert_eq!(
+                recovered.output_name("output.png"),
+                format!("木筏 · 初始完整 · {label}设定图")
+            );
+            assert_eq!(recovered.entity.unwrap().definition_fingerprint, "42:shape");
+        }
+    }
+
+    #[test]
+    fn entity_output_rejects_mixed_targets_unsafe_ids_and_invalid_metadata() {
+        let base = serde_json::to_value(entity_request("prop")).unwrap();
+        for (field, invalid) in [
+            ("entityId", json!("../raft")),
+            ("stateId", json!("x".repeat(90))),
+            ("kind", json!("shot")),
+            ("name", json!(" ")),
+            ("name", json!("筏".repeat(81))),
+            ("stateName", json!("完整\n")),
+            ("stateName", json!("")),
+            ("definitionFingerprint", json!("")),
+            ("definitionFingerprint", json!("x".repeat(129))),
+        ] {
+            let mut value = base.clone();
+            value["entity"][field] = invalid;
+            let request: Request = serde_json::from_value(value).unwrap();
+            assert!(
+                request.validate_output().is_err(),
+                "accepted invalid {field}"
+            );
+        }
+        let mut request = entity_request("prop");
+        request.target_id = "unrelated-state".into();
+        assert!(request.validate_output().is_err());
+        request.target_id = "entity-state-raft".into();
+        request.capability = "video".into();
+        assert!(request.validate_output().is_err());
+        request.capability = "image".into();
+        request.character = Some(CharacterOutput {
+            name: "旧角色".into(),
+            source_document_id: "characters".into(),
+            source_fingerprint: "1:a".into(),
+        });
+        assert!(request.validate_output().is_err());
+        let mut unknown = base;
+        unknown["entity"]["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<Request>(unknown).is_err());
     }
 }

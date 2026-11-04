@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 import { prepareGeneration, prepareVersionRestore, previousSceneId } from '../src/creation-workflow.js'
 import { validateWorkspace } from '../src/project-store.js'
+import { creationSteps } from '../src/workflow-navigation.js'
 
 const appSource = await readFile(new URL('../src/app.js', import.meta.url), 'utf8')
 function productionFunction(name) {
@@ -131,19 +132,25 @@ test('恢复参考笔记支持空白旧内容，并在 50 份上限内保留两�
   validateWorkspace(prepared.workspace)
 })
 
-test('前往下一阶段等保存成功才提示；失败不宣称已进入', async () => {
+test('前期资料直接前往剧本并等待导航保存，失败不宣称成功', async () => {
   for (const outcome of [false, true]) {
-    const gate = deferred(), toasts = []
+    const gate = deferred(), toasts = [], navigated = []
     const context = vm.createContext({
       state: { currentDocId: 'idea', workflow: { preset: 'script' }, documents: { brief: { title: '创作简报' } } },
-      selectDocument: () => gate.promise, showToast: message => toasts.push(message)
+      creationSteps, getDocumentKind: () => 'core',
+      navigateCreationStep: step => { navigated.push(step.id); return gate.promise }, showToast: message => toasts.push(message)
     })
     vm.runInContext(productionFunction('advanceStage'), context)
     const pending = context.advanceStage()
+    let settled = false
+    pending.then(() => { settled = true })
+    await Promise.resolve()
+    assert.deepEqual(navigated, ['script'])
+    assert.equal(settled, false)
     assert.equal(toasts.length, 0)
     gate.resolve(outcome)
     await pending
-    assert.equal(toasts.length, outcome ? 1 : 0)
+    assert.equal(toasts.length, 0)
   }
 })
 
@@ -228,7 +235,8 @@ test('缺少世界观或前场明确提示检查范围不足', () => {
   const input = continuityInput({ documentId: 'scene-a' })
   input.documents.world.content = ''
   const prepared = prepareGeneration(input)
-  assert.equal(prepared.contextWarnings.length, 2)
+  assert.ok(prepared.contextWarnings.some(message => /未提供世界观/.test(message)))
+  assert.ok(prepared.contextWarnings.some(message => /没有上一场/.test(message)))
   assert.match(prepared.messages[0].content, /未提供的内容不能视为已核实/)
 })
 

@@ -1,3 +1,5 @@
+import { visualBaselineText, visualInputFingerprint, visualInputSnapshot } from '../src/visual-review.js'
+import { continuityReadiness } from '../src/continuity-linking.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -82,7 +84,7 @@ function harness(shots) {
   const data = { projectId: 'project', project: { name: '测试', type: 'script' }, storyboard: { revision: 1, shots }, documents: {} }
   const calls = { secret: 0, invoke: 0 }, notices = []
   const env = {
-    context: () => data, connectionFor: capability => capability === 'video' ? connection : { id: 'images', kind: 'image-api', adapter: 'openai-images' },
+    visualBaselineText, visualInputFingerprint, visualInputSnapshot, continuityReadiness, context: () => data, connectionFor: capability => capability === 'video' ? connection : { id: 'images', kind: 'image-api', adapter: 'openai-images' },
     prepareShotInputs, videoParameterState, validateVideoParameters, mediaAdapterFor, findMediaVersion, mediaPrompt, resolveConnectionRoute,
     assets, loading: false, error: '', jobs: [], terminal: () => true, BATCH_LIMIT: 20, batchScopeIds: shots.map(value => value.id), batchSelection: new Set(shots.map(value => value.id)),
     invoke: async () => { calls.invoke++; return {} }, secret: async () => { calls.secret++; return 'test-only' }, requireProject() {}, desktop() {}, requireAdapterCatalog: async () => {},

@@ -7,6 +7,7 @@ import { projectCharacterNames, matchShotCharacters, bindShotCharacters } from '
 import { bindShotReferences } from '../src/storyboard-references.js'
 import { replaceSourceShots } from '../src/storyboard-scope.js'
 import { buildFlowExport, buildMuseExport } from '../src/video-export.js'
+import { isSceneDocument } from '../src/episode-scenes.js'
 
 const asset = (name, id) => ({ id: `asset-${id}`, name: `${name} · 正脸与三视图`, role: 'character', kind: 'image', selectedVersionId: id, versions: [{ id, mimeType: 'image/png' }] })
 const assets = [asset('陆骁', 'lu'), asset('苏遥', 'su'), asset('船长', 'captain')]
@@ -70,9 +71,9 @@ const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url
 const apply = source.slice(source.indexOf('  async function applyCandidate('), source.indexOf('\n  function prepareShotRequest(', source.indexOf('  async function applyCandidate(')))
 
 test('实际采纳入口把多角色引用和候选一起保存，剧本变化时不写入', async () => {
-  const data = { projectId: 'project', documents: { scene: { content: '剧本' } }, storyboard: { revision: 0, shots: [] } }
+  const data = { projectId: 'project', documents: { episode: { content: '' }, scene: { content: '剧本' } }, structure: { episodes: { episode: { sceneIds: ['scene'] } } }, storyboard: { revision: 0, shots: [] } }
   const saved = [], notices = []
-  const environment = { context: () => data, assets, candidate: { projectId: 'project', documentId: 'scene', fingerprint: contentFingerprint('剧本'), revision: 0, text: candidate }, contentFingerprint, storyboardSourceFingerprint, parseStoryboardCandidate, bindShotCharacters, bindShotReferences, SHOT_LIMIT: 120, run: async fn => fn(), candidateHost: { querySelector: () => null }, changeStoryboard: async fn => { fn(data.storyboard.shots); saved.push(structuredClone(data.storyboard)) }, onCandidateResolved: null, selectedShotId: null, showSource() {}, renderSources() {}, renderCandidate() {}, renderShots() {}, notify: message => notices.push(message) }
+  const environment = { context: () => data, isSceneDocument, assets, candidate: { projectId: 'project', documentId: 'scene', fingerprint: contentFingerprint('剧本'), revision: 0, text: candidate }, contentFingerprint, storyboardSourceFingerprint, parseStoryboardCandidate, bindShotCharacters, bindShotReferences, SHOT_LIMIT: 120, run: async fn => fn(), candidateHost: { querySelector: () => null }, changeStoryboard: async fn => { fn(data.storyboard.shots); saved.push(structuredClone(data.storyboard)) }, onCandidateResolved: null, selectedShotId: null, showSource() {}, renderSources() {}, renderCandidate() {}, renderShots() {}, notify: message => notices.push(message) }
   vm.createContext(environment)
   environment.invoke = null
   vm.runInContext(`${apply}\nthis.apply = applyCandidate`, environment)
@@ -88,10 +89,10 @@ const receive = source.slice(source.indexOf('  async function receiveCandidate('
 const snapshot = source.slice(source.indexOf('  function candidateSnapshot('), source.indexOf('\n  async function receiveCandidate(', source.indexOf('  function candidateSnapshot(')))
 
 function autoHarness() {
-  const data = { projectId: 'project', documents: { scene: { content: '剧本' } }, storyboard: { revision: 0, shots: [createShot({ title: '原有镜头', visual: '已有编辑' })] } }
+  const data = { projectId: 'project', documents: { episode: { content: '' }, scene: { content: '剧本' } }, structure: { episodes: { episode: { sceneIds: ['scene'] } } }, storyboard: { revision: 0, shots: [createShot({ title: '原有镜头', visual: '已有编辑' })] } }
   const saves = [], notices = []
   const environment = {
-    context: () => data, assets, candidate: null, candidateRestoredProjectId: null, invoke: true, projectId: 'project', loading: false, error: '',
+    context: () => data, isSceneDocument, assets, candidate: null, candidateRestoredProjectId: null, invoke: true, projectId: 'project', loading: false, error: '',
     contentFingerprint, storyboardSourceFingerprint, parseStoryboardCandidate, bindShotCharacters, bindShotReferences, snapshotStoryboardSource, SHOT_LIMIT: 120,
     run: async fn => { try { return await fn() } catch (error) { notices.push(error.message) } },
     candidateHost: { querySelector: () => null },
@@ -104,6 +105,16 @@ function autoHarness() {
   const generation = { projectId: 'project', documentId: 'scene', sourceFingerprint: contentFingerprint('剧本'), storyboardRevision: 0, storyboardSourceFingerprint: storyboardSourceFingerprint(data.storyboard, 'scene') }
   return { data, saves, notices, environment, receive: (text = candidate, autoApply = true) => environment.receive(text, generation, 'draft-1', { autoApply }) }
 }
+
+test('旧整集拆镜候选保留供审阅，采纳入口不能新增无分场归属镜头', async () => {
+  const h = autoHarness(), before = structuredClone(h.data.storyboard.shots)
+  h.environment.candidate = { projectId: 'project', documentId: 'episode', fingerprint: contentFingerprint(''), text: candidate }
+  await h.environment.applyCandidate()
+  assert.equal(h.saves.length, 0)
+  assert.deepEqual(h.data.storyboard.shots, before)
+  assert.equal(h.environment.candidate.documentId, 'episode')
+  assert.match(h.notices[0], /尚未归属具体分场.*已保留/)
+})
 
 test('拆镜完成自动追加并保存所有字段及多角色参考，保留原有镜头并一次性清除候选', async () => {
   const h = autoHarness()

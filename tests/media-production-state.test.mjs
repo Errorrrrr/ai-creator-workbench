@@ -13,7 +13,7 @@ const reviewedShot = () => {
   shot.reviewedInputFingerprint = shotInputFingerprint(shot, docs)
   return shot
 }
-const media = [{ id: 'video', name: 'video', kind: 'video', versions: [{ id: 'video-v1', mimeType: 'video/mp4' }] }, { id: 'ref', name: '角色', kind: 'image', role: 'character', selectedVersionId: 'ref-v1', versions: [{ id: 'ref-v1', mimeType: 'image/png' }] }]
+const media = [{ id: 'video', projectId: 'p1', name: 'video', kind: 'video', versions: [{ id: 'video-v1', mimeType: 'video/mp4' }] }, { id: 'ref', projectId: 'p1', name: '角色', kind: 'image', role: 'character', selectedVersionId: 'ref-v1', versions: [{ id: 'ref-v1', mimeType: 'image/png' }] }]
 
 test('审核绑定制作输入，修改画面对白参考设置或来源后待复核而保留视频', () => {
   const mutations = [shot => { shot.visual += '夜色' }, shot => { shot.dialogue = '再见' }, shot => { shot.references[0].versionId = 'ref-v2' }, shot => { shot.selectedImageVersionId = 'new-image' }, shot => { shot.videoDuration = 4 }, shot => { shot.aspectRatio = '9:16' }]

@@ -8,6 +8,7 @@ import { prepareGeneration } from '../src/creation-workflow.js'
 import { contentFingerprint, storyboardSourceFingerprint, createShot, parseStoryboardCandidate, resolveConnectionRoute } from '../src/storyboard.js'
 import { validateWorkspace, projectBackup, parseBackup } from '../src/project-store.js'
 import { materializeOperationPlan, parseOperationPlan } from '../src/project-operations.js'
+import { sceneContinuityContext } from '../src/scene-continuity.js'
 
 const appSource = await readFile(new URL('../src/app.js', import.meta.url), 'utf8')
 
@@ -106,7 +107,8 @@ function harness({ candidates = [draft()], activeProjectId = 'project-original' 
   const sandbox = {
     state, elements, activeProjectId, WORKSPACE_SCHEMA_VERSION: 2, MAX_CANDIDATE_DRAFTS,
     structuredClone, crypto: webcrypto, saveSequence: 0, pendingSaves: 0, editRevision: 0, unsavedEdits: false,
-    projectTransition: false, isDesktopRuntime: false, creationNavigation: null, mediaWorkbench: null,
+    projectTransition: false, isDesktopRuntime: false, creationNavigation: null, mediaWorkbench: null, sceneContinuityUI: null,
+    getDocumentKind: documentId => documentId.startsWith('scene-') ? 'scene' : 'document', sceneContinuityContext,
     tabFallbacks: { outline: '', references: '', history: '' },
     window: { setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout, clearInterval() {}, requestAnimationFrame: callback => callback() },
     document: {
@@ -130,7 +132,7 @@ function harness({ candidates = [draft()], activeProjectId = 'project-original' 
     },
     setSaveStatus: status => calls.statuses.push(status), showToast: message => calls.toasts.push(message),
     readableError: error => error.message, resolveConnectionRoute, storyboardSourceFingerprint,
-    initializeMediaWorkbench: options => options, connectionSecret: async () => null,
+    initializeMediaWorkbench: options => options, connectionSecret: async () => null, organizeEpisodeScenes() {}, renderProjectTree() {},
     setProjectTransition: value => { sandbox.projectTransition = value },
     validateWorkspace: (workspace, index) => validateWorkspace(structuredClone(workspace), index),
     generationDraft: prompt => prepareGeneration({ ...state, documentId: state.currentDocId, tabName: state.activeTab, prompt }),
@@ -142,7 +144,7 @@ function harness({ candidates = [draft()], activeProjectId = 'project-original' 
   }
   const names = [
     'getCurrentDocument', 'getContentAt', 'setContentAt', 'getCurrentContent', 'setCurrentContent', 'getEditHistory',
-    'workspaceSnapshot', 'persistWorkspace', 'formatVersionHistory', 'addVersion', 'updateDocumentView',
+    'workspaceSnapshot', 'persistWorkspace', 'formatVersionHistory', 'addVersion', 'getEpisodeIds', 'getParentEpisodeId', 'updateDocumentView',
     'saveImmediately', 'selectDocument', 'switchTab', 'appendGenerationDelta', 'startGeneration', 'finishGeneration', 'stopGeneration',
     'scheduleCandidateSave', 'rememberCurrentCandidate', 'showSavedCandidate', 'restoreDocumentCandidate',
     'discardCandidate', 'abandonCandidateOnContextChange', 'applyCandidate', 'initializeProjectMediaWorkbench', 'recoverPreviousLibrary'

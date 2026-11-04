@@ -675,8 +675,8 @@ fn register_pending(app: &tauri::AppHandle, registration: &Registration) -> Resu
             updated_at: version.created_at.clone(),
         }
     };
-    if role == "character" {
-        asset.role = "character".into();
+    if ["character", "scene", "prop"].contains(&role.as_str()) {
+        asset.role = role.clone();
     }
     asset.versions.push(version.clone());
     asset.updated_at = now();

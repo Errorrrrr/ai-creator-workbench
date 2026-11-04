@@ -9,7 +9,7 @@ export function candidateGeneratedAtLabel(createdAt) {
 const MAX_TEXT_CHARACTERS = 2 * 1024 * 1024
 const TABS = ['script', 'outline', 'references']
 const DRAFT_FIELDS = ['id', 'documentId', 'tabName', 'prompt', 'text', 'createdAt', 'status', 'context']
-const CONTEXT_FIELDS = ['projectId', 'purpose', 'creativeAction', 'followup', 'storyboardApplyMode', 'sourceFingerprint', 'storyboardRevision', 'storyboardSourceFingerprint', 'operationContext', 'documentId', 'tabName', 'title', 'baseContent', 'selectionStart', 'selectionEnd', 'knowledgeChunks', 'messages']
+const CONTEXT_FIELDS = ['projectId', 'purpose', 'creativeAction', 'followup', 'storyboardApplyMode', 'sourceFingerprint', 'sourceDocumentIds', 'sourceFingerprints', 'storyboardRevision', 'storyboardSourceFingerprint', 'sceneContinuityFingerprint', 'sceneContinuityPrompt', 'sceneContinuityIncludePrevious', 'operationContext', 'documentId', 'tabName', 'title', 'baseContent', 'selectionStart', 'selectionEnd', 'knowledgeChunks', 'messages']
 const CHUNK_FIELDS = ['id', 'sourceId', 'name', 'path', 'content', 'start', 'end', 'updatedAt', 'vector']
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 const SENSITIVE_KEYS = new Set(['authorization', 'proxyauthorization', 'headers', 'cookie', 'cookies', 'setcookie', 'apikey', 'key', 'secret', 'clientsecret', 'password', 'passwd', 'token', 'accesstoken', 'refreshtoken', 'idtoken', 'credential', 'credentials', 'connection', 'connections', 'connectionid', 'baseurl', 'endpoint', 'privatekey', 'env', 'environment'])
@@ -64,9 +64,16 @@ function validateOperationContext(value, projectId) {
 function validateContext(context, draft) {
   fields(context, CONTEXT_FIELDS, '候选上下文')
   // Only operation target map keys are exempt from credential-key checks.
-  for (const [key, value] of Object.entries(context)) if (key !== 'operationContext') validateJson(value)
+  for (const [key, value] of Object.entries(context)) if (!['operationContext', 'sourceFingerprints'].includes(key)) validateJson(value)
   assert(id(context.projectId) && context.documentId === draft.documentId && context.tabName === draft.tabName, '候选上下文归属无效')
-  assert(['text', 'discussion', 'project-plan', 'storyboard'].includes(context.purpose), '候选用途无效')
+  assert(['text', 'discussion', 'project-plan', 'storyboard', 'asset-extraction', 'scene-plan'].includes(context.purpose), '候选用途无效')
+  if (context.sourceDocumentIds !== undefined) assert(Array.isArray(context.sourceDocumentIds) && context.sourceDocumentIds.length <= 10000 && context.sourceDocumentIds.every(id), '候选提取分场无效')
+  if (context.sourceFingerprints !== undefined) {
+    assert(object(context.sourceFingerprints), '候选提取原文指纹无效'); validateJson(context.sourceFingerprints, new Set(), 0, false)
+    assert(Object.entries(context.sourceFingerprints).every(([key, value]) => id(key) && typeof value === 'string' && value.length <= 1024), '候选提取原文指纹无效')
+  }
+  if (context.purpose === 'asset-extraction') assert(context.sourceDocumentIds?.length && object(context.sourceFingerprints) && context.sourceDocumentIds.every(id => Object.hasOwn(context.sourceFingerprints, id)), '提取候选缺少分场快照')
+  if (context.purpose === 'scene-plan') assert(Array.isArray(context.sourceDocumentIds) && typeof context.baseContent === 'string', '分场候选缺少原文或场次快照')
   if (context.creativeAction !== undefined) assert(['', 'continuity', 'continuation'].includes(context.creativeAction), '候选创作操作无效')
   if (context.storyboardApplyMode !== undefined) assert(['replace', 'append', 'compare'].includes(context.storyboardApplyMode), '候选拆镜处理方式无效')
   if (context.followup !== undefined && context.followup !== null) {
@@ -80,6 +87,9 @@ function validateContext(context, draft) {
   assert(typeof context.title === 'string' && typeof context.baseContent === 'string', '候选原文快照无效')
   if (context.sourceFingerprint !== undefined) assert(typeof context.sourceFingerprint === 'string' && context.sourceFingerprint.length <= 1024, '候选原文指纹无效')
   if (context.storyboardSourceFingerprint !== undefined) assert(typeof context.storyboardSourceFingerprint === 'string' && context.storyboardSourceFingerprint.length <= 1024, '候选分场快照指纹无效')
+  if (context.sceneContinuityFingerprint !== undefined) assert(typeof context.sceneContinuityFingerprint === 'string' && context.sceneContinuityFingerprint.length <= 1024, '候选分场状态指纹无效')
+  if (context.sceneContinuityPrompt !== undefined) assert(typeof context.sceneContinuityPrompt === 'string' && context.sceneContinuityPrompt.length <= 12000, '候选分场状态要求无效')
+  if (context.sceneContinuityIncludePrevious !== undefined) assert(typeof context.sceneContinuityIncludePrevious === 'boolean', '候选分场衔接范围无效')
   if (context.storyboardRevision !== undefined && context.storyboardRevision !== null) assert(integer(context.storyboardRevision), '候选分镜修订号无效')
   for (const field of ['selectionStart', 'selectionEnd']) if (context[field] !== undefined) assert(integer(context[field]) && context[field] <= context.baseContent.length, '候选原文选区无效')
   if (context.selectionStart !== undefined && context.selectionEnd !== undefined) assert(context.selectionEnd >= context.selectionStart, '候选原文选区无效')
@@ -119,7 +129,7 @@ export function validateCandidateDrafts(value) {
     assert(id(draft.id) && !ids.has(draft.id) && id(draft.documentId), '候选稿标识无效或重复')
     ids.add(draft.id)
     assert(TABS.includes(draft.tabName), '候选稿文档视图无效')
-    assert(typeof draft.prompt === 'string' && draft.prompt.length <= 12000 && text(draft.text), '候选稿要求或文本无效')
+    assert(typeof draft.prompt === 'string' && draft.prompt.length <= (draft.context?.purpose === 'asset-extraction' ? 200000 : 12000) && text(draft.text), '候选稿要求或文本无效')
     assert(typeof draft.createdAt === 'string' && draft.createdAt.length <= 64 && Number.isFinite(Date.parse(draft.createdAt)), '候选稿时间无效')
     assert(['complete', 'partial', 'error'].includes(draft.status), '候选稿状态无效')
     validateContext(draft.context, draft)

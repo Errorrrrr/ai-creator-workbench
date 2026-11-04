@@ -1,3 +1,4 @@
+import { planEntityImageResults } from '../src/continuity-assets.js'
 import { planShotImageResults, imageResultCheckpoint } from '../src/shot-image-results.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -72,7 +73,7 @@ test('自动补齐入口在刷新后保存，拆镜中暂缓，失败不改原�
   for (const mode of ['ready', 'task', 'generating', 'transition', 'foreign', 'failure']) {
     const data = { projectId: 'p', documents, storyboard: { revision: 2, shots: [oldShot()] }, textGenerating: mode === 'generating', mutationBusy: mode === 'transition' }
     const calls = [], notices = [], scheduled = []
-    const env = { context: () => data, referenceSyncBusy: false, loading: false, error: '', operationBusy: false, storyboardTasks: { active: () => mode === 'task' }, invoke: true, projectId: mode === 'foreign' ? 'another' : 'p', assets, jobs: [], planReferenceBackfill, planShotImageResults, scheduleReferenceSync: () => scheduled.push(true), commit: async (patch, options) => { calls.push(options); if (mode === 'failure') throw new Error('磁盘不可写'); data.storyboard = patch.storyboard }, renderShots() {}, refreshReferenceDetails() {}, notify: message => notices.push(message) }
+    const env = { planEntityImageResults, continuityUI: { pendingDraft: () => null, refresh() {} }, context: () => data, referenceSyncBusy: false, loading: false, error: '', operationBusy: false, storyboardTasks: { active: () => mode === 'task' }, invoke: true, projectId: mode === 'foreign' ? 'another' : 'p', assets: assets.map(item => ({ ...item, projectId: 'p' })), jobs: [], planReferenceBackfill, planShotImageResults, scheduleReferenceSync: () => scheduled.push(true), commit: async (patch, options) => { calls.push(options); if (mode === 'failure') throw new Error('磁盘不可写'); data.storyboard = patch.storyboard }, renderShots() {}, refreshReferenceDetails() {}, notify: message => notices.push(message) }
     vm.createContext(env); vm.runInContext(`${handler}\nthis.sync = synchronizeReferences`, env)
     await env.sync()
     assert.equal(calls.length, ['ready', 'failure'].includes(mode) ? 1 : 0)
@@ -157,9 +158,9 @@ async function imageSyncHarness({ fail = false, blocked = false, candidateFocuse
     replaceWith: content => calls.candidateRenders.push(content),
   }
   const host = { replaceChildren: (...children) => calls.previews.push(children) }
-  const env = {
+  const env = { planEntityImageResults, continuityUI: { pendingDraft: () => null, refresh() {} },
     context: () => data, referenceSyncBusy: false, loading: false, error: '', operationBusy: false,
-    storyboardTasks: { active: () => false }, invoke: true, projectId: 'p', assets: [...assets, generated], jobs,
+    storyboardTasks: { active: () => false }, invoke: true, projectId: 'p', assets: [...assets.map(item => ({ ...item, projectId: 'p' })), generated], jobs,
     planReferenceBackfill, planShotImageResults, findMediaVersion, scheduleReferenceSync() {},
     fail, commit: async (patch, options) => {
       calls.commits.push({ patch, options }); await gate
@@ -246,7 +247,7 @@ test('候选区等焦点离开或视频暂停结束后局部刷新，避免最�
       contains: () => focused, querySelectorAll: () => playing ? [{ paused: false }] : [],
       replaceWith(next) { this.isConnected = false; current = next; replacements++ },
     })
-    const env = {
+    const env = { planEntityImageResults, continuityUI: { pendingDraft: () => null, refresh() {} },
       assets: [], jobs: [], el: node, disclosure: node, field: node, button: node,
       Option: function (text, value) { this.text = text; this.value = value },
       selectedShot: oldShot, shotDetail: { querySelector: () => current },
@@ -275,7 +276,7 @@ test('真实手选入口记录尚在运行的生成任务水位，之后完成�
   const selected = oldShot(), data = { projectId: 'p', documents, storyboard: { revision: 2, shots: [selected] } }
   const job = { id: 'running-image', projectId: 'p', targetId: selected.id, capability: 'image', status: 'running', createdAt: '1793066400000', assetId: 'generated', request: {} }
   const generated = { id: 'generated', projectId: 'p', kind: 'image', versions: [{ id: 'result', mimeType: 'image/png', metadata: { provenance: { jobId: job.id } } }] }
-  const env = {
+  const env = { planEntityImageResults, continuityUI: { pendingDraft: () => null, refresh() {} },
     context: () => data, jobs: [job], assets: [generated], projectId: 'p', loading: false, error: '',
     imageResultCheckpoint, manualReferencePatch, bindShotReferences, REFERENCE_ENTITY_FIELDS: {},
     changeStoryboard: async action => { const next = structuredClone(data.storyboard); action(next.shots); next.revision++; data.storyboard = next },

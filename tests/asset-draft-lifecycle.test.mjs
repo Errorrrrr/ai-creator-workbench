@@ -16,6 +16,8 @@ function harness({ choice = 'cancel', saveFailure = false, archiveFailure = fals
   const calls = { writes: [], archives: [], deleted: [], choices: [], messages: [], refreshes: 0, rendered: 0, locks: [] }
   let projects = [{ id: 'p1', name: '第一项目' }, { id: 'p2', name: '第二项目' }]
   const env = {
+    sceneContinuityUI: null, episodeScenesUI: null,
+    continuityUI: { pendingDraft: () => null, discardDraft() {}, saveDraft: async () => true, showDraft: () => true, refresh() {}, hasPendingWork: () => false },
     activeProjectId: 'p1', projectTransition: false, operationBusy: false, referenceSyncBusy: false,
     assetDrafts: new Map([['p1:a1', { name: '修改一', role: 'character' }], ['p1:a2', { name: '修改二', role: 'scene' }], ['p2:a3', { name: '另一项目', role: 'prop' }]]),
     context: () => ({ projectId: env.activeProjectId }),

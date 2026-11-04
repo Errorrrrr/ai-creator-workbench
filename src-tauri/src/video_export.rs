@@ -165,7 +165,7 @@ impl Target {
 }
 
 fn valid_path(path: &str, image: bool) -> bool {
-    if !image && ["使用说明.md", "manifest.json"].contains(&path) {
+    if !image && ["使用说明.md", "manifest.json", "视觉检查.md"].contains(&path) {
         return true;
     }
     let Some((folder, file)) = path.split_once('/') else {
@@ -374,6 +374,9 @@ mod tests {
     }
     #[test]
     fn rejects_unsafe_and_duplicate_paths() {
+        assert!(valid_path("视觉检查.md", false));
+        assert!(!valid_path("视觉检查.md", true));
+        assert!(!valid_path("../视觉检查.md", false));
         for path in [
             "../prompt.txt",
             "/tmp/x",

@@ -1,4 +1,5 @@
-export const ANTIGRAVITY_ARGS = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--mode', 'plan', '--sandbox', '--disable-slash-commands', '--print-timeout', '110s']
+// The workbench owns the deadline; agy's inner timeout can report SUCCESS with an empty response.
+export const ANTIGRAVITY_ARGS = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--mode', 'plan', '--sandbox', '--disable-slash-commands', '--print-timeout', '0']
 
 export function antigravityInput(prompt) {
   return `${JSON.stringify({ event: 'user', message: { content: prompt } })}\n`
@@ -39,6 +40,6 @@ export function parseAntigravityOutput(output) {
   }
   if (!result) throw new Error('Antigravity 未返回完整结果')
   if (result.status !== 'SUCCESS') throw new Error(antigravityExecutionError('', output))
-  if (typeof result.response !== 'string' || !result.response.trim()) throw new Error('Antigravity 未返回内容')
+  if (typeof result.response !== 'string' || !result.response.trim()) throw new Error('Antigravity 本轮已结束，但没有返回最终答复；未生成可采纳内容，请缩小范围后重试')
   return result.response.trim()
 }

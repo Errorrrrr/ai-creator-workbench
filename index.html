@@ -16,6 +16,8 @@
     <link rel="stylesheet" href="./src/media-layout.css" />
     <link rel="stylesheet" href="./src/writing-preview.css" />
     <link rel="stylesheet" href="./src/production-tools.css" />
+    <link rel="stylesheet" href="./src/continuity-ui.css" />
+    <link rel="stylesheet" href="./src/visual-review.css" />
   </head>
   <body>
     <a class="skip-link" href="#workspaceMain">跳到正文编辑区</a>
@@ -261,11 +263,12 @@
             </div>
           </div>
 
-          <nav class="project-modes" aria-label="项目工作区">
-            <button type="button" data-view-target="workspace" aria-current="page">创作</button>
+          <nav class="project-modes" aria-label="项目视图">
+            <button type="button" data-view-target="workspace" aria-current="page">剧本</button>
             <button type="button" data-view-target="storyboard">分镜</button>
             <button type="button" data-view-target="assets">素材</button>
           </nav>
+          <p class="project-structure-hint">集 → 分场 → 分镜</p>
           <label class="explorer-search">
             <svg class="icon icon-small"><use href="#icon-search"></use></svg>
             <span class="sr-only">筛选项目内容</span>
@@ -287,15 +290,16 @@
         <main class="main-surface" id="workspaceMain" tabindex="-1">
           <nav class="creation-navigation" id="creationNavigation" aria-label="创作步骤" hidden>
             <div class="creation-navigation-row">
-              <span id="creationPath" class="creation-path"></span>
-              <label class="creation-step-field" for="creationStep"><span class="sr-only">当前创作步骤</span><select id="creationStep" aria-describedby="creationStepHint"></select></label>
+              <div class="creation-stages" id="creationStages" aria-label="创作阶段"></div>
             </div>
             <details class="creation-step-details">
-              <summary title="查看创作路径、上一步与下一步">路径与说明</summary>
+              <summary title="查看当前阶段的说明与其他操作">说明与更多</summary>
+              <span id="creationPath" class="creation-path"></span>
+              <label class="creation-step-field" for="creationStep"><span class="sr-only">当前创作步骤</span><select id="creationStep" aria-describedby="creationStepHint"></select></label>
               <div class="creation-step-pagination"><button type="button" class="secondary-button compact-button" data-workflow-previous>上一步</button><button type="button" class="secondary-button compact-button" data-workflow-next>下一步</button></div>
               <p id="creationStepHint" class="creation-step-hint"></p>
               <dl><div><dt>可用输入</dt><dd id="creationStepInput"></dd></div><div><dt>执行端</dt><dd id="creationStepExecutor"></dd></div><div><dt>输出位置</dt><dd id="creationStepOutput"></dd></div></dl>
-              <p>实际发送范围请查看助手上下文或媒体计划；步骤切换不会生成内容，序号不代表完成率。</p>
+              <p>可随时切换阶段，前期资料按需填写。切换不会生成内容，阶段顺序不代表完成率。</p>
               <div class="creation-step-actions"><button class="text-button" type="button" data-view-target="connections">配置路径与执行端</button><button class="text-button" type="button" data-view-target="knowledge">选择知识资料</button><button class="text-button" type="button" data-action="export-project">导出 Markdown</button><button class="text-button" type="button" data-view-target="assets">素材与完整备份</button></div>
             </details>
           </nav>
@@ -333,6 +337,8 @@
                 </button>
                 <button class="secondary-button compact-button" id="previousSceneButton" type="button" data-action="previous-scene" hidden>上一场</button>
                 <button class="secondary-button compact-button" id="newSceneButton" type="button" data-action="new-scene" hidden>新增分场</button>
+                <button class="secondary-button compact-button" id="organizeScenesButton" type="button" data-action="organize-scenes" hidden>整理本集分场</button>
+                <button class="secondary-button compact-button" id="sceneStoryboardButton" type="button" data-action="open-scene-storyboard" hidden>本场分镜</button>
                 <button class="secondary-button compact-button stage-advance-button" id="stageAdvanceButton" type="button" data-action="advance-stage">
                   <span>下一步</span>
                   <svg class="icon"><use href="#icon-chevron-right"></use></svg>
@@ -382,7 +388,7 @@
                     </div>
                     <h2 id="sceneTitle" hidden></h2>
                   </div>
-                  <div class="editor-reading-controls"><button class="secondary-button compact-button" id="toggleWritingPreview" type="button" data-action="toggle-writing-preview" aria-pressed="false" aria-controls="writingPreview">阅读预览</button>
+                  <div class="editor-reading-controls"><button class="secondary-button compact-button" id="sceneContinuityButton" type="button" data-action="scene-continuity" hidden>分场状态与衔接</button><button class="secondary-button compact-button" id="toggleWritingPreview" type="button" data-action="toggle-writing-preview" aria-pressed="false" aria-controls="writingPreview">阅读预览</button>
                   <button class="icon-button icon-button-compact" type="button" data-action="edit-document" aria-label="编辑当前内容信息" title="编辑当前内容信息">
                     <svg class="icon"><use href="#icon-more"></use></svg>
                   </button></div>
@@ -403,7 +409,7 @@
           </section>
 
           <section class="view-panel media-view" id="storyboardView" data-view="storyboard" hidden>
-            <header class="media-page-header"><div><span class="eyebrow">从文字到画面</span><h1>分镜工作区</h1><p>拆镜、校对状态、固定参考。每个镜头都能独立生成与重做。</p></div><button class="text-button" type="button" data-view-target="connections">配置步骤执行端</button></header>
+            <header class="media-page-header"><div><span class="eyebrow">从文字到画面</span><h1>分镜制作</h1><p>按集查看，进入分场后拆镜、制作图片与视频。每个镜头归属一场戏。</p></div><button class="text-button" type="button" data-view-target="connections">配置步骤执行端</button></header>
             <div class="media-view-content"></div>
           </section>
           <section class="view-panel media-view" id="assetsView" data-view="assets" hidden>
@@ -660,6 +666,7 @@
                   <button class="secondary-button" type="button" data-action="retry-generation"><svg class="icon"><use href="#icon-refresh"></use></svg>重新生成</button>
                   <button class="secondary-button" id="continueCandidateButton" type="button" data-action="continue-candidate" hidden>继续修改此候选</button>
                   <button class="primary-button" id="reviewProjectPlan" type="button" data-action="review-project-plan" hidden>审阅修改计划</button>
+                  <button class="primary-button" id="reviewEpisodeScenes" type="button" data-action="review-episode-scenes" hidden>审阅分场</button>
                   <button class="secondary-button" type="button" data-action="apply-candidate" data-apply-mode="insert"><svg class="icon"><use href="#icon-check"></use></svg>插入光标</button>
                   <button class="secondary-button" type="button" data-action="apply-candidate" data-apply-mode="replace"><svg class="icon"><use href="#icon-refresh"></use></svg>替换正文</button>
                   <button class="primary-button" type="button" data-action="apply-candidate" data-apply-mode="append"><svg class="icon"><use href="#icon-check"></use></svg><span>追加并建版本</span></button>
@@ -816,7 +823,7 @@
           <label><input type="radio" name="contentType" value="漫剧" /><span><svg class="icon"><use href="#icon-layers"></use></svg><strong>漫剧</strong><small>分镜文字与对白</small></span></label>
           <label><input type="radio" name="contentType" value="通用故事" /><span><svg class="icon"><use href="#icon-book"></use></svg><strong>通用故事</strong><small>灵感、大纲与正文</small></span></label>
         </fieldset>
-        <div class="form-field"><label for="projectFlowPreset">创作路径</label><select id="projectFlowPreset" name="flowPreset"><option value="text">文字创作 · 灵感、结构与正文</option><option value="script" selected>剧本创作 · 设定、大纲与分场</option><option value="storyboard">分镜制作 · 从已有剧本或素材开始</option></select><small>路径可随时调整，不自动生成内容，也不要求配置图片或视频服务。</small></div>
+        <div class="form-field"><label for="projectFlowPreset">创作路径</label><select id="projectFlowPreset" name="flowPreset"><option value="text">文字创作 · 灵感、结构与正文</option><option value="script" selected>剧本创作 · 设定、大纲与分场</option><option value="storyboard">分镜制作 · 已有剧本先整理分场</option></select><small>路径可随时调整，不自动生成内容，也不要求配置图片或视频服务。</small></div>
         <p>新项目独立保存，不会替换已有项目。</p>
         <div class="dialog-actions">
           <button class="secondary-button" type="button" data-action="close-dialog">取消</button>

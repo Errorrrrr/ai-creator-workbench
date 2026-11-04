@@ -1,3 +1,5 @@
+import { visualBaselineText, visualInputFingerprint, visualInputSnapshot } from '../src/visual-review.js'
+import { continuityReadiness } from '../src/continuity-linking.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -6,6 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { createShot, contentFingerprint, prepareShotInputs, videoParameterState, validateVideoParameters, findMediaVersion, mediaPrompt, resolveConnectionRoute, shotIsStale } from '../src/storyboard.js'
 import { mediaAdapterFor } from '../src/media-adapters.js'
 import { storyboardSceneEntries, shotsForScenes, UNASSIGNED_SOURCE } from '../src/storyboard-scope.js'
+import { sceneContinuityContext } from '../src/scene-continuity.js'
 
 const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
 function productionFunction(name) {
@@ -39,7 +42,7 @@ function harness(counts = [2, 1]) {
   data.storyboard.shots = [...groups[1], ...groups[0]]
   const calls = [], notices = [], connection = { id: 'images', name: '图片执行端', kind: 'image-api', adapter: 'openai-images', model: 'test-image' }
   const env = {
-    context: () => data, storyboardSceneEntries, shotsForScenes, UNASSIGNED_SOURCE, BATCH_LIMIT: 20,
+    visualBaselineText, visualInputFingerprint, visualInputSnapshot, continuityReadiness, sceneContinuityContext, context: () => data, storyboardSceneEntries, shotsForScenes, UNASSIGNED_SOURCE, BATCH_LIMIT: 20,
     selectedSourceId: 's1', selectedShotId: groups[0][0]?.id, batchScopeIds: [], batchSelection: new Set(), batchSceneSelection: new Set(), batchExplicitIds: null, batchOwner: null,
     batchPlan: null, operationBusy: false, loading: false, error: '', jobs: [],
     el: (tag, className, text) => new Node(tag, text), Option: class extends Node { constructor(text, value) { super('option', text); this.value = value } },

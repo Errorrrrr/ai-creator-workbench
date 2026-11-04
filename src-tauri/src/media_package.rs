@@ -249,6 +249,14 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
                     }
                 }
             }
+            if let Some(entity) = version.metadata.get("provenance").and_then(|value| value.get("entity")) {
+                let entity: crate::media_jobs::EntityOutput = serde_json::from_value(entity.clone())
+                    .map_err(|_| "设定图来源实体格式无效")?;
+                entity.validate()?;
+                if asset.kind != "image" {
+                    return Err("实体设定图必须是图片".into());
+                }
+            }
         }
     }
     if asset_versions.len() != manifest.files.len() {
@@ -299,6 +307,12 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
     }
     for job in &manifest.jobs {
         media::valid_id(&job.id)?;
+        job.request.validate_output()?;
+        if job.request.entity.is_some()
+            && (job.target_id != job.request.target_id || job.capability != job.request.capability)
+        {
+            return Err("实体任务与输出目标不一致".into());
+        }
         if let Some(batch_id) = &job.batch_id {
             media::valid_id(batch_id)?;
         }
@@ -327,7 +341,189 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
             }
         }
     }
+    validate_continuity(manifest)?;
     Ok(())
+}
+
+fn validate_continuity(manifest: &Manifest) -> Result<(), String> {
+    let Some(continuity) = manifest.workspace["storyboard"].get("continuity") else {
+        return Ok(());
+    };
+    let entities = continuity["entities"]
+        .as_array()
+        .ok_or("连续性设定格式无效")?;
+    if entities.len() > MAX_FILES {
+        return Err("连续性实体数量超限".into());
+    }
+    let mut entity_ids = HashSet::new();
+    let mut state_ids = HashSet::new();
+    for entity in entities {
+        let id = entity["id"].as_str().ok_or("连续性实体标识无效")?;
+        media::valid_id(id)?;
+        if !entity_ids.insert(id)
+            || !["character", "scene", "prop"].contains(&entity["kind"].as_str().unwrap_or(""))
+        {
+            return Err("连续性实体标识重复或类型无效".into());
+        }
+        let states = entity["states"].as_array().ok_or("实体状态格式无效")?;
+        if states.len() > MAX_FILES {
+            return Err("实体状态数量超限".into());
+        }
+        for state in states {
+            let state_id = state["id"].as_str().ok_or("实体状态标识无效")?;
+            media::valid_id(state_id)?;
+            media::valid_id(&format!("entity-{state_id}"))?;
+            if !state_ids.insert(state_id) {
+                return Err("项目内实体状态标识重复".into());
+            }
+            if let Some(version_id) = state.get("referenceVersionId") {
+                let version_id = version_id.as_str().ok_or("实体设定图版本标识无效")?;
+                if !version_id.is_empty()
+                    && !manifest.files.iter().any(|entry| {
+                        entry.version_id == version_id && entry.mime_type.starts_with("image/")
+                    })
+                {
+                    return Err("实体设定图缺少实际图片，不能伪装成完整备份".into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remap_checkpoint(value: &mut Value, mapping: &HashMap<String, String>) {
+    let Some(checkpoint) = value.get_mut("imageResultCheckpoint") else {
+        return;
+    };
+    let replacement = checkpoint["jobId"]
+        .as_str()
+        .and_then(|id| mapping.get(id))
+        .cloned();
+    if let Some(id) = replacement {
+        checkpoint["jobId"] = json!(id);
+    } else if let Some(object) = value.as_object_mut() {
+        // Deleted historical jobs have no new identity. Restored jobs are never
+        // eligible for auto-adoption, so clearing a stale checkpoint is safe.
+        object.remove("imageResultCheckpoint");
+    }
+}
+
+fn remap_continuity(
+    workspace: &mut Value,
+    mapping: &HashMap<String, String>,
+) -> Result<(), String> {
+    let Some(entities) = workspace
+        .get_mut("storyboard")
+        .and_then(|board| board.get_mut("continuity"))
+        .and_then(|continuity| continuity.get_mut("entities"))
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    for entity in entities {
+        for state in entity["states"].as_array_mut().ok_or("实体状态格式无效")? {
+            if let Some(id) = state["referenceVersionId"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+            {
+                state["referenceVersionId"] =
+                    json!(mapping.get(id).ok_or("实体设定图无法重映射")?);
+            }
+            remap_checkpoint(state, mapping);
+        }
+    }
+    // Entity and state IDs, state inheritance and document IDs are project-local.
+    // Keep them stable so restored provenance and future jobs address the same asset.
+    Ok(())
+}
+
+fn restore_jobs(
+    jobs: &mut [Job],
+    project_id: &str,
+    mapping: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    let mut batch_mapping = HashMap::new();
+    for job in jobs {
+        if let Some(batch_id) = &mut job.batch_id {
+            *batch_id = batch_mapping
+                .entry(batch_id.clone())
+                .or_insert_with(media::new_id)
+                .clone();
+        }
+        job.id = mapping
+            .get(&job.id)
+            .cloned()
+            .ok_or("历史任务标识无法重映射")?;
+        job.project_id = project_id.into();
+        // Entity state IDs survive project import. Reusing that stable target
+        // keeps subsequent generations in the restored asset's version history.
+        job.target_id = if let Some(entity) = &job.request.entity {
+            entity.target_id()
+        } else {
+            // Legacy character jobs share non-storyboard targets too.
+            mapping
+                .entry(job.target_id.clone())
+                .or_insert_with(media::new_id)
+                .clone()
+        };
+        job.asset_id = job
+            .asset_id
+            .as_ref()
+            .and_then(|id| mapping.get(id))
+            .cloned();
+        job.remote_id = None;
+        job.request.api_key = None;
+        job.request.project_id = project_id.into();
+        job.request.target_id = job.target_id.clone();
+        job.request.connection.base_url.clear();
+        job.request.connection.id = media::new_id();
+        job.request.allow_user_profile = false;
+        for reference in &mut job.request.references {
+            reference.version_id = mapping
+                .get(&reference.version_id)
+                .cloned()
+                .ok_or("历史任务引用媒体缺失")?;
+        }
+        job.restored = true;
+        job.status = if job.status == "completed" && job.asset_id.is_some() {
+            "completed"
+        } else {
+            "failed"
+        }
+        .into();
+        job.error = Some(
+            "恢复的历史记录；不复用原远端句柄或登录许可。如需再次创作，请选择资源后明确生成".into(),
+        );
+    }
+    Ok(())
+}
+
+fn restored_asset_target(asset: &Asset, jobs: &[Job]) -> Result<String, String> {
+    let mut entity_target: Option<String> = None;
+    for version in &asset.versions {
+        if let Some(value) = version
+            .metadata
+            .get("provenance")
+            .and_then(|value| value.get("entity"))
+        {
+            let entity: crate::media_jobs::EntityOutput =
+                serde_json::from_value(value.clone()).map_err(|_| "设定图来源实体格式无效")?;
+            entity.validate()?;
+            let target = entity.target_id();
+            if entity_target.as_ref().is_some_and(|prior| prior != &target) {
+                return Err("同一设定图资产包含不同状态，无法恢复版本目标".into());
+            }
+            entity_target = Some(target);
+        }
+    }
+    if let Some(target) = entity_target {
+        // Job history may have been removed while its generated images remain.
+        return Ok(target);
+    }
+    Ok(jobs
+        .iter()
+        .find(|job| job.asset_id.as_deref() == Some(&asset.id))
+        .map_or_else(String::new, |job| job.target_id.clone()))
 }
 
 fn storyboard_shot_groups(workspace: &Value) -> Result<Vec<&Vec<Value>>, String> {
@@ -360,6 +556,7 @@ fn remap_storyboard(workspace: &mut Value, mapping: &mut HashMap<String, String>
                     reference["versionId"] = json!(mapping.get(id).ok_or("参考媒体缺失")?);
                 }
             }
+            remap_checkpoint(shot, mapping);
             if let Some(shot) = shot.as_object_mut() { shot.remove("reviewedInputFingerprint"); }
         }
         Ok(())
@@ -373,6 +570,7 @@ fn remap_storyboard(workspace: &mut Value, mapping: &mut HashMap<String, String>
     }
     // Document keys are kept verbatim by project import; sourceDocumentId points
     // to those project-local keys and must remain the same in current/history shots.
+    remap_continuity(workspace, mapping)?;
     Ok(())
 }
 
@@ -671,51 +869,7 @@ fn stage_import(app: &tauri::AppHandle, project_id: &str, path: &Path) -> Result
             }
         }
     }
-    let mut batch_mapping = HashMap::new();
-    for job in &mut manifest.jobs {
-        if let Some(batch_id) = &mut job.batch_id {
-            *batch_id = batch_mapping
-                .entry(batch_id.clone())
-                .or_insert_with(media::new_id)
-                .clone();
-        }
-        job.id = mapping[&job.id].clone();
-        job.project_id = project_id.into();
-        // Character jobs may share a target outside the storyboard. Keep all
-        // versions attached to that same target when restoring a project pack.
-        job.target_id = mapping
-            .entry(job.target_id.clone())
-            .or_insert_with(media::new_id)
-            .clone();
-        job.asset_id = job
-            .asset_id
-            .as_ref()
-            .and_then(|id| mapping.get(id))
-            .cloned();
-        job.remote_id = None;
-        job.request.api_key = None;
-        job.request.project_id = project_id.into();
-        job.request.target_id = job.target_id.clone();
-        job.request.connection.base_url.clear();
-        job.request.connection.id = media::new_id();
-        job.request.allow_user_profile = false;
-        for reference in &mut job.request.references {
-            reference.version_id = mapping
-                .get(&reference.version_id)
-                .cloned()
-                .ok_or("历史任务引用媒体缺失")?;
-        }
-        job.restored = true;
-        job.status = if job.status == "completed" && job.asset_id.is_some() {
-            "completed"
-        } else {
-            "failed"
-        }
-        .into();
-        job.error = Some(
-            "恢复的历史记录；不复用原远端句柄或登录许可。如需再次创作，请选择资源后明确生成".into(),
-        );
-    }
+    restore_jobs(&mut manifest.jobs, project_id, &mut mapping)?;
     let mut files = vec![];
     let mut source_files = HashMap::new();
     for entry in manifest.files {
@@ -898,11 +1052,7 @@ pub(crate) fn apply_import(
         transaction.execute("INSERT INTO media_files(id,project_id,version_id,relative_path,mime_type,bytes) VALUES(?1,?2,?3,?4,?5,?6)",params![entry.file_id,pending.project_id,entry.version_id,relative_file(entry)?,entry.mime_type,entry.bytes]).map_err(|e| e.to_string())?;
     }
     for asset in &pending.assets {
-        let target = pending
-            .jobs
-            .iter()
-            .find(|job| job.asset_id.as_deref() == Some(&asset.id))
-            .map_or("", |job| job.target_id.as_str());
+        let target = restored_asset_target(asset, &pending.jobs)?;
         transaction.execute("INSERT INTO media_assets(id,project_id,target_id,kind,payload,updated_at) VALUES(?1,?2,?3,?4,?5,?6)",params![asset.id,pending.project_id,target,asset.kind,serde_json::to_string(asset).map_err(|e| e.to_string())?,asset.updated_at]).map_err(|e| e.to_string())?;
     }
     for job in &pending.jobs {
@@ -985,5 +1135,121 @@ mod export_preflight_tests {
         let mut legacy = json!({"project":{"name":"legacy"},"documents":{}});
         remap_storyboard(&mut legacy, &mut mapping).unwrap();
         assert!(legacy.get("storyboard").is_none());
+    }
+
+    fn continuity_manifest() -> Manifest {
+        let mut value = manifest(1, 1024);
+        value.files[0].mime_type = "image/png".into();
+        value.assets[0].kind = "image".into();
+        value.assets[0].role = "prop".into();
+        value.assets[0].versions[0].mime_type = "image/png".into();
+        value.workspace["storyboard"] = json!({"shots":[],"continuity":{"version":1,"entities":[{
+            "id":"raft","kind":"prop","defaultStateId":"intact","states":[
+                {"id":"intact","referenceVersionId":"v-0","referenceFingerprint":"42:shape","imageResultCheckpoint":{"jobId":"job-0","createdAt":"10"}},
+                {"id":"broken","basedOnStateId":"intact","referenceVersionId":"","imageResultCheckpoint":{"jobId":"deleted-job","createdAt":"11"}}
+            ]
+        }]}});
+        value
+    }
+
+    #[test]
+    fn continuity_pack_requires_real_images_and_unique_state_targets() {
+        let mut value = continuity_manifest();
+        assert!(validate_manifest(&value).is_ok());
+        let saved = value.workspace.clone();
+        value.workspace["storyboard"]["continuity"]["entities"][0]["states"][0]
+            ["referenceVersionId"] = json!("missing");
+        assert!(validate_manifest(&value).is_err());
+        value.workspace = saved.clone();
+        value.files[0].mime_type = "video/mp4".into();
+        value.assets[0].kind = "video".into();
+        value.assets[0].versions[0].mime_type = "video/mp4".into();
+        assert!(validate_manifest(&value).is_err());
+        value = continuity_manifest();
+        let mut duplicate = value.workspace["storyboard"]["continuity"]["entities"][0].clone();
+        duplicate["id"] = json!("other-raft");
+        value.workspace["storyboard"]["continuity"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(
+            validate_manifest(&value).is_err(),
+            "state targets must be unique across entities"
+        );
+    }
+
+    #[test]
+    fn continuity_import_preserves_identity_and_remaps_references_and_checkpoints() {
+        let mut value = continuity_manifest();
+        let mut mapping = HashMap::from([
+            ("v-0".into(), "new-image".into()),
+            ("job-0".into(), "new-job".into()),
+        ]);
+        remap_storyboard(&mut value.workspace, &mut mapping).unwrap();
+        let entity = &value.workspace["storyboard"]["continuity"]["entities"][0];
+        assert_eq!(entity["id"], "raft");
+        assert_eq!(entity["defaultStateId"], "intact");
+        assert_eq!(entity["states"][0]["id"], "intact");
+        assert_eq!(entity["states"][0]["referenceVersionId"], "new-image");
+        assert_eq!(entity["states"][0]["referenceFingerprint"], "42:shape");
+        assert_eq!(
+            entity["states"][0]["imageResultCheckpoint"]["jobId"],
+            "new-job"
+        );
+        assert_eq!(
+            entity["states"][0]["imageResultCheckpoint"]["createdAt"],
+            "10"
+        );
+        assert_eq!(entity["states"][1]["basedOnStateId"], "intact");
+        assert!(entity["states"][1].get("imageResultCheckpoint").is_none());
+    }
+
+    #[test]
+    fn restored_entity_jobs_keep_state_target_and_cannot_resume_remote_generation() {
+        let job: Job = serde_json::from_value(json!({
+            "id":"job-0","projectId":"old","targetId":"entity-intact","capability":"image","status":"completed",
+            "createdAt":"10","updatedAt":"10","remoteId":"remote-old","assetId":"a-0","error":null,
+            "request":{"projectId":"old","targetId":"entity-intact","capability":"image","prompt":"木筏", "references":[{"versionId":"v-0","role":"reference"}],
+                "connection":{"id":"conn","kind":"api","driverId":null,"baseUrl":"https://example.com/v1","model":"image-model","adapter":"openai-images"},
+                "parameters":{"mode":"generate","aspectRatio":"16:9","duration":5,"size":"1536x1024","quality":"high"},
+                "apiKey":"fixture-key","allowUserProfile":true,
+                "entity":{"entityId":"raft","stateId":"intact","kind":"prop","name":"木筏","stateName":"初始完整","definitionFingerprint":"42:shape"}}
+        })).unwrap();
+        let mut jobs = vec![job];
+        let mut mapping = HashMap::from([
+            ("job-0".into(), "new-job".into()),
+            ("a-0".into(), "new-asset".into()),
+            ("v-0".into(), "new-image".into()),
+        ]);
+        restore_jobs(&mut jobs, "new-project", &mut mapping).unwrap();
+        let restored = &jobs[0];
+        assert!(restored.restored);
+        assert_eq!(restored.status, "completed");
+        assert_eq!(restored.id, "new-job");
+        assert_eq!(restored.asset_id.as_deref(), Some("new-asset"));
+        assert_eq!(restored.project_id, "new-project");
+        assert_eq!(restored.target_id, "entity-intact");
+        assert_eq!(restored.request.target_id, "entity-intact");
+        assert_eq!(restored.request.entity.as_ref().unwrap().entity_id, "raft");
+        assert_eq!(restored.request.references[0].version_id, "new-image");
+        assert!(restored.request.validate_output().is_ok());
+        assert!(restored.remote_id.is_none());
+        assert!(restored.request.api_key.is_none());
+        assert!(!restored.request.allow_user_profile);
+        assert!(restored.request.connection.base_url.is_empty());
+    }
+
+    #[test]
+    fn entity_asset_target_survives_when_job_history_was_removed() {
+        let mut value = continuity_manifest();
+        let asset = &mut value.assets[0];
+        asset.versions[0].metadata = json!({"provenance":{"entity":{
+            "entityId":"raft","stateId":"intact","kind":"prop","name":"木筏","stateName":"初始完整","definitionFingerprint":"42:shape"
+        }}});
+        assert_eq!(restored_asset_target(asset, &[]).unwrap(), "entity-intact");
+        let mut conflicting = asset.versions[0].clone();
+        conflicting.metadata["provenance"]["entity"]["stateId"] = json!("broken");
+        asset.versions.push(conflicting);
+        assert!(restored_asset_target(asset, &[]).is_err());
     }
 }

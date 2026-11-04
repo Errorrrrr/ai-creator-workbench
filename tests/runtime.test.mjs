@@ -3,10 +3,10 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import {
-  createCliPrompt, handleCliGenerateRequest, handleRequest, isAllowedHost,
+  cliGenerationBudget, createCliPrompt, handleCliGenerateRequest, handleRequest, isAllowedHost,
   isAllowedStaticPath, isLoopbackUrl, readJsonBody, runCliProcess
 } from '../scripts/dev-server.mjs'
-import { antigravityInput, parseAntigravityOutput, antigravityExecutionError } from '../scripts/antigravity-protocol.mjs'
+import { ANTIGRAVITY_ARGS, antigravityInput, parseAntigravityOutput, antigravityExecutionError } from '../scripts/antigravity-protocol.mjs'
 
 function responseMock() {
   const response = new EventEmitter()
@@ -34,6 +34,46 @@ test('CLI rejects oversized or malformed messages instead of silently trimming',
   assert.throws(() => createCliPrompt([{ role: 'invalid', content: 'a' }]), { statusCode: 400 })
 })
 
+test('CLI grants extraction ten minutes and preserves the two-minute budget for other tasks', () => {
+  for (const purpose of [undefined, null, 'text', 'discussion', 'project-plan', 'scene-plan', 'storyboard']) assert.equal(cliGenerationBudget(purpose).timeoutMs, 120000)
+  assert.equal(cliGenerationBudget('asset-extraction').timeoutMs, 600000)
+  for (const purpose of ['', 'extract', 600000, {}, ['asset-extraction']]) assert.throws(() => cliGenerationBudget(purpose), { statusCode: 400 })
+})
+
+test('CLI request preserves scene-plan and extraction budgets and disables the competing Antigravity deadline', async () => {
+  for (const purpose of [undefined, 'scene-plan', 'asset-extraction']) {
+    const request = requestMock()
+    const response = responseMock()
+    let execution
+    const running = handleCliGenerateRequest(request, response, {
+      findExecutable: async () => '/mock/agy',
+      runCliProcess: async (_path, args, input, options) => {
+        execution = { args, input, options }
+        return JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: '正文' } })
+      }
+    })
+    request.emit('data', Buffer.from(JSON.stringify({ driverId: 'antigravity', purpose, allowUserProfile: true, messages: [{ role: 'user', content: 'mock only' }] })))
+    request.emit('end')
+    await running
+    assert.equal(response.statusCode, 200)
+    assert.equal(execution.options.timeoutMs, purpose === 'asset-extraction' ? 600000 : 120000)
+    assert.equal(execution.args[execution.args.indexOf('--print-timeout') + 1], '0')
+    assert.equal(JSON.parse(execution.input).event, 'user')
+  }
+})
+
+test('invalid CLI task purposes never reach executable lookup or launch', async () => {
+  const request = requestMock()
+  const response = responseMock()
+  let lookups = 0
+  const running = handleCliGenerateRequest(request, response, { findExecutable: async () => { lookups++; return null } })
+  request.emit('data', Buffer.from(JSON.stringify({ driverId: 'antigravity', purpose: 'unbounded', allowUserProfile: true })))
+  request.emit('end')
+  await running
+  assert.equal(response.statusCode, 400)
+  assert.equal(lookups, 0)
+})
+
 test('Host validation accepts exact local origins and rejects rebinding targets', () => {
   for (const host of ['127.0.0.1:4173', 'localhost:4173', '[::1]:4173']) assert.equal(isAllowedHost(host), true, host)
   for (const host of ['attacker.example:4173', 'localhost.attacker:4173', 'localhost:4174', 'localhost', 'localhost:4173/path', 'user@localhost:4173', undefined]) assert.equal(isAllowedHost(host), false, host)
@@ -46,7 +86,7 @@ test('Ollama URL validation accepts IPv6/custom ports without accepting remote o
 
 test('static allowlist excludes git, env, scripts, reports and nested/dot files', async () => {
   for (const path of ['/.git/HEAD', '/.env', '/src/.secret.js', '/src/nested/test.js', '/package.json', '/scripts/dev-server.mjs', '/specs/report.md', '/src/../.env']) assert.equal(isAllowedStaticPath(path), false)
-  for (const path of ['/index.html', '/src/app.js', '/src/styles.css', '/src/review-diff.css', '/src/candidate-drafts-ui.css', '/assets/app-icon.svg']) assert.equal(isAllowedStaticPath(path), true)
+  for (const path of ['/index.html', '/src/app.js', '/src/styles.css', '/src/review-diff.css', '/src/candidate-drafts-ui.css', '/src/continuity-ui.css', '/src/workbench-layout.css', '/src/media-layout.css', '/src/writing-preview.css', '/src/production-tools.css', '/assets/app-icon.svg']) assert.equal(isAllowedStaticPath(path), true)
   for (const url of ['/.git/HEAD', '/%2egit/HEAD', '/src/%2e%2e/%2egit/HEAD']) {
     const response = responseMock()
     await handleRequest({ method: 'GET', url, headers: { host: '127.0.0.1:4173' } }, response)
@@ -129,8 +169,8 @@ test('process cancellation and deadline kill a real isolated mock child', async 
   controller.abort()
   await assert.rejects(running, { statusCode: 499 })
   await assert.rejects(runCliProcess(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], '', {
-    driverId: 'claude', cwd: tmpdir(), timeoutMs: 30
-  }), { statusCode: 504 })
+    driverId: 'claude', cwd: tmpdir(), timeoutMs: 30, timeoutMessage: cliGenerationBudget('asset-extraction').timeoutMessage
+  }), { statusCode: 504, message: cliGenerationBudget('asset-extraction').timeoutMessage })
 })
 
 test('Antigravity protocol accepts one successful result and rejects ambiguous/malformed output', () => {
@@ -140,6 +180,10 @@ test('Antigravity protocol accepts one successful result and rejects ambiguous/m
   assert.throws(() => parseAntigravityOutput(`${success}\n${success}`), /多个结果/)
   assert.throws(() => parseAntigravityOutput('not-json'), /无效/)
   assert.throws(() => parseAntigravityOutput('{"event":"progress"}'), /完整结果/)
+  assert.equal(ANTIGRAVITY_ARGS[ANTIGRAVITY_ARGS.indexOf('--print-timeout') + 1], '0')
+  const timedOutSuccess = JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: '', duration_seconds: 0, num_turns: 1 } })
+  const unfinishedText = JSON.stringify({ event: 'step_update', step_update: { step_type: 'agent_response', status: 'ACTIVE', text_delta: '仅完成一部分' } })
+  assert.throws(() => parseAntigravityOutput(`${unfinishedText}\n${timedOutSuccess}`), /没有返回最终答复/)
 })
 
 test('Antigravity classifies region refusal from failed result without exposing diagnostics or reading response text', () => {

@@ -1,3 +1,4 @@
+mod continuity_export;
 mod credentials;
 mod export_location;
 mod media;
@@ -64,6 +65,7 @@ pub fn run() {
             media::media_import_bytes,
             media::media_update_asset,
             media::media_export_version,
+            continuity_export::media_export_continuity,
             video_export::media_export_flow,
             video_export::media_export_muse,
             video_export::media_export_selected_videos,

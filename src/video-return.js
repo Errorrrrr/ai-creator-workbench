@@ -22,7 +22,7 @@ function containsId(name, id) {
   return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i').test(name)
 }
 
-export function planVideoReturn({ shots, assets, manifest = null, documents = {} }) {
+export function planVideoReturn({ shots, assets, manifest = null, documents = {}, structure = {}, storyboard = {}, referenceAssets = assets }) {
   const manifestShots = manifest?.shots || []
   return assets.filter(asset => asset.kind === 'video').flatMap(asset => (asset.versions || []).filter(version => version.mimeType?.startsWith('video/')).map(version => {
     const name = version.name || asset.name
@@ -39,11 +39,11 @@ export function planVideoReturn({ shots, assets, manifest = null, documents = {}
     const source = manifestShots.find(item => item.id === shotId)
     const warnings = []
     const verifiable = Boolean(source?.inputFingerprint)
-    const outdated = Boolean(shot && verifiable && source.inputFingerprint !== shotInputFingerprint(shot, documents))
+    const outdated = Boolean(shot && verifiable && source.inputFingerprint !== shotInputFingerprint(shot, documents, { structure, storyboard, assets: referenceAssets }))
     if (!verifiable) warnings.push('缺少制作输入快照，无法校验导出后修改；请手动核对并勾选')
     if (outdated) {
-      const labels = { title: '标题', visual: '画面', action: '动作', dialogue: '对白', camera: '运镜', duration: '剧情时长', videoDuration: '生成时长', references: '参考图版本', selectedImageVersionId: '分镜图', sourceFingerprint: '来源剧本', characterNames: '角色', sceneNames: '场景', propNames: '道具', entryState: '进入状态', exitState: '结束状态', transition: '衔接', aspectRatio: '画幅', imageSize: '图片尺寸', imageQuality: '图片质量', videoMode: '生成模式', sourceDocumentId: '所属分场' }
-      const current = shotInputFieldFingerprints(shot, documents)
+      const labels = { sceneConstraints: '素材与分场状态承接', title: '标题', visual: '画面', action: '动作', dialogue: '对白', camera: '运镜', duration: '剧情时长', videoDuration: '生成时长', references: '参考图版本', selectedImageVersionId: '分镜图', sourceFingerprint: '来源剧本', characterNames: '角色', sceneNames: '场景', propNames: '道具', entryState: '进入状态', exitState: '结束状态', transition: '衔接', aspectRatio: '画幅', imageSize: '图片尺寸', imageQuality: '图片质量', videoMode: '生成模式', sourceDocumentId: '所属分场' }
+      const current = shotInputFieldFingerprints(shot, documents, { structure, storyboard, assets: referenceAssets })
       const changes = source.inputSnapshotVersion === 1 && source.inputSnapshot && typeof source.inputSnapshot === 'object' ? Object.keys(current).filter(key => current[key] !== source.inputSnapshot[key]).map(key => labels[key] || key) : []
       warnings.push(`导出后镜头已修改${changes.length ? `：${changes.join('、')}` : ''}；此视频需重新核对`)
     }

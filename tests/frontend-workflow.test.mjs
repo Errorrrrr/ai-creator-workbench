@@ -282,6 +282,7 @@ function nativeCloseHarness({ inspirationDirty = true } = {}) {
   }
   const context = vm.createContext({
     isDesktopRuntime: true, projectTransition: false, state: { candidateApplying: false, knowledgeBusy: false },
+    sceneContinuityUI: null, episodeScenesUI: null,
     activeProjectId: 'p1', listProjects: () => [{ id: 'p1' }], listArchivedProjects: () => [],
     requestAssetDraftDecision: async () => 'cancel',
     mediaWorkbench: { hasPendingWork: () => false, pendingAssetDraft: () => null },
@@ -317,6 +318,51 @@ test('原生关闭先等待灵感保存，再等待项目保存，两者成功�
   harness.projectSave.resolve(true)
   await pending
   assert.deepEqual(harness.events, ['prevent-close', 'inspiration-save', 'project-save', 'destroy'])
+})
+
+test('原生关闭等待保存时新增分场状态草稿，不销毁窗口', async () => {
+  const harness = nativeCloseHarness({ inspirationDirty: false })
+  let dirty = false
+  harness.context.sceneContinuityUI = { hasPendingWork: () => dirty }
+  const pending = harness.close()
+  await new Promise(setImmediate)
+  assert.ok(harness.events.includes('project-save'))
+  dirty = true; harness.projectSave.resolve(true)
+  await pending
+  assert.ok(!harness.events.includes('destroy'))
+})
+
+test('分场预览尚未确认时原生关闭先阻止退出，确认处理后可重新发起关闭', async () => {
+  const h = nativeCloseHarness({ inspirationDirty: false })
+  let dirty = true
+  const draft = { title: '尚未确认的分场', content: '这段预览需要保留。' }, before = structuredClone(draft)
+  h.context.episodeScenesUI = { hasPendingWork: () => dirty }
+  await h.close()
+  assert.ok(h.events.some(event => /toast:分场预览有未保存修改/.test(event)))
+  assert.ok(!h.events.includes('project-save'))
+  assert.ok(!h.events.includes('destroy'))
+  assert.deepEqual(draft, before)
+  dirty = false
+  const retry = h.close()
+  await new Promise(setImmediate)
+  assert.ok(h.events.includes('project-save'), '处理预览后关闭锁已释放，可再次保存')
+  h.projectSave.resolve(true); await retry
+  assert.equal(h.events.filter(event => event === 'destroy').length, 1)
+})
+
+test('原生关闭异步保存期间新增分场预览修改，最终复查保护草稿且不销毁窗口', async () => {
+  const h = nativeCloseHarness({ inspirationDirty: false })
+  let draft = null
+  h.context.episodeScenesUI = { hasPendingWork: () => Boolean(draft) }
+  const closing = h.close()
+  await new Promise(setImmediate)
+  assert.ok(h.events.includes('project-save'))
+  draft = { title: '保存期间新增的场次', content: '尚未确认追加的剧本。' }
+  const before = structuredClone(draft)
+  h.projectSave.resolve(true); await closing
+  assert.ok(!h.events.includes('destroy'))
+  assert.deepEqual(draft, before)
+  assert.equal(h.context.episodeScenesUI.hasPendingWork(), true)
 })
 
 test('原生关闭遇到灵感保存失败，留在灵感页且不保存项目或销毁窗口', async () => {

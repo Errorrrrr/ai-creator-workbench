@@ -1,6 +1,7 @@
 import { deserializeKnowledgeIndex } from './knowledge-index.js'
 import { pruneSemanticIndex } from './semantic-search.js'
 import { validateCandidateDrafts } from './candidate-drafts.js'
+import { validateSceneContinuity } from './scene-continuity.js'
 
 import { validateStoryboard, normalizeWorkflow } from './storyboard.js'
 
@@ -67,6 +68,7 @@ export function validateWorkspace(workspace, index = null) {
   for (const [id, doc] of Object.entries(workspace.documents)) {
     assert(/^[a-zA-Z0-9_-]+$/.test(id) && object(doc) && typeof doc.content === 'string', '文档内容无效')
     validateStringFields(doc, ['title', 'sceneTitle', 'intent', 'breadcrumb', 'badge', 'kicker', 'mode'], '文档属性格式无效')
+    if (doc.sceneContinuity !== undefined) validateSceneContinuity(doc.sceneContinuity)
     for (const field of ['meta', 'labels']) assert(doc[field] === undefined || (Array.isArray(doc[field]) && doc[field].every(item => typeof item === 'string')), '文档标签格式无效')
   }
   assert(workspace.currentDocId == null || own(workspace.documents, workspace.currentDocId), '当前文档引用无效')
@@ -529,6 +531,9 @@ function restorePortableProject(project) {
       shot.selectedImageVersionId = ''; shot.selectedVideoVersionId = ''; shot.reviewedVideoVersionId = ''
       delete shot.reviewedInputFingerprint
     }
+  }
+  for (const entity of copy.workspace.storyboard?.continuity?.entities || []) for (const state of entity.states) {
+    state.referenceVersionId = ''; state.referenceFingerprint = ''; delete state.imageResultCheckpoint
   }
   return copy
 }

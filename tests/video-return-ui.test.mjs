@@ -49,7 +49,7 @@ function harness() {
     { id: 'old', name: '原视频.mp4', kind: 'video', versions: [{ id: 'old-v', name: '原视频.mp4', mimeType: 'video/mp4' }] },
     { id: 'new', name: 'video-s1.mp4', kind: 'video', versions: [{ id: 'new-v', name: 'video-s1.mp4', mimeType: 'video/mp4' }] }
   ]
-  const calls = { messages: [], commits: [], routes: [], sources: [], stages: [], imports: [] }
+  const calls = { messages: [], commits: [], routes: [], sources: [], stages: [], details: [], imports: [] }
   const env = {
     document, el, Option: class extends Node { constructor(text, value) { super('option', '', text); this.value = value } },
     parseVideoManifest, planVideoReturn, applyVideoReturn,
@@ -57,10 +57,11 @@ function harness() {
     storyboardView: el('section'), assetsView: el('section'), characterDialog: el('dialog'),
     elements: { connectionDialog: { open: false } }, state: { isGenerating: false },
     requireProject() {}, desktop() {}, refresh: async () => {}, notify: message => calls.messages.push(message),
-    updateBatchConfirmation() {}, renderSources() {}, renderGenerationReadiness() {}, scheduleReferenceSync() {},
+    updateBatchConfirmation() {}, renderSources() {}, renderGenerationReadiness() {}, refreshPictureReview() {}, scheduleReferenceSync() {},
     invoke: async (command, args) => { calls.imports.push({ command, args }); return [assets[1]] },
     commit: async (patch, options) => { calls.commits.push({ patch, options }); data.storyboard = patch.storyboard },
     navigate: view => calls.routes.push(view), showSource: id => calls.sources.push(id), showStage: stage => calls.stages.push(stage),
+    openShotDetail: (id, panel) => calls.details.push({ id, panel }), mediaStage: 'storyboard',
     selectedShotId: '', selectedEpisodeId: '', selectedSourceId: '', lastContextDocId: null, OTHER_EPISODE: 'other', UNASSIGNED_SOURCE: 'unassigned', closeDrawers() {}
   }
   vm.createContext(env)
@@ -158,6 +159,8 @@ test('回填保存失败保持旧选用及审核，保留窗口可重试；成�
   assert.deepEqual(h.data.storyboard, before)
   assert.equal(h.dialog().open, true)
   assert.equal(h.calls.routes.length, 0)
+  assert.equal(h.calls.details.length, 0)
+  assert.equal(h.env.mediaStage, 'storyboard')
   assert.equal(h.action('确认关联选中的视频').disabled, false)
   h.env.commit = successfulCommit
   const dialog = h.dialog(); await h.action('确认关联选中的视频').click()
@@ -167,7 +170,10 @@ test('回填保存失败保持旧选用及审核，保留窗口可重试；成�
   assert.equal(h.calls.commits[0].options.atomic, true)
   assert.equal(h.calls.commits[0].options.projectId, 'p1')
   assert.equal(dialog.isConnected, false)
-  assert.deepEqual(h.calls.routes, ['storyboard']); assert.deepEqual(h.calls.sources, ['scene1']); assert.deepEqual(h.calls.stages, ['export'])
+  assert.deepEqual(h.calls.routes, ['storyboard']); assert.deepEqual(h.calls.sources, ['scene1'])
+  assert.equal(h.env.mediaStage, 'videos')
+  assert.deepEqual(h.calls.details, [{ id: 's1', panel: 'versions' }], 'open the returned video for playback and review')
+  assert.deepEqual(h.calls.stages, [], 'returning videos does not open the export menu')
 })
 
 test('清单读取期间项目切换，不产生未处理异常或启用旧项目确认', async () => {

@@ -380,7 +380,16 @@ export function readCodexConfiguredModel(executablePath, cwd, signal) {
   })
 }
 
-export function runCliProcess(executablePath, args, input, { driverId, cwd, signal, timeoutMs = 120000, maxOutputBytes = 1024 * 1024 } = {}) {
+export function cliGenerationBudget(purpose) {
+  if (purpose != null && !['text', 'discussion', 'project-plan', 'scene-plan', 'storyboard', 'asset-extraction'].includes(purpose)) {
+    throw Object.assign(new Error('CLI 创作任务类型无效；未提交生成'), { statusCode: 400 })
+  }
+  return purpose === 'asset-extraction'
+    ? { timeoutMs: 600000, timeoutMessage: 'CLI 素材提取已超过 10 分钟，已停止执行；请减少本次分场数量后重试' }
+    : { timeoutMs: 120000, timeoutMessage: 'CLI 生成已超过 2 分钟，已停止执行；请缩小本次创作范围后重试' }
+}
+
+export function runCliProcess(executablePath, args, input, { driverId, cwd, signal, timeoutMs = 120000, timeoutMessage = 'CLI 生成超时', maxOutputBytes = 1024 * 1024 } = {}) {
   return new Promise((resolveProcess, rejectProcess) => {
     if (signal?.aborted) { rejectProcess(cancelledError()); return }
     const child = spawn(executablePath, args, {
@@ -445,7 +454,7 @@ export function runCliProcess(executablePath, args, input, { driverId, cwd, sign
       const output = Buffer.concat(stdout).toString('utf8').trim()
       const diagnostics = Buffer.concat(stderr).toString('utf8').trim()
       if (timedOut) {
-        rejectProcess(Object.assign(new Error('CLI 生成超时'), { statusCode: 504 }))
+        rejectProcess(Object.assign(new Error(timeoutMessage), { statusCode: 504 }))
       } else if (signal?.aborted) {
         rejectProcess(Object.assign(new Error('CLI 生成已取消'), { statusCode: 499 }))
       } else if (outputBytes > maxOutputBytes) {
@@ -495,6 +504,7 @@ export async function handleCliGenerateRequest(request, response, dependencies =
     assertConnected()
     const payload = await readJsonBody(request, 128 * 1024, controller.signal)
     assertConnected()
+    const budget = cliGenerationBudget(payload.purpose)
     if (['antigravity', 'codex', 'claude'].includes(payload.driverId) && payload.allowUserProfile !== true) throw Object.assign(new Error('请先确认本次 CLI 调用的登录态与上下文使用'), { statusCode: 403 })
     const driver = cliDrivers.find((item) => item.id === payload.driverId && item.generateArgs)
     if (!driver) throw Object.assign(new Error('该 CLI 未在受控驱动列表中'), { statusCode: 400 })
@@ -519,7 +529,8 @@ export async function handleCliGenerateRequest(request, response, dependencies =
     let output = await executeCli(executablePath, args, driver.id === 'antigravity' ? antigravityInput(prompt) : prompt, {
       cwd: runDirectory,
       driverId: claudeLogin ? 'claude-login' : driver.id,
-      signal: controller.signal
+      signal: controller.signal,
+      ...budget
     })
     assertConnected()
     if (driver.id === 'codex') {
@@ -686,7 +697,7 @@ export async function handleRequest(request, response) {
 }
 
 export function isAllowedStaticPath(path) {
-  return path === '/index.html' || ['/src/styles.css', '/src/review-diff.css', '/src/candidate-drafts-ui.css'].includes(path) || /^\/src\/[a-zA-Z0-9_-]+\.js$/.test(path) || path === '/assets/app-icon.svg'
+  return path === '/index.html' || ['/src/visual-review.css', '/src/styles.css', '/src/review-diff.css', '/src/candidate-drafts-ui.css', '/src/workbench-layout.css', '/src/media-layout.css', '/src/writing-preview.css', '/src/production-tools.css', '/src/continuity-ui.css'].includes(path) || /^\/src\/[a-zA-Z0-9_-]+\.js$/.test(path) || path === '/assets/app-icon.svg'
 }
 
 export function createDevServer() {

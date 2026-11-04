@@ -1,7 +1,16 @@
+import { initializeContinuityUI } from './continuity-ui.js'
+import { sceneContinuityContext } from './scene-continuity.js'
+import { isSceneDocument } from './episode-scenes.js'
+import { createVisualReviewUI } from './visual-review-ui.js'
+import { imageVisualReviewState, makeVisualReview, visualInputFingerprint, visualInputSnapshot, visualBaselineText } from './visual-review.js'
+import { entityExtractionPrompt, normalizeContinuity, planEntityImageResults, resolveEntityState } from './continuity-assets.js'
+import { continuityReadiness } from './continuity-linking.js'
+import { prepareEntityRequest } from './continuity-request.js'
 import { candidateGeneratedAtLabel } from './candidate-drafts.js'
 import { buildFlowExport, buildMuseExport } from './video-export.js'
+import { buildContinuityExport } from './continuity-export.js'
 import { parseVideoManifest, planVideoReturn, applyVideoReturn } from './video-return.js'
-import { shotStagePanel, shotReadiness } from './shot-workflow.js'
+import { shotStagePanel, shotReadiness, shotImageReadiness, storyboardNextAction } from './shot-workflow.js'
 import { ASSET_ROLES, JOB_STATUSES, SHOT_LIMIT, contentFingerprint, storyboardSourceFingerprint, createShot, findMediaVersion, isContinuityReference, prepareShotInputs, videoParameterState, validateVideoParameters, jobResult, mediaPrompt, parseStoryboardCandidate, resolveConnectionRoute, shotIsStale, storyboardPrompt, supportsCapability, snapshotStoryboardSource, shotInputFingerprint, videoReviewState } from './storyboard.js'
 import { mediaAdapterFor, useMediaAdapterCatalog } from './media-adapters.js'
 import { biographyCharacters, characterImagePrompt, characterTargetId, prepareCharacterRequest } from './character-images.js'
@@ -71,7 +80,7 @@ function mediaTimeLabel(value) {
 const terminal = status => ['completed', 'failed', 'cancelled', 'submission_unknown'].includes(status)
 const BATCH_LIMIT = 20
 
-export function initializeMediaWorkbench({ getContext, commit, invoke, secret, requestText, stopText, notify, navigate, openDocument, importPackage, portableProject, beforeSubmit, openSavedCandidates, onCandidateChange, onCandidateResolved }) {
+export function initializeMediaWorkbench({ getContext, commit, invoke, secret, requestText, stopText, notify, navigate, openDocument, openSceneContinuity, organizeScenes, importPackage, portableProject, beforeSubmit, openSavedCandidates, onCandidateChange, onCandidateResolved }) {
   let assets = [], jobs = [], recoveryIssues = [], projectId = null, selectedShotId = null, selectedAssetId = null
   let loading = false, error = '', requestSequence = 0, candidate = null, selectedSourceId = ''
   const storyboardTasks = createStoryboardTasks()
@@ -83,7 +92,8 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   const assetCards = new Map()
   let resultVersionId = ''
   let detailShotId = null
-  let detailPanel = 'content', mediaStage = 'storyboard'
+  let detailPanel = 'picture', mediaStage = 'storyboard', shotDetailOpen = false
+  const pictureNotes = new Map()
   let draggingShotId = null
   let batchPlan = null, batchSelection = new Set()
   let batchSceneSelection = new Set(), batchExplicitIds = null, batchOwner = null
@@ -105,11 +115,11 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   batchDialog.querySelector('[data-media-batch-clear]').addEventListener('click', () => { batchSelection.clear(); renderBatchSelection(); invalidateBatchPlan() })
   const storyboardView = $('#storyboardView'), assetsView = $('#assetsView'), jobsDialog = $('#mediaJobsDialog')
   const sourceSelect = el('select'), episodeSelect = el('select'), presetSelect = el('select')
-  sourceSelect.setAttribute('aria-label', '分场与查看范围')
-  episodeSelect.setAttribute('aria-label', '分镜所属分集')
-  sourceSelect.addEventListener('change', () => { selectedSourceId = sourceSelect.value; renderSources(); renderShots(); renderCandidate() })
+  sourceSelect.setAttribute('aria-label', '本集分场与镜头范围')
+  episodeSelect.setAttribute('aria-label', '当前分集')
+  sourceSelect.addEventListener('change', () => { selectedSourceId = sourceSelect.value; shotDetailOpen = false; renderSources(); renderShots(); renderCandidate() })
   episodeSelect.addEventListener('change', () => {
-    selectedEpisodeId = episodeSelect.value
+    selectedEpisodeId = episodeSelect.value; shotDetailOpen = false
     selectedSourceId = storyboardGroups(context()).find(group => group.id === selectedEpisodeId)?.sceneIds[0] || ''
     renderSources(); renderShots(); renderCandidate()
   })
@@ -128,14 +138,29 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   workflow.append(el('p', 'media-help', '步骤可以跳过或回退；切换执行端不会清空内容或发起生成。图片、视频使用所选资源的真实能力。'))
 
   const shotActions = el('div', 'media-toolbar media-workbench-toolbar')
-  const generateButton = button('AI 拆镜', generateStoryboard, 'primary-button'), addShotButton = button('新建镜头', addShot)
-  const wholeEpisodeButton = button('查看全集', () => { selectedSourceId = ''; renderSources(); renderShots(); renderCandidate() })
+  const generateButton = button('AI 拆镜', generateStoryboard), addShotButton = button('新建镜头', addShot)
+  const wholeEpisodeButton = button('本集总览', () => { selectedSourceId = ''; shotDetailOpen = false; renderSources(); renderShots(); renderCandidate() })
+  const organizeScenesButton = button('整理本集分场', () => organizeScenes?.({ episodeId: selectedEpisodeId === OTHER_EPISODE ? null : selectedEpisodeId, sourceId: selectedSourceId }))
+  const assignShotsButton = button('将待归场镜头归入分场', () => {
+    const data = context(), shotIds = visibleShots(data).filter(shot => !isSceneDocument(data, shot.sourceDocumentId)).map(shot => shot.id)
+    if (shotIds.length) organizeScenes?.({ episodeId: selectedEpisodeId === OTHER_EPISODE ? null : selectedEpisodeId, sourceId: selectedSourceId, shotIds })
+  })
+  const openScriptButton = button('回到本场剧本', () => {
+    const data = context(), documentId = isSceneDocument(data, selectedSourceId) ? selectedSourceId : selectedEpisodeId
+    if (data.documents[documentId]) openDocument?.(documentId)
+  })
+  const hierarchyBreadcrumb = el('nav', 'media-hierarchy-breadcrumb')
+  hierarchyBreadcrumb.setAttribute('aria-label', '集、分场与分镜位置')
   const scopeControls = el('div', 'media-scope-controls'), primaryActions = el('div', 'media-primary-actions')
-  scopeControls.append(field('分集', episodeSelect), field('分场', sourceSelect), wholeEpisodeButton)
-  primaryActions.append(generateButton, button('多场批量生图', () => openBatchPlan({ capability: 'image', scope: 'scenes' })), actionMenu('导出', [button('已选视频包（当前范围）', exportSelectedVideos), button('Google Flow 素材包', exportFlow), button('Muse 聊天素材包', exportMuse), button('导出单个分场…', openSceneExport)]), button('顺序连播', playSelectedVideos), button('回填外部视频', openVideoReturn), button('任务中心', showJobs), actionMenu('更多', [addShotButton, button('批量生成计划', () => openBatchPlan()), button('分镜历史版本', showStoryboardVersions), button('查看历史候选', () => openSavedCandidates?.())]))
-  shotActions.append(scopeControls, primaryActions)
+  scopeControls.append(field('集', episodeSelect), field('分场', sourceSelect))
+  const nextActionButton = button('继续制作', continueStoryboard, 'primary-button storyboard-next-action')
+  const exportMenu = actionMenu('导出', [button('Google Flow 素材包', exportFlow), button('Muse 聊天素材包', exportMuse), button('导出单个分场…', openSceneExport), button('已选视频包（当前范围）', exportSelectedVideos)])
+  const moreMenu = actionMenu('更多', [openScriptButton, wholeEpisodeButton, generateButton, addShotButton, organizeScenesButton, assignShotsButton, button('多场批量生图', () => openBatchPlan({ capability: 'image', scope: 'scenes' })), button('批量生成计划', () => openBatchPlan()), button('顺序连播', playSelectedVideos), button('回填外部视频', openVideoReturn), button('分镜历史版本', showStoryboardVersions), button('查看历史候选', () => openSavedCandidates?.())])
+  primaryActions.append(nextActionButton, exportMenu, button('任务中心', showJobs), moreMenu)
+  shotActions.append(hierarchyBreadcrumb, scopeControls, primaryActions)
   const storyboardHelp = disclosure('分镜使用说明', '', 'media-help-disclosure')
-  storyboardHelp.append(el('p', 'media-help', '选择分场后点击 AI 拆镜，完成后自动保存镜头并关联角色、场景和道具参考图。后续补图也会补齐关联，保留手动选择与固定版本。常规导出使用当前查看范围；也可单场导出，或跨集选择多个分场批量生图。'))
+  storyboardHelp.append(el('p', 'media-help', '按集 → 分场 → 分镜推进：先整理本集分场，确认本场剧本后再 AI 拆镜。拆镜完成后保存到当前分场，并关联角色、场景和道具参考图。旧镜头及选用图片视频保留；待归场镜头可查看、制作与导出，确认所属分场后再归入。常规导出使用当前查看范围。'))
+  moreMenu.querySelector('.media-action-menu-panel').append(button('分镜使用说明', () => { storyboardHelp.open = !storyboardHelp.open }))
   storyboardView.querySelector('.media-view-content').append(shotActions)
   const storyboardTaskHost = el('section', 'storyboard-task-status')
   storyboardTaskHost.setAttribute('aria-label', '分场拆镜任务进度')
@@ -144,6 +169,15 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   candidateHost.hidden = true
   const shotList = el('div', 'shot-list'), shotDetail = el('section', 'shot-detail')
   shotDetail.setAttribute('aria-label', '镜头详情')
+  shotDetail.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !document.querySelector('dialog[open]')) { event.preventDefault(); event.stopPropagation(); closeShotDetail() }
+  })
+  bindShotDetailFocus()
+  const pictureZoom = el('dialog', 'app-dialog visual-review-zoom')
+  pictureZoom.setAttribute('aria-label', '放大查看分镜图片')
+  const pictureZoomBody = el('div', 'visual-review-zoom-body')
+  pictureZoom.append(button('关闭图片', () => pictureZoom.close()), pictureZoomBody)
+  document.body.append(pictureZoom)
   shotBody.append(shotList, shotDetail)
   const storyboardNotices = el('div', 'media-workspace-notices')
   storyboardNotices.append(storyboardHelp, storyboardTaskHost, shotStatus, candidateHost)
@@ -156,7 +190,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   Object.entries(ASSET_ROLES).forEach(([value, text]) => roleFilter.append(new Option(text, value)))
   roleFilter.addEventListener('change', renderAssets)
   const assetActions = el('div', 'media-primary-actions')
-  assetActions.append(button('生成角色图', openCharacterImages, 'primary-button'), button('导入图片／视频', chooseImport), button('任务中心', showJobs), actionMenu('更多', [button('导出完整项目包', exportPackage), button('导入项目包', restorePackage), button('恢复待完成导入', showPendingImports)]))
+  assetActions.append(button('人物·场景·物品设定', () => continuityUI.open(), 'primary-button'), button('导入图片／视频', chooseImport), button('任务中心', showJobs), actionMenu('更多', [button('人物小传快速生图', openCharacterImages), button('导出完整项目包', exportPackage), button('导入项目包', restorePackage), button('恢复待完成导入', showPendingImports)]))
   assetToolbar.append(field('素材用途', roleFilter), assetActions)
   const pendingHost = el('section', 'media-pending-imports'); pendingHost.hidden = true
   const assetNotice = el('p', 'media-notice'), assetGrid = el('div', 'asset-grid'), assetDetail = el('section', 'asset-detail')
@@ -167,14 +201,66 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     else showSource(documentId)
     if (shotId) selectedShotId = shotId
     lastContextDocId = context().currentDocId
-    navigate('storyboard'); renderSources(); showStage(stage === 'content' || stage === 'references' ? 'storyboard' : stage)
-    if (stage === 'references') selectDetailPanel('references', { focus: true })
+    navigate('storyboard'); renderSources(); showStage(stage === 'content' || stage === 'references' ? 'storyboard' : stage === 'visual-review' ? 'images' : stage)
+    if (stage === 'references' || stage === 'content') openShotDetail(selectedShotId, stage)
+    if (stage === 'export' && shotId) { exportMenu.open = false; openShotDetail(shotId, 'versions') }
+    if (stage === 'visual-review') visualReviewUI.open({ shotId })
   }
   const productionOverview = createProductionOverview({ getContext: context, getAssets: () => assets, getJobs: () => jobs, onSelectScene: focusProductionScene })
-  primaryActions.append(button('制作进度', () => productionOverview.open()))
+  moreMenu.querySelector('.media-action-menu-panel').append(button('素材设定', () => continuityUI.open()), button('分场状态', () => { const id = sourceSelect.value; if (!isSceneDocument(context(), id)) return notify('请先选择一个具体分场'); openSceneContinuity?.(id) }), button('视觉复核', () => visualReviewUI.open()), button('制作进度', () => productionOverview.open()))
+  const visualReviewUI = createVisualReviewUI({
+    getContext: context, getAssets: () => assets, getShots: () => visibleShots(context()), preview, notify,
+    onOpenBaseline: () => continuityUI.open({ baseline: true }),
+    onSelectShot: shotId => { const shot = context().storyboard.shots.find(item => item.id === shotId); if (shot) focusProductionScene(shot.sourceDocumentId, { shotId, stage: 'images' }) },
+    onReview: saveVisualReview
+  })
   const assetLibraryTools = createAssetLibraryTools({ getAssets: () => assets, getContext: context, onFilterChange: renderAssets, onReset: () => { roleFilter.value = '' }, onSelectShot: (shotId) => { const shot = context().storyboard.shots.find(item => item.id === shotId); if (shot) focusProductionScene(context().documents[shot.sourceDocumentId] ? shot.sourceDocumentId : UNASSIGNED_SOURCE, { shotId }) }, preview })
   assetNotice.setAttribute('role', 'status')
   assetsView.querySelector('.media-view-content').append(assetToolbar, assetLibraryTools.element, pendingHost, assetNotice, assetBody)
+  const continuityUI = initializeContinuityUI({
+    getContext: context, getAssets: () => assets, getJobs: () => jobs, notify,
+    preview: versionId => previewVersion(versionId), stopExtraction: stopText, exportBundle: exportContinuity,
+    save: async (nextContinuity, options) => {
+      const data = context()
+      if (data.projectId !== options.projectId || data.storyboard.revision !== options.revision) throw new Error('项目或素材已有修改，请重新读取后保存')
+      const next = planReferenceBackfill({ ...data.storyboard, continuity: normalizeContinuity(nextContinuity) }, assets, data.documents, data.projectId).storyboard
+      next.revision = data.storyboard.revision + 1
+      await commit({ storyboard: next }, { ...options, atomic: true })
+      renderShots(); refreshReferenceDetails(); visualReviewUI.refresh(); scheduleReferenceSync()
+    },
+    requestExtraction: async ({ sourceDocumentIds }) => {
+      requireProject()
+      const data = context(), route = resolveConnectionRoute(data, 'text')
+      if (!route.connection) throw new Error(route.error)
+      if (data.textGenerating || storyboardTasks.active()) throw new Error('已有 AI 任务正在执行，请等待或停止后再提取')
+      const prompt = entityExtractionPrompt({ documents: data.documents, sourceDocumentIds, continuity: normalizeContinuity(data.storyboard.continuity) })
+      if (prompt.length > 200000) throw new Error('本次分场和已有设定内容过多，请减少选择的分场后提取')
+      const sourceFingerprints = Object.fromEntries(sourceDocumentIds.map(id => [id, contentFingerprint(data.documents[id]?.content || '')]))
+      const started = await requestText(prompt, { purpose: 'asset-extraction', documentId: sourceDocumentIds[0], sourceDocumentIds, sourceFingerprints, sourceFingerprint: sourceFingerprints[sourceDocumentIds[0]], storyboardRevision: data.storyboard.revision, connectionId: route.connection.id })
+      if (!started) throw new Error('提取任务未启动，请检查执行端和上方提示')
+      return started
+    },
+    generateReference: async (entityId, stateId) => {
+      desktop(); const owner = context().projectId
+      await requireAdapterCatalog()
+      if (owner !== context().projectId) throw new Error('项目已切换，请在目标项目重新生成设定图')
+      const data = context()
+      const request = prepareEntityRequest(data, assets, entityId, stateId), signature = JSON.stringify(request)
+      const assertCurrent = () => {
+        if (owner !== context().projectId || signature !== JSON.stringify(prepareEntityRequest(context(), assets, entityId, stateId))) throw new Error('素材设定或图片执行端已变化，请重新核对后生成')
+        if (loading || error) throw new Error('素材和任务尚未读取完成，请稍后重试')
+        if (jobs.some(job => job.targetId === request.targetId && !terminal(job.status))) throw new Error('该状态正在生成，请等待任务完成后再试')
+      }
+      assertCurrent(); await beforeSubmit?.(); assertCurrent()
+      const connection = connectionFor('image'), apiKey = connection.kind === 'cli' ? null : await secret(connection)
+      assertCurrent()
+      if (connection.kind !== 'cli' && !apiKey) throw new Error('请到连接中心配置图片执行端密钥')
+      const job = await invoke('media_submit', { request: { ...request, apiKey: apiKey || null } })
+      if (owner === context().projectId) { jobs = [job, ...jobs.filter(item => item.id !== job.id)]; await refresh() }
+      notify('设定图任务已提交，完成后自动关联此状态及对应分镜，旧图片仍保留')
+      return job
+    }
+  })
   const jobsList = jobsDialog.querySelector('.media-jobs-list')
   jobsDialog.querySelector('[data-media-refresh]').addEventListener('click', () => refresh())
   jobsDialog.querySelector('[data-media-close]').addEventListener('click', () => jobsDialog.close())
@@ -273,7 +359,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (characterDialog.open) renderCharacterPreview()
   }
 
-  function context() { return getContext() }
+  function context() { return { ...getContext(), assets } }
   async function loadAdapterCatalog() {
     const status = $('#mediaAdapterStatus'), list = $('#mediaAdapterList')
     if (!invoke) { status.textContent = '浏览器仅展示配置；实际协议目录与生成需在桌面版使用。'; return }
@@ -316,7 +402,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     storyboardView.setAttribute('aria-busy', 'true'); assetsView.setAttribute('aria-busy', 'true')
     try { return await action() }
     catch (problem) { notify(String(problem?.message || problem)) }
-    finally { operationBusy = false; controls.forEach(node => { if (node.isConnected) node.disabled = false }); updateBatchConfirmation(); if (characterDialog.open) renderCharacterPreview(); storyboardView.removeAttribute('aria-busy'); assetsView.removeAttribute('aria-busy'); renderSources(); renderGenerationReadiness(); scheduleReferenceSync() }
+    finally { operationBusy = false; controls.forEach(node => { if (node.isConnected) node.disabled = false }); updateBatchConfirmation(); if (characterDialog.open) renderCharacterPreview(); storyboardView.removeAttribute('aria-busy'); assetsView.removeAttribute('aria-busy'); renderSources(); renderGenerationReadiness(); refreshPictureReview(); scheduleReferenceSync() }
   }
   function desktop() { if (!invoke) throw new Error('媒体文件、CLI 生成与项目包请在桌面版使用；分镜和文字仍可编辑') }
   async function requireAdapterCatalog() {
@@ -324,11 +410,22 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (!adapterCatalogReady) throw new Error('媒体协议目录尚未就绪；未提交生成，请重新打开桌面应用')
   }
   function requireProject() { if (!context().projectId) throw new Error('请先创建或打开项目') }
-  async function changeStoryboard(transform, { immediate = true, resolvedCandidateId = null } = {}) {
+  async function changeStoryboard(transform, { immediate = true, resolvedCandidateId = null, atomic = false } = {}) {
     const data = context(), next = structuredClone(data.storyboard)
     transform(next.shots, next)
     next.revision += 1
-    await commit({ storyboard: next }, { projectId: data.projectId, revision: data.storyboard.revision, immediate, ...(resolvedCandidateId ? { resolvedCandidateId } : {}) })
+    await commit({ storyboard: next }, { projectId: data.projectId, revision: data.storyboard.revision, immediate, ...(atomic ? { atomic: true } : {}), ...(resolvedCandidateId ? { resolvedCandidateId } : {}) })
+  }
+  async function saveVisualReview(shotId, decision, expected) {
+    const data = context()
+    if (loading || error || projectId !== data.projectId) throw new Error('素材尚未读取完成，请稍后复核')
+    if (data.projectId !== expected.projectId) throw new Error('项目已切换，未保存复核')
+    await changeStoryboard(shots => {
+      const shot = shots.find(item => item.id === shotId)
+      if (!shot || shot.selectedImageVersionId !== expected.imageVersionId || visualInputFingerprint(shot, assets, data.documents, data.storyboard.continuity, data) !== expected.fingerprint) throw new Error('图片或参考基准已变化，请重新核对后保存')
+      shot.visualReview = makeVisualReview(shot, assets, data.documents, data.storyboard.continuity, decision, data)
+    }, { atomic: true })
+    renderShots({ detail: false }); refreshReferenceDetails(); productionOverview.refresh()
   }
   async function updateWorkflow(patch) {
     try {
@@ -373,15 +470,57 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     shotResourceStatus.textContent = `图片：${image.connection?.name || image.error}；视频：${video.connection?.name || video.error}。${constraints.length ? ` ${constraints.join(' ')}` : ''}`
   }
   function visibleShots(data = context()) { return scopedShots(data, selectedEpisodeId, selectedSourceId) }
+  function nextStoryboardAction() {
+    const data = context()
+    return storyboardNextAction({ shots: visibleShots(data), assets, jobs, documents: data.documents, continuity: data.storyboard.continuity, context: data, sceneSelected: isSceneDocument(data, selectedSourceId) })
+  }
+  function renderNextAction() {
+    const action = nextStoryboardAction()
+    nextActionButton.textContent = loading ? '正在读取素材…' : error ? '重新读取素材' : action.label
+    nextActionButton.disabled = !context().projectId || loading || operationBusy || (action.kind === 'storyboard' && generateButton.disabled) || (action.kind === 'scenes' && (!organizeScenes || organizeScenesButton.disabled))
+  }
+  function continueStoryboard() {
+    if (loading || operationBusy) return
+    if (error) return refresh()
+    const action = nextStoryboardAction()
+    if (action.kind === 'storyboard') return generateStoryboard()
+    if (action.kind === 'scenes') return organizeScenes?.({ episodeId: selectedEpisodeId === OTHER_EPISODE ? null : selectedEpisodeId, sourceId: selectedSourceId })
+    if (action.kind === 'jobs') return showJobs()
+    if (action.kind === 'images') return openBatchPlan({ capability: 'image', shotIds: action.shotIds, projectId: context().projectId })
+    if (action.kind === 'review') return openShotDetail(action.shotId)
+    exportMenu.open = true; exportMenu.querySelector('summary').focus()
+  }
+  function openShotDetail(id, panel = 'picture') {
+    if (!visibleShots().some(shot => shot.id === id)) return
+    selectedShotId = id; shotDetailOpen = true; detailPanel = panel
+    renderShots()
+    selectDetailPanel(panel, { focus: true })
+  }
+  function closeShotDetail() {
+    shotDetailOpen = false
+    renderShots()
+    const control = [...shotList.querySelectorAll('[data-shot-focus]')].find(node => node.dataset.shotFocus === `${selectedShotId}:select`)
+    control?.focus({ preventScroll: true }); control?.scrollIntoView({ block: 'nearest' })
+  }
   function selectDocument(documentId) {
     const scope = scopeForDocument(context(), documentId)
     if (!scope) return
-    selectedEpisodeId = scope.episodeId; selectedSourceId = scope.sourceId; lastContextDocId = context().currentDocId
+    selectedEpisodeId = scope.episodeId; selectedSourceId = scope.sourceId; lastContextDocId = context().currentDocId; shotDetailOpen = false
     renderSources(); renderShots(); renderCandidate()
   }
   function showSource(documentId) {
     const scope = scopeForDocument(context(), documentId)
     if (scope) { selectedEpisodeId = scope.episodeId; selectedSourceId = documentId }
+  }
+  function focusShot(shotId) {
+    const data = context(), shot = data.storyboard.shots.find(item => item.id === shotId)
+    if (!shot) return false
+    if (data.documents[shot.sourceDocumentId]) showSource(shot.sourceDocumentId)
+    else { selectedEpisodeId = OTHER_EPISODE; selectedSourceId = UNASSIGNED_SOURCE }
+    lastContextDocId = data.currentDocId; selectedShotId = shot.id; shotDetailOpen = true; detailPanel = 'picture'
+    navigate('storyboard'); renderSources(); renderShots(); renderCandidate()
+    selectDetailPanel('picture', { focus: true })
+    return true
   }
   function renderSources() {
     const data = context(), groups = storyboardGroups(data)
@@ -393,32 +532,56 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     let group = groups.find(item => item.id === selectedEpisodeId)
     if (!group) { group = groups[0]; selectedEpisodeId = group.id; selectedSourceId = group.sceneIds[0] || '' }
     if (selectedSourceId && !group.sourceIds.includes(selectedSourceId) && !(group.id === OTHER_EPISODE && selectedSourceId === UNASSIGNED_SOURCE)) selectedSourceId = group.sceneIds[0] || ''
-    episodeSelect.replaceChildren(...groups.map(item => new Option(item.title, item.id)))
+    episodeSelect.replaceChildren(...groups.map(item => new Option(item.id === OTHER_EPISODE ? '待归场镜头' : item.title, item.id)))
     episodeSelect.value = selectedEpisodeId
-    sourceSelect.replaceChildren(new Option(group.id === OTHER_EPISODE ? '查看全部其他内容' : '查看全集', ''))
-    for (const id of group.sourceIds) sourceSelect.append(new Option(`${id === group.id ? '分集正文 · ' : ''}${data.documents[id].title}`, id))
-    if (group.id === OTHER_EPISODE) sourceSelect.append(new Option('未归属镜头（无来源或来源已删除）', UNASSIGNED_SOURCE))
+    sourceSelect.replaceChildren(new Option(group.id === OTHER_EPISODE ? '全部待归场镜头' : '本集总览 · 按分场查看分镜', ''))
+    for (const id of group.sourceIds) {
+      const scene = isSceneDocument(data, id)
+      if (scene || data.storyboard.shots.some(shot => shot.sourceDocumentId === id) || selectedSourceId === id) sourceSelect.append(new Option(`${scene ? '' : '待归场 · '}${data.documents[id].title}`, id))
+    }
+    if (group.id === OTHER_EPISODE) sourceSelect.append(new Option('待归场 · 来源缺失镜头', UNASSIGNED_SOURCE))
     sourceSelect.value = selectedSourceId
-    wholeEpisodeButton.textContent = group.id === OTHER_EPISODE ? '查看全部其他内容' : '查看全集'
+    wholeEpisodeButton.textContent = group.id === OTHER_EPISODE ? '全部待归场镜头' : '本集总览'
     wholeEpisodeButton.setAttribute('aria-pressed', String(!selectedSourceId))
-    addShotButton.disabled = !data.projectId || !data.documents[selectedSourceId]
+    const sceneSelected = isSceneDocument(data, selectedSourceId)
+    const pendingShots = visibleShots(data).filter(shot => !isSceneDocument(data, shot.sourceDocumentId))
+    addShotButton.disabled = !data.projectId || !sceneSelected
     generateButton.disabled = addShotButton.disabled || Boolean(storyboardTasks.active()) || Boolean(data.textGenerating)
     generateButton.textContent = storyboardTasks.active() ? '拆镜任务执行中…' : 'AI 拆镜'
+    organizeScenesButton.hidden = !organizeScenes
+    organizeScenesButton.textContent = group.id === OTHER_EPISODE ? '建立分集与分场' : '整理本集分场'
+    organizeScenesButton.disabled = !data.projectId || Boolean(storyboardTasks.active()) || Boolean(data.textGenerating)
+    assignShotsButton.hidden = !pendingShots.length || !organizeScenes
+    assignShotsButton.disabled = organizeScenesButton.disabled
+    assignShotsButton.textContent = `归入分场 · ${pendingShots.length} 个待归场镜头`
+    openScriptButton.disabled = !data.projectId || !data.documents[sceneSelected ? selectedSourceId : group.id]
+    openScriptButton.textContent = sceneSelected ? '回到本场剧本' : '回到本集剧本'
+    hierarchyBreadcrumb.textContent = group.id === OTHER_EPISODE
+      ? '待归场镜头 → 确认分场归属'
+      : `${group.title} → ${sceneSelected ? `${data.documents[selectedSourceId].title} → 分镜` : selectedSourceId ? '待归场镜头' : '分场总览'}`
+    renderNextAction()
     renderStoryboardTaskProgress()
   }
   function renderShots({ detail = true } = {}) {
     const data = context(), shots = visibleShots(data)
     const group = storyboardGroups(data).find(item => item.id === selectedEpisodeId)
-    const scopeTitle = selectedSourceId ? data.documents[selectedSourceId]?.title || '未归属镜头' : `${group?.title || '分镜'} · 全部`
+    const scopeTitle = selectedSourceId ? `${isSceneDocument(data, selectedSourceId) ? '' : '待归场 · '}${data.documents[selectedSourceId]?.title || '来源缺失镜头'}` : `${group?.id === OTHER_EPISODE ? '待归场镜头' : group?.title || '分镜'} · 全部`
     shotBody.classList.toggle('is-empty', !shots.length)
-    shotStatus.textContent = !data.projectId ? '创建项目后即可从空白镜头或已有剧本开始。' : `${scopeTitle} · ${shots.length} 个镜头 · 项目共 ${data.storyboard.shots.length} 个 · 常规导出使用当前范围；单场导出与多场批量生图可另选分场。`
+    if (!shots.length) shotDetailOpen = false
+    shotBody.classList.toggle('is-detail-open', shotDetailOpen)
+    storyboardView.classList.toggle('showing-shot-detail', shotDetailOpen)
+    shotDetail.hidden = !shotDetailOpen
+    nextActionButton.hidden = shotDetailOpen
+    shotStatus.textContent = !data.projectId ? '创建项目后即可从空白镜头或已有剧本开始。' : `${scopeTitle} · ${shots.length} 个镜头${shotDetailOpen ? '' : ' · 点击图片检查或修改'}`
+    renderNextAction()
     const focusKey = shotList.contains(document.activeElement) ? document.activeElement.dataset.shotFocus : null
     const scrollTop = shotList.scrollTop
     shotList.replaceChildren()
     if (!shots.length) {
       const empty = el('div', 'media-empty')
-      empty.append(el('h2', '', '当前范围尚无分镜'), el('p', '', selectedSourceId && data.documents[selectedSourceId] ? '点击 AI 拆镜或新建镜头，结果将归入当前分场。' : '选择具体分场或分集正文后，可 AI 拆镜或新建镜头。'))
-      if (data.documents[selectedSourceId]) empty.append(button('新建第一个镜头', addShot))
+      empty.append(el('h2', '', '当前范围尚无分镜'), el('p', '', isSceneDocument(data, selectedSourceId) ? '确认本场剧本后，点击 AI 拆镜或新建镜头，结果保存到当前分场。' : '先整理本集分场，再选择具体分场拆镜。'))
+      if (isSceneDocument(data, selectedSourceId)) empty.append(button('新建第一个镜头', addShot))
+      else if (group?.id !== OTHER_EPISODE && organizeScenes) empty.append(button('整理本集分场', () => organizeScenes({ episodeId: selectedEpisodeId })))
       shotList.append(empty)
     }
     if (!shots.some(shot => shot.id === selectedShotId)) selectedShotId = shots[0]?.id || null
@@ -426,18 +589,22 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     shots.forEach((shot, index) => {
       if (!selectedSourceId && previousSource !== shot.sourceDocumentId) {
         previousSource = shot.sourceDocumentId
-        shotList.append(el('h3', 'shot-scene-heading', data.documents[shot.sourceDocumentId]?.title || '未归属镜头'))
+        shotList.append(el('h3', 'shot-scene-heading', `${isSceneDocument(data, shot.sourceDocumentId) ? '' : '待归场 · '}${data.documents[shot.sourceDocumentId]?.title || '来源缺失镜头'}`))
       }
       const card = el('article', `shot-card${shot.id === selectedShotId ? ' is-selected' : ''}`)
-      const select = button(`${String(index + 1).padStart(2, '0')}  ${shot.title}`, () => { select.focus({ preventScroll: true }); selectedShotId = shot.id; renderShots() }, 'shot-select')
+      const select = button('', () => openShotDetail(shot.id), 'shot-select')
       select.dataset.shotFocus = `${shot.id}:select`
+      select.setAttribute('aria-label', `查看镜头 ${index + 1}：${shot.title}`)
       select.setAttribute('aria-pressed', String(shot.id === selectedShotId))
       const chosen = findMediaVersion(assets, shot.selectedImageVersionId)
-      if (chosen) select.prepend(preview(chosen.version, shot.title))
+      const thumbnail = el('span', 'shot-thumbnail')
+      thumbnail.append(chosen ? preview(chosen.version, shot.title) : el('span', 'media-placeholder', '待准备图片'))
+      select.append(thumbnail, el('span', 'shot-card-title', `${String(index + 1).padStart(2, '0')}  ${shot.title}`))
       card.append(select, el('p', 'shot-list-excerpt', shot.visual || '补充画面、人物与构图'))
       const meta = el('div', 'shot-meta')
+      if (!isSceneDocument(data, shot.sourceDocumentId)) meta.append(el('span', 'media-warning', '待归场 · 原镜头与素材保留'))
       meta.append(el('span', '', `${shot.duration}s · ${shot.transition === 'continuous' ? '连续动作' : '切换机位'}`))
-      const readiness = shotReadiness(shot, assets, jobs, data.documents)
+      const readiness = (mediaStage === 'videos' ? shotReadiness : shotImageReadiness)(shot, assets, jobs, data.documents, data.storyboard.continuity, data)
       meta.append(el('span', `shot-readiness is-${readiness.tone}`, readiness.label))
       if (shotIsStale(shot, data.documents)) meta.append(el('span', 'media-warning', '剧本来源已更新'))
       if (shot.references.some(ref => { const found = findMediaVersion(assets, ref.versionId); return found && found.asset.selectedVersionId !== ref.versionId })) meta.append(el('span', 'media-warning', '参考有新选用版本 · 原引用保留'))
@@ -446,6 +613,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       const down = button('↓', () => { down.focus({ preventScroll: true }); return reorder(shot.id, 1) }); down.setAttribute('aria-label', `下移镜头：${shot.title}`); down.title = '下移'; down.disabled = !shots.slice(index + 1).some(item => item.sourceDocumentId === shot.sourceDocumentId)
       up.dataset.shotFocus = `${shot.id}:up`; down.dataset.shotFocus = `${shot.id}:down`
       actions.append(up, down)
+      if (!isSceneDocument(data, shot.sourceDocumentId) && organizeScenes) actions.append(button('归入分场', () => organizeScenes({ episodeId: selectedEpisodeId === OTHER_EPISODE ? null : selectedEpisodeId, sourceId: shot.sourceDocumentId, shotIds: [shot.id] })))
       const drag = button('⠿', () => notify('拖动此按钮可排序；也可使用上移、下移按钮'), 'text-button compact-button')
       drag.setAttribute('aria-label', `拖动排序镜头：${shot.title}`); drag.title = '拖动排序'
       drag.dataset.shotFocus = `${shot.id}:drag`
@@ -463,7 +631,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       card.append(meta, actions)
       shotList.append(card)
     })
-    if (detail) renderShotDetail()
+    if (detail && shotDetailOpen) renderShotDetail()
     if (focusKey) {
       const controls = [...shotList.querySelectorAll('[data-shot-focus]')]
       const target = controls.find(node => node.dataset.shotFocus === focusKey && !node.disabled) || controls.find(node => node.dataset.shotFocus === `${selectedShotId}:select`)
@@ -476,9 +644,9 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       requireProject()
       if (context().storyboard.shots.length >= SHOT_LIMIT) throw new Error(`最多 ${SHOT_LIMIT} 个镜头`)
       const data = context(), doc = data.documents[selectedSourceId]
-      if (!doc) throw new Error('请先选择具体分场或分集正文')
+      if (!isSceneDocument(data, selectedSourceId) || !doc) throw new Error('请先整理本集分场，并选择具体分场后新建镜头')
       const shot = createShot({ title: `镜头 ${visibleShots().length + 1}` }, { documentId: selectedSourceId, fingerprint: contentFingerprint(doc.content) })
-      await changeStoryboard(shots => shots.push(shot)); selectedShotId = shot.id; renderShots()
+      await changeStoryboard(shots => shots.push(shot)); selectedShotId = shot.id; shotDetailOpen = true; detailPanel = 'content'; renderShots()
     })
   }
   async function reorder(id, direction) {
@@ -506,9 +674,9 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       }
       if (patch.references) Object.assign(shot, manualReferencePatch({ ...shot, references: previousReferences }, patch.references, assets))
       for (const field of Object.values(REFERENCE_ENTITY_FIELDS)) if (Object.hasOwn(patch, field) && patch[field] === undefined) delete shot[field]
-      if (!loading && !error && projectId === context().projectId) shot.references = bindShotReferences(shot, assets, context().documents).references
+      if (!loading && !error && projectId === context().projectId) Object.assign(shot, (({ references, continuityNotes }) => ({ references, continuityNotes }))(bindShotReferences(shot, assets, context().documents, context().storyboard.continuity)))
       if (videoChanged) { shot.reviewedVideoVersionId = ''; delete shot.reviewedInputFingerprint }
-      if (patch.reviewedVideoVersionId && patch.reviewedVideoVersionId === shot.selectedVideoVersionId) shot.reviewedInputFingerprint = shotInputFingerprint(shot, context().documents)
+      if (patch.reviewedVideoVersionId && patch.reviewedVideoVersionId === shot.selectedVideoVersionId) shot.reviewedInputFingerprint = shotInputFingerprint(shot, context().documents, context())
     }, { immediate: false }).then(() => { renderShots({ detail: false }); refreshReferenceDetails(); renderGenerationReadiness() }).catch(problem => notify(String(problem?.message || problem)))
   }
   function rememberShotDisclosures() {
@@ -532,8 +700,11 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   }
   function showStage(stage) {
     mediaStage = stage; detailPanel = shotStagePanel(stage)
+    shotDetailOpen = ['images', 'videos'].includes(stage)
+    if (stage === 'images') detailPanel = 'picture'
     renderShots()
-    selectDetailPanel(detailPanel, { focus: true })
+    if (shotDetailOpen) selectDetailPanel(detailPanel, { focus: true })
+    if (stage === 'export') { exportMenu.open = true; exportMenu.querySelector('summary').focus() }
   }
   function renderGenerationReadiness() {
     const shot = selectedShot()
@@ -551,6 +722,93 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       if (status) { status.textContent = `${capability === 'image' ? '图片' : '视频'}：${problem || '已准备好，可以生成'}`; status.className = problem ? 'media-warning' : 'media-help' }
     }
   }
+  function bindShotDetailFocus() {
+    shotDetail.addEventListener('mousedown', event => {
+      const action = event.target.closest('button, summary')
+      if (!action || !shotDetail.contains(action) || action.disabled || event.button !== 0) return
+      // WebKit does not focus clicked controls consistently. Prevent its page
+      // blur between mousedown and click from rebuilding the pending action.
+      event.preventDefault()
+      action.focus({ preventScroll: true })
+    })
+    shotDetail.addEventListener('focusout', event => {
+      const panel = shotDetail.querySelector('[data-shot-panel="picture"]')
+      if (event.relatedTarget && !panel?.contains(event.relatedTarget)) queueMicrotask(refreshPictureReview)
+    })
+  }
+  function refreshPictureReview() {
+    const panel = shotDetail.querySelector('[data-shot-panel="picture"]')
+    if (!panel || !shotDetailOpen || pictureZoom.open || panel.contains(document.activeElement)) return
+    renderPictureReview(panel, selectedShot())
+  }
+  function renderPictureReview(panel, shot) {
+    panel.replaceChildren()
+    if (!shot) return
+    const data = context(), selected = findMediaVersion(assets, shot.selectedImageVersionId)
+    const state = imageVisualReviewState(shot, assets, data.documents, data.storyboard.continuity, data)
+    const expected = { projectId: data.projectId, imageVersionId: shot.selectedImageVersionId, fingerprint: visualInputFingerprint(shot, assets, data.documents, data.storyboard.continuity, data) }
+    const noteKey = JSON.stringify([data.projectId, shot.id, shot.selectedImageVersionId])
+    const body = el('div', 'shot-picture-layout'), figure = el('figure', 'shot-picture-figure'), inspector = el('aside', 'shot-picture-inspector')
+    const zoom = button('', () => {
+      if (context().projectId !== expected.projectId) return
+      const latest = findMediaVersion(assets, expected.imageVersionId)
+      if (!latest) return notify('图片已不存在，请重新选择')
+      pictureZoomBody.replaceChildren(preview(latest.version, shot.title)); pictureZoom.showModal()
+    }, 'shot-picture-zoom')
+    zoom.setAttribute('aria-label', `放大查看：${shot.title}`); zoom.disabled = !selected
+    zoom.append(preview(selected?.version, shot.title))
+    figure.append(zoom, el('figcaption', '', selected ? '当前选用图片 · 点击放大' : '生成图片或从已有版本中选用'))
+    const readiness = shotImageReadiness(shot, assets, jobs, data.documents, data.storyboard.continuity, data)
+    inspector.append(el('span', `shot-readiness is-${readiness.tone}`, readiness.label), el('h3', '', '本镜头画面'), el('p', 'shot-picture-description', shot.visual || '尚未填写画面说明'))
+    if (shot.action) inspector.append(el('p', 'media-help', shot.action))
+    const referenceDetails = disclosure(`对照参考 · ${shot.references.filter(ref => ref.role !== 'extend').length} 张`, 'picture-references', 'shot-picture-references')
+    const referenceGrid = el('div', 'shot-picture-reference-grid')
+    for (const reference of shot.references.filter(ref => ref.role !== 'extend')) {
+      const found = findMediaVersion(assets, reference.versionId)
+      const card = el('figure')
+      const view = button('', () => {
+        if (context().projectId !== expected.projectId) return
+        const latest = findMediaVersion(assets, reference.versionId)
+        if (!latest) return notify('参考图片已不存在')
+        pictureZoomBody.replaceChildren(preview(latest.version, found?.asset.name || '固定参考')); pictureZoom.showModal()
+      }, 'shot-picture-zoom')
+      view.setAttribute('aria-label', `放大参考：${found?.asset.name || '缺失的参考'}`); view.disabled = !found
+      view.append(preview(found?.version, found?.asset.name || '固定参考'))
+      card.append(view, el('figcaption', '', found?.asset.name || '参考版本缺失')); referenceGrid.append(card)
+    }
+    referenceDetails.append(referenceGrid, el('p', 'media-help', visualBaselineText(data.storyboard.continuity)))
+    inspector.append(referenceDetails)
+    if (state.changedFields.length) inspector.append(el('p', 'media-warning', `需要重新检查：${state.changedFields.join('、')}`))
+    if (state.issues.length && selected) inspector.append(el('p', 'media-warning', state.issues.join('；')))
+    const note = el('textarea'); note.rows = 2; note.maxLength = 2000; note.placeholder = '例如：人物衣着与前镜不一致'
+    note.value = pictureNotes.get(noteKey) ?? shot.visualReview?.notes ?? ''
+    note.addEventListener('input', () => pictureNotes.set(noteKey, note.value))
+    inspector.append(field('检查备注（可选）', note))
+    const edit = el('div', 'shot-picture-edit-actions')
+    edit.append(button('修改画面', () => selectDetailPanel('content', { focus: true })), button('调整参考', () => selectDetailPanel('references', { focus: true })), button('重新生成', () => selectDetailPanel('generation', { focus: true })))
+    inspector.append(edit)
+    body.append(figure, inspector)
+    const actions = el('div', 'shot-picture-review-actions')
+    const saveDecision = decision => run(async () => {
+      const notes = note.value.trim()
+      if (decision === 'rejected' && !notes) throw new Error('请在检查备注中填写需要修改的地方')
+      const scope = `${selectedEpisodeId}:${selectedSourceId}`, owner = data.projectId
+      await saveVisualReview(shot.id, { decision, notes }, expected)
+      pictureNotes.delete(noteKey)
+      if (context().projectId !== owner || `${selectedEpisodeId}:${selectedSourceId}` !== scope || selectedShotId !== shot.id) return
+      if (decision === 'approved') {
+        const list = visibleShots(), next = list[list.findIndex(item => item.id === shot.id) + 1]
+        if (next) { selectedShotId = next.id; renderShots(); selectDetailPanel('picture', { focus: true }) }
+        else { closeShotDetail(); notify('本镜头已确认，已返回本场分镜') }
+      } else { renderShots(); notify('已记录问题，可在本镜头修改画面或重新生成') }
+    })
+    const reject = button('标记需要修改', () => saveDecision('rejected'))
+    const approve = button('确认并看下一镜', () => saveDecision('approved'), 'primary-button')
+    reject.disabled = !selected || loading || Boolean(error) || operationBusy
+    approve.disabled = reject.disabled || state.issues.length > 0
+    actions.append(el('p', 'media-help', '对照参考确认人物、物品结构与光线'), reject, approve)
+    panel.append(body, actions)
+  }
   function renderShotDetail() {
     rememberShotDisclosures()
     shotDetail.replaceChildren()
@@ -560,24 +818,31 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (changedShot) shotDetail.scrollTop = 0
     if (!shot) return
     const heading = el('div', 'shot-detail-heading')
-    heading.append(el('h2', '', '镜头详情'), el('span', 'media-help', '修改自动保存'))
+    const paging = el('div', 'shot-detail-paging'), visible = visibleShots(), index = visible.findIndex(item => item.id === shot.id)
+    const previous = button('上一镜', () => openShotDetail(visible[index - 1]?.id, detailPanel))
+    const next = button('下一镜', () => openShotDetail(visible[index + 1]?.id, detailPanel))
+    previous.disabled = index <= 0; next.disabled = index >= visible.length - 1
+    paging.append(previous, el('span', 'media-help', `${index + 1} / ${visible.length}`), next)
+    heading.append(button('返回本场分镜', closeShotDetail, 'text-button'), el('h2', '', shot.title), paging)
     shotDetail.append(heading)
     const tabs = el('div', 'shot-detail-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '镜头工作区域')
     const panels = {}
-    for (const [key, label] of [['content', '内容'], ['references', '参考'], ['generation', '生成'], ['versions', '版本']]) {
+    const panelEntries = [['picture', '画面'], ['content', '内容'], ['references', '参考'], ['generation', '生成'], ['versions', '版本']]
+    for (const [key, label] of panelEntries) {
       const tab = button(label, () => selectDetailPanel(key), 'shot-detail-tab')
       tab.id = `shot-tab-${key}`; tab.dataset.shotPanelTab = key; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', `shot-panel-${key}`)
       tab.addEventListener('keydown', event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
         event.preventDefault()
-        const keys = ['content', 'references', 'generation', 'versions'], index = keys.indexOf(key)
-        selectDetailPanel(keys[event.key === 'Home' ? 0 : event.key === 'End' ? 3 : (index + (event.key === 'ArrowRight' ? 1 : 3)) % 4], { focus: true })
+        const keys = panelEntries.map(([id]) => id), index = keys.indexOf(key)
+        selectDetailPanel(keys[event.key === 'Home' ? 0 : event.key === 'End' ? keys.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : keys.length - 1)) % keys.length], { focus: true })
       })
       tabs.append(tab)
       const panel = el('section', 'shot-detail-panel'); panel.dataset.shotPanel = key; panel.id = `shot-panel-${key}`
       panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', tab.id); panels[key] = panel
     }
     shotDetail.append(tabs, ...Object.values(panels))
+    renderPictureReview(panels.picture, shot)
     if (shotIsStale(shot, context().documents)) shotDetail.append(el('p', 'media-warning', '剧本来源已变更。请核对本镜头，或重新拆镜；现有素材与状态仍保留。'))
     const fields = el('div', 'shot-fields')
     for (const [key, label, multiline] of [['title', '标题', false], ['visual', '画面与构图', true], ['action', '主要动作', true], ['dialogue', '对白', true], ['camera', '景别与运镜', true]]) {
@@ -628,10 +893,16 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       await changeStoryboard(shots => shots.splice(shots.findIndex(item => item.id === shot.id), 1)); renderShots()
     }), 'danger-button'))
     panels.versions.append(renderShotCandidates(shot))
+    const visualState = imageVisualReviewState(shot, assets, context().documents, context().storyboard.continuity, context())
+    const visualStatus = el('section', 'shot-visual-status')
+    visualStatus.append(el('strong', visualState.reviewed ? 'media-help' : 'media-warning', visualState.label), el('p', 'media-help', visualState.issues.join('；') || '已按当前图片、参考版本与视觉基准记录人工复核。'))
+    visualStatus.append(button('并排核对分镜图与设定', () => visualReviewUI.open({ shotId: shot.id })))
+    panels.versions.prepend(visualStatus)
+    panels.generation.prepend(el('p', visualState.reviewed ? 'media-help' : 'media-warning', `${visualState.label}。${visualState.reviewed ? '参考或画面要求改变后需重新核对。' : '生成视频前请先到“视觉复核”检查人物、场景、道具和光线。'}`))
     panels.content.append(management)
     restoreShotDisclosures()
     const settingsPanel = panels.generation.querySelector('[data-layout-key="generation-settings"]')
-    if (settingsPanel) settingsPanel.open = true
+    if (settingsPanel && !shotDisclosureState.get(shot.id)?.has('generation-settings')) settingsPanel.open = false
     renderGenerationReadiness()
     selectDetailPanel(detailPanel, { resetScroll: changedShot })
   }
@@ -652,7 +923,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
         const card = el('article', 'media-version-card'); card.append(preview(version, asset.name), el('p', '', `${asset.name} · ${version.id.slice(-8)}`))
         card.append(button(version.id === selectedId ? '当前选用版本' : '选用此版本', async () => { await editShot(shot.id, { [kind === 'image' ? 'selectedImageVersionId' : 'selectedVideoVersionId']: version.id }); renderShotDetail() }))
         if (kind === 'video') {
-          const review = videoReviewState(shot, context().documents)
+          const review = videoReviewState(shot, context().documents, context())
           const approve = button(version.id === selectedId && review.reviewed ? '人工审核已通过' : '完整播放后标记审核通过', () => editShot(shot.id, { reviewedVideoVersionId: version.id }).then(renderShotDetail))
           approve.disabled = version.id !== selectedId
           if (version.id === selectedId && review.outdated) card.append(el('p', 'media-warning', review.legacy ? '此审核未记录制作输入，请重新核对后确认；原视频保留。' : '镜头内容、参考或来源已变化，请重新核对；原视频和审核记录保留。'))
@@ -686,7 +957,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     const fixed = disclosure(`固定引用与输入画面 · ${shot.references.length} 项`, 'reference-inputs')
     const missingReferences = shot.references.filter(ref => !findMediaVersion(assets, ref.versionId)).length
     if (missingReferences) section.append(el('p', 'media-warning', `${missingReferences} 项固定引用的文件未找到，请展开下方引用检查。`))
-    const bindingWarnings = referenceBindingWarnings(shot, assets, context().documents)
+    const bindingWarnings = referenceBindingWarnings(shot, assets, context().documents, context().storyboard.continuity)
     if (bindingWarnings.legacy.length) section.append(el('p', 'media-notice', `${bindingWarnings.legacy.length} 项旧引用未记录自动或手动来源，已保留。修改角色、场景或道具后不会自动删除这些旧引用；请核对后移除或设为手动保留。`))
     if (bindingWarnings.unmatched.length) section.append(el('p', 'media-warning', `当前镜头未匹配但仍保留的手动／旧参考：${bindingWarnings.unmatched.map(item => item.name).join('、')}。请核对是否仍需用于生成与导出。`))
     fixed.append(el('p', 'media-help', '引用固定到具体版本。自动引用会随镜头人物、场景和道具同步；手动引用始终保留。'))
@@ -752,7 +1023,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     adjustment.append(el('p', 'media-help', '补图后自动关联；改角色、场景或道具时同步移除不再匹配的自动引用。手动选择、旧引用与仍适用的固定版本保留；手动移除不会自动加回。'))
     for (const [role, fieldName] of Object.entries(REFERENCE_ENTITY_FIELDS)) {
       const input = el('input'); input.value = (shot[fieldName] || []).join('、')
-      input.placeholder = shot[fieldName] === undefined ? '按镜头内容自动识别' : '为空表示本镜头不需要此类参考'
+      input.placeholder = shot[fieldName] === undefined ? '按镜头内容自动识别' : '已登记素材按画面识别；排除请取消参考图'
       input.addEventListener('change', () => run(async () => {
         const names = [...new Set(input.value.split(/[、,，\n]/).map(name => name.trim()).filter(Boolean))]
         if (names.length > 16 || names.some(name => name.length > 80)) throw new Error('每类最多 16 个名称，每项不超过 80 字')
@@ -760,8 +1031,9 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       }))
       adjustment.append(field(`本镜头${ASSET_ROLES[role]}名称`, input))
     }
-    const matches = bindShotReferences(shot, assets, context().documents).matches
-    for (const match of matches) section.append(el('p', ['bound', 'excluded'].includes(match.status) ? 'media-help' : 'media-warning', `${ASSET_ROLES[match.role]} · ${match.name}${match.inferred ? '（自动识别）' : ''}：${({ bound: '已关联参考图', ready: '等待自动关联', missing: '缺少已选用的图片版本，补图后自动关联', ambiguous: '同名或场景时段无法唯一确定，请手动选择', excluded: '已手动排除，不自动关联', limit: '已达 16 项参考上限' })[match.status]}`))
+    const matches = bindShotReferences(shot, assets, context().documents, context().storyboard.continuity).matches
+    for (const match of matches) section.append(el('p', ['bound', 'excluded', 'manual'].includes(match.status) ? 'media-help' : 'media-warning', `${ASSET_ROLES[match.role]} · ${match.name}${match.stateName ? ` · ${match.stateName}` : ''}${match.inferred ? '（自动识别）' : ''}：${({ stale: '设定已修改，请在素材设定中重新生成或确认选图', manual: '保留手动选择的版本', bound: '已关联参考图', ready: '等待自动关联', missing: '缺少已选用的图片版本，补图后自动关联', ambiguous: '同名或场景时段无法唯一确定，请手动选择', excluded: '已手动排除，不自动关联', limit: '已达 16 项参考上限' })[match.status]}`))
+    section.append(button('管理人物、场景和关键物品', () => continuityUI.open()))
     if (!matches.length) section.append(el('p', 'media-help', '未识别到需要关联的已知素材。可在下方补充名称；场景素材请用“地点 · 日／夜”等名称区分时段。'))
     adjustment.append(button('重新按镜头内容识别', () => run(async () => { await editShot(shot.id, { characterNames: undefined, sceneNames: undefined, propNames: undefined }); renderShotDetail() })))
     if (shot.referenceExclusions?.length) adjustment.append(button('恢复自动关联已排除素材', () => run(async () => { await editShot(shot.id, { referenceExclusions: [] }); renderShotDetail() })))
@@ -804,6 +1076,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     }
     restoreShotDisclosures()
     renderGenerationReadiness()
+    refreshPictureReview()
   }
   function scheduleReferenceSync(delay = 100) {
     window.clearTimeout(referenceSyncTimer)
@@ -814,16 +1087,19 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (!invoke || !data.projectId || projectId !== data.projectId || error) return
     if (data.mutationBusy && !referenceSyncBusy) { scheduleReferenceSync(); return }
     if (referenceSyncBusy || loading || operationBusy) return
-    if (storyboardTasks.active() || data.textGenerating) { scheduleReferenceSync(1000); return }
-    const imagePlan = planShotImageResults(data.storyboard, assets, jobs, data.projectId)
-    const plan = planReferenceBackfill(imagePlan.storyboard, assets, data.documents)
-    if (!plan.changed && !imagePlan.changed) return
+    if (storyboardTasks.active() || data.textGenerating || continuityUI.pendingDraft(data.projectId)) { scheduleReferenceSync(1000); return }
+    const entityPlan = planEntityImageResults(data.storyboard.continuity, assets, jobs, data.projectId)
+    const withEntities = entityPlan.changed ? { ...data.storyboard, continuity: entityPlan.continuity } : data.storyboard
+    const imagePlan = planShotImageResults(withEntities, assets, jobs, data.projectId)
+    const plan = planReferenceBackfill(imagePlan.storyboard, assets, data.documents, data.projectId)
+    if (!plan.changed && !imagePlan.changed && !entityPlan.changed) return
     plan.storyboard.revision = data.storyboard.revision + 1
     referenceSyncBusy = true
     try {
       await commit({ storyboard: plan.storyboard }, { projectId: data.projectId, revision: data.storyboard.revision, atomic: true })
       if (context().projectId !== data.projectId) return
-      renderShots({ detail: false }); refreshReferenceDetails()
+      renderShots({ detail: false }); refreshReferenceDetails(); continuityUI.refresh()
+      if (entityPlan.linked.length) notify(`已关联 ${entityPlan.linked.length} 张设定图到对应素材状态`)
       if (imagePlan.linked.length) {
         const shot = selectedShot(), host = shotDetail.querySelector('.shot-selected-media[data-selected-kind="image"]')
         if (shot && host) {
@@ -833,7 +1109,8 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
         refreshShotCandidates(); renderJobs(); productionOverview.refresh()
         notify(`已将 ${imagePlan.linked.length} 张新生成图片关联并选用到对应镜头，旧版本仍保留`)
       }
-      if (plan.changed) notify(`已同步 ${plan.changed} 个镜头的参考：补齐 ${plan.added} 项${plan.removed ? `，移除 ${plan.removed} 项已失效自动引用` : ''}`)
+      if (plan.linked.length) notify(`已将 ${plan.linked.length} 张旧角色图关联到基础设定，后续分镜会自动使用`)
+      if (plan.changed > plan.linked.length) notify(`已同步 ${plan.changed - plan.linked.length} 个镜头的参考：补齐 ${plan.added} 项${plan.removed ? `，移除 ${plan.removed} 项已失效自动引用` : ''}`)
     } catch (problem) { notify(`镜头图片或参考自动关联未保存：${String(problem?.message || problem)}；可在任务中心刷新后重试`) }
     finally { referenceSyncBusy = false }
   }
@@ -959,9 +1236,12 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       let data = context()
       const documentId = sourceSelect.value, doc = data.documents[documentId]
       if (storyboardChoiceOpen) return
+      if (!isSceneDocument(data, documentId)) throw new Error('请先整理本集分场，再选择具体分场 AI 拆镜')
       if (referenceSyncBusy || storyboardTasks.active() || data.textGenerating) throw new Error('已有 AI 任务正在执行，请等待结束后再拆镜')
       if (invoke && (loading || error || projectId !== data.projectId)) throw new Error('角色素材尚未读取完成，请稍后重试拆镜')
       if (!doc?.content.trim()) throw new Error('所选文档为空，请先创作或粘贴剧本')
+      const sceneConstraints = sceneContinuityContext({ ...data, documentId })
+      if (sceneConstraints.conflicts.length) throw new Error(`请先核对分场状态：${sceneConstraints.conflicts.join('；')}`)
       const connection = connectionFor('storyboard')
       if (!connection) throw new Error(resolveConnectionRoute(data, 'storyboard').error)
       const existing = data.storyboard.shots.filter(shot => shot.sourceDocumentId === documentId)
@@ -971,7 +1251,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       data = context()
       if (owner !== data.projectId || sourceSelect.value !== documentId || data.documents[documentId]?.content !== doc.content || storyboardTasks.active() || data.textGenerating) throw new Error('分场或任务状态已变化，请重新发起拆镜')
       taskId = reserveStoryboardTask({ id: crypto.randomUUID(), projectId: data.projectId, documentId, title: doc.title })
-      const started = await requestText(storyboardPrompt('', projectCharacterNames(data.documents, assets), referenceCatalog(assets)), { purpose: 'storyboard', documentId, sourceFingerprint: contentFingerprint(doc.content), storyboardSourceFingerprint: storyboardSourceFingerprint(data.storyboard, documentId), storyboardRevision: data.storyboard.revision, connectionId: connection.id, storyboardTaskId: taskId, storyboardApplyMode })
+      const started = await requestText(storyboardPrompt('', projectCharacterNames(data.documents, assets), { ...referenceCatalog(assets), ...Object.fromEntries(Object.entries(REFERENCE_ENTITY_FIELDS).map(([kind]) => [kind, [...new Set([...referenceCatalog(assets)[kind], ...(data.storyboard.continuity?.entities || []).filter(entity => entity.kind === kind).map(entity => entity.name)])]])), continuity: (data.storyboard.continuity?.entities || []).filter(entity => entity.sourceDocumentIds.includes(documentId)).map(entity => ({ name: entity.name, kind: entity.kind, aliases: entity.aliases, traits: entity.traits, description: entity.description, state: resolveEntityState(entity, documentId)?.description })) }), { purpose: 'storyboard', documentId, sourceFingerprint: contentFingerprint(doc.content), storyboardSourceFingerprint: storyboardSourceFingerprint(data.storyboard, documentId), storyboardRevision: data.storyboard.revision, connectionId: connection.id, storyboardTaskId: taskId, storyboardApplyMode })
       if (!started && !storyboardTasks.get(taskId)?.bound) releaseStoryboardTask(taskId)
     } catch (problem) {
       if (taskId && !storyboardTasks.get(taskId)?.bound) { updateStoryboardTask(taskId, { phase: 'failed', message: String(problem?.message || problem) }); releaseStoryboardTask(taskId) }
@@ -979,7 +1259,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     }
   }
   function candidateSnapshot(text, generationContext, draftId = null, createdAt = null) {
-    return { text, draftId, createdAt, projectId: generationContext.projectId, documentId: generationContext.documentId, fingerprint: generationContext.sourceFingerprint, revision: generationContext.storyboardRevision, storyboardSourceFingerprint: generationContext.storyboardSourceFingerprint, applyMode: generationContext.storyboardApplyMode }
+    return { text, draftId, createdAt, projectId: generationContext.projectId, documentId: generationContext.documentId, fingerprint: generationContext.sourceFingerprint, revision: generationContext.storyboardRevision, storyboardSourceFingerprint: generationContext.storyboardSourceFingerprint, sceneContinuityFingerprint: generationContext.sceneContinuityFingerprint, sceneContinuityPrompt: generationContext.sceneContinuityPrompt || '', sceneContinuityIncludePrevious: generationContext.sceneContinuityIncludePrevious, applyMode: generationContext.storyboardApplyMode }
   }
   async function receiveCandidate(text, generationContext, draftId = null, { autoApply = false, createdAt = null } = {}) {
     const received = candidateSnapshot(text, generationContext, draftId, createdAt)
@@ -1017,7 +1297,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
         candidateSummary.textContent = `${shots.length} 个候选镜头，尚未写入项目。采纳时自动关联参考图。`
         summary.replaceChildren(el('p', '', `${shots.length} 个候选镜头，尚未写入项目。采纳时将关联下面列出的角色、场景和道具图。`))
         for (const [index, shot] of shots.entries()) {
-          const { matches } = bindShotReferences(shot, assets, context().documents)
+          const { matches } = bindShotReferences(shot, assets, context().documents, context().storyboard.continuity)
           summary.append(el('p', '', `${index + 1}. ${shot.title} · ${matches.length ? matches.map(match => `${ASSET_ROLES[match.role]} · ${match.name}（${({ excluded: '已手动排除', ready: '可关联', bound: '已关联', missing: '缺图', ambiguous: '同名需手选', limit: '超出参考上限' })[match.status]}）`).join('、') : shot.characterNames ? '无出场角色' : '未提供角色信息，可补充 characterNames 或重新拆镜'}`))
         }
       } catch (problem) { candidateSummary.textContent = problem.message; candidateSummary.className = 'media-warning'; summary.textContent = problem.message; rawDetails.open = true }
@@ -1031,7 +1311,10 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     })
     updateSummary()
     const actions = el('div', 'media-toolbar')
-    actions.append(button('采纳并追加镜头', () => applyCandidate(false), 'primary-button'), button('替换该来源的分镜', () => applyCandidate(true)), button('放弃候选', () => run(async () => {
+    const append = button('采纳并追加镜头', () => applyCandidate(false), 'primary-button'), replace = button('替换本场分镜', () => applyCandidate(true))
+    append.disabled = replace.disabled = !isSceneDocument(context(), displayed.documentId)
+    if (append.disabled) candidateHost.append(el('p', 'media-warning', '此候选来自整集或其他文档，已保留。请先整理分场，再从具体分场重新拆镜；候选内容可继续查看与复制。'))
+    actions.append(append, replace, button('放弃候选', () => run(async () => {
       text.readOnly = true
       try {
         if (await onCandidateResolved?.(displayed.draftId, { committed: false }) === false) return
@@ -1049,6 +1332,8 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       const data = context()
       if (candidate !== expectedCandidate) throw new Error('当前候选或项目已切换，未自动添加分镜')
       if (!candidate || candidate.projectId !== data.projectId) throw new Error('候选属于另一个项目')
+      if (!isSceneDocument(data, candidate.documentId)) throw new Error('此候选尚未归属具体分场，已保留。请先整理分场，再从本场剧本拆镜')
+      if (candidate.sceneContinuityFingerprint && candidate.sceneContinuityFingerprint !== sceneContinuityContext({ ...data, documentId: candidate.documentId, prompt: candidate.sceneContinuityPrompt, includePrevious: candidate.sceneContinuityIncludePrevious !== false }).fingerprint) throw new Error('相关素材设定或分场衔接在生成后已变化。候选仍保留，请核对后重新拆镜。')
       if (invoke && (loading || error || projectId !== data.projectId)) throw new Error('角色素材尚未读取完成，请稍后重试采纳')
       if (candidate.storyboardSourceFingerprint && candidate.storyboardSourceFingerprint !== storyboardSourceFingerprint(data.storyboard, candidate.documentId)) throw new Error('此分场的分镜在生成后已有修改。候选已保留，请核对此分场后重新拆镜；其他分场的修改不会影响采纳。')
       if (contentFingerprint(data.documents[candidate.documentId]?.content || '') !== candidate.fingerprint) throw new Error('剧本在生成后已修改。请重新拆镜，原候选仍保留。')
@@ -1057,8 +1342,8 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       const unresolved = new Set()
       let boundReferences = 0
       for (const shot of shots) {
-        const binding = bindShotReferences(shot, assets, context().documents)
-        shot.references = binding.references
+        const binding = bindShotReferences(shot, assets, context().documents, context().storyboard.continuity)
+        shot.references = binding.references; shot.continuityNotes = binding.continuityNotes
         boundReferences += shot.references.length
         for (const match of binding.matches) if (!['ready', 'bound', 'excluded'].includes(match.status)) unresolved.add(match.name)
       }
@@ -1084,6 +1369,9 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     const data = context(), shot = data.storyboard.shots.find(item => item.id === id), connection = connectionFor(capability)
     if (!shot) throw new Error('镜头不存在')
     if (!shot.visual.trim()) throw new Error('请先填写镜头画面')
+    const sceneConstraints = data.documents[shot.sourceDocumentId] ? sceneContinuityContext({ ...data, documentId: shot.sourceDocumentId, shot }) : null
+    if (sceneConstraints?.conflicts.length) throw new Error(`请先核对分场状态：${sceneConstraints.conflicts.join('；')}`)
+    if (capability === 'image') { const issues = continuityReadiness(shot, assets, data.documents, data.storyboard.continuity); if (issues.length) throw new Error(`请先完成素材设定：${issues.join('；')}`) }
     if (!connection) throw new Error(resolveConnectionRoute(data, capability).error)
     if (invoke && (loading || error)) throw new Error('素材与任务尚未成功读取，请先刷新后预览')
     if (jobs.some(job => job.targetId === id && job.capability === capability && !terminal(job.status))) throw new Error('此镜头同类任务正在执行，请等待或取消后再提交')
@@ -1096,7 +1384,8 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (adapter.referenceRoles && (refs.length > adapter.maxReferences || refs.some(ref => !adapter.referenceRoles.includes(ref.role)))) throw new Error('参考数量或用途超出所选适配器能力；未提交生成')
     const labels = refs.map((ref, index) => `输入 ${index + 1}：${ref.role} · ${findMediaVersion(assets, ref.versionId).asset.name} · 固定版本 ${ref.versionId}`)
     return {
-      projectId: data.projectId, targetId: id, capability, prompt: mediaPrompt(shot, data.project, labels), references: refs,
+      projectId: data.projectId, targetId: id, capability, prompt: [mediaPrompt(shot, data.project, labels, data), visualBaselineText(data.storyboard.continuity), capability === 'image' ? '根据本镜头的场景与构图制作单幅分镜画面。上传的角色设定图用于保持身份、服装和装备，物品设定图用于保持结构、比例和材质，场景图用于保持空间布局与本场光线。不要把设定图的白底、三视图排版或标注画进分镜；只改变明确要求的动作、机位和状态。' : '沿用输入画面的身份、服装、物品结构、场景布局与光线，仅执行指定动作和运镜。'].filter(Boolean).join('\n'), references: refs,
+      ...(capability === 'image' ? { visualBasis: { version: 1, fingerprint: visualInputFingerprint(shot, assets, data.documents, data.storyboard.continuity, data), snapshot: visualInputSnapshot(shot, assets, data.documents, data.storyboard.continuity, data) } } : {}),
       connection: { id: connection.id, kind: connection.kind === 'cli' ? 'cli' : 'api', driverId: connection.driverId || null, baseUrl: connection.baseUrl || '', model: connection.kind === 'cli' ? connection.planningModel || '' : connection.model || '', adapter: adapter.id },
       parameters: { mode, aspectRatio: shot.aspectRatio || '16:9', duration: videoParameters?.duration ?? shot.duration, size: shot.imageSize || 'auto', quality: shot.imageQuality || 'auto' },
       allowUserProfile: connection.kind === 'cli'
@@ -1242,6 +1531,14 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
         const shot = context().storyboard.shots.find(item => item.id === request.targetId), item = el('li', 'media-job')
         item.append(el('strong', '', shot.title), el('p', 'media-help', `分场：${context().documents[shot.sourceDocumentId]?.title || '未归属镜头'}`), el('p', 'media-help', `${connection.name} · ${request.parameters.mode} · ${request.parameters.aspectRatio}${capability === 'video' ? ` · 生成 ${request.parameters.duration} 秒／剧情 ${shot.duration} 秒` : ` · ${request.parameters.size} / ${request.parameters.quality}`}`))
         item.append(el('p', 'media-help', request.references.length ? request.references.map(ref => `${ref.role} · 固定版本 ${ref.versionId}`).join('\n') : '未附加媒体参考；身份与场景的一致性约束较弱。'))
+        if (context().documents[shot.sourceDocumentId]) {
+          const continuity = sceneContinuityContext({ ...context(), documentId: shot.sourceDocumentId, shot })
+          for (const message of continuity.warnings) item.append(el('p', 'media-warning', `分场状态待核对：${message}`))
+        }
+        if (capability === 'video' && shot.selectedImageVersionId) {
+          const visual = imageVisualReviewState(shot, assets, context().documents, context().storyboard.continuity, context())
+          if (!visual.reviewed) item.append(el('p', 'media-warning', `分镜图：${visual.label}。请核对当前画面与分场状态；本次视频会沿用当前输入图。`))
+        }
         if (shotIsStale(shot, context().documents)) item.append(el('p', 'media-warning', '剧本来源已更新，请核对固定输入后再确认。'))
         if (jobs.some(job => job.targetId === shot.id && job.status === 'submission_unknown')) item.append(el('p', 'media-warning', '此镜头已有提交结果未知的任务，可能已消耗额度。请先核对；本次确认将创建新生成，可能重复计费。'))
         const details = el('details'); details.append(el('summary', '', '查看本镜头完整输入'), el('pre', 'media-job-snapshot', JSON.stringify(request, null, 2))); item.append(details); list.append(item)
@@ -1294,9 +1591,9 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   }
   async function refresh() {
     const data = context(), sequence = ++requestSequence
-    if (data.projectId !== projectId) { projectId = data.projectId; assets = []; jobs = []; recoveryIssues = []; selectedShotId = null; selectedAssetId = null; candidate = null; selectedSourceId = ''; selectedEpisodeId = ''; lastContextDocId = null; shotDisclosureState.clear(); detailShotId = null; detailPanel = 'content'; mediaStage = 'storyboard'; batchSelection.clear(); invalidateBatchPlan(); batchDialog.close() }
+    if (data.projectId !== projectId) { projectId = data.projectId; assets = []; jobs = []; recoveryIssues = []; selectedShotId = null; selectedAssetId = null; candidate = null; selectedSourceId = ''; selectedEpisodeId = ''; lastContextDocId = null; shotDisclosureState.clear(); pictureNotes.clear(); pictureZoom.close(); detailShotId = null; detailPanel = 'picture'; shotDetailOpen = false; mediaStage = 'storyboard'; batchSelection.clear(); invalidateBatchPlan(); batchDialog.close() }
     renderEndpoints(); renderSources(); renderShots({ detail: !shotDetail.contains(document.activeElement) && ![...shotDetail.querySelectorAll('video')].some(video => !video.paused) }); if (!candidateHost.contains(document.activeElement)) renderCandidate(); renderAssets()
-    if (!invoke || !data.projectId) { error = ''; renderAssets(); return }
+    if (!invoke || !data.projectId) { error = ''; renderAssets(); continuityUI.refresh(); return }
     loading = true; renderAssets()
     try {
       const snapshot = await invoke('media_list', { projectId: data.projectId })
@@ -1309,7 +1606,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       }
     } catch (problem) { if (sequence === requestSequence) error = String(problem?.message || problem) }
     finally {
-      if (sequence === requestSequence) { loading = false; scheduleReferenceSync(); renderShots({ detail: !shotDetail.contains(document.activeElement) && ![...shotDetail.querySelectorAll('video')].some(video => !video.paused) }); if (!candidateHost.contains(document.activeElement) && !operationBusy) renderCandidate(); renderAssets(); renderJobs(); renderGenerationReadiness(); productionOverview.refresh() }
+      if (sequence === requestSequence) { loading = false; scheduleReferenceSync(); renderShots({ detail: !shotDetail.contains(document.activeElement) && ![...shotDetail.querySelectorAll('video')].some(video => !video.paused) }); if (!candidateHost.contains(document.activeElement) && !operationBusy) renderCandidate(); renderAssets(); renderJobs(); renderGenerationReadiness(); productionOverview.refresh(); continuityUI.refresh(); visualReviewUI.refresh() }
     }
   }
   function renderAssets() {
@@ -1431,7 +1728,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       function renderMatches() {
         assertOwner()
         const shots = context().storyboard.shots
-        const rows = planVideoReturn({ shots, assets: assets.filter(asset => importedAssetIds.has(asset.id) || includeExisting.checked), manifest, documents: context().documents })
+        const rows = planVideoReturn({ shots, assets: assets.filter(asset => importedAssetIds.has(asset.id) || includeExisting.checked), manifest, documents: context().documents, structure: context().structure, storyboard: context().storyboard, referenceAssets: assets })
         reviewRevision = context().storyboard.revision; assignments = []
         list.replaceChildren()
         if (!rows.length) list.append(el('p', 'media-empty', '请导入从 Flow／Muse 下载的视频，或勾选“同时列出素材库已有视频”。'))
@@ -1495,7 +1792,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
             if (context().documents[sourceId]) showSource(sourceId)
             else { selectedEpisodeId = OTHER_EPISODE; selectedSourceId = UNASSIGNED_SOURCE }
             lastContextDocId = context().currentDocId
-            navigate('storyboard'); showStage('export'); notify(`已关联 ${chosen.length} 个视频，原素材保留；请完整播放后审核。`)
+            navigate('storyboard'); mediaStage = 'videos'; openShotDetail(selectedShotId, 'versions'); notify(`已关联 ${chosen.length} 个视频，原素材保留；请完整播放后审核。`)
           })
         } finally { setBusy(false) }
       }
@@ -1516,7 +1813,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       const data = context(), entries = selectedVideoEntries(data)
       const ready = entries.filter(item => item.media?.asset.kind === 'video' && item.media.version.mimeType?.startsWith('video/'))
       if (!ready.length) throw new Error('当前范围尚无选用视频，请先回填或生成并选用')
-      const missing = entries.length - ready.length, unreviewed = ready.filter(({ shot }) => !videoReviewState(shot, data.documents).reviewed).length
+      const missing = entries.length - ready.length, unreviewed = ready.filter(({ shot }) => !videoReviewState(shot, data.documents, data).reviewed).length
       if ((missing || unreviewed) && !window.confirm(`当前范围 ${entries.length} 镜：${missing} 镜缺少选用视频，${unreviewed} 镜尚未通过当前内容审核。仅导出已有的 ${ready.length} 个选用视频，并在清单保留对应镜头信息。继续？`)) return
       const path = await invoke('media_export_selected_videos', { projectId: data.projectId, projectName: data.project.name, scopeName: storyboardExportScope(data, selectedEpisodeId, selectedSourceId), shots: ready.map(({ shot }) => ({ id: shot.id, title: shot.title, sourceDocumentId: shot.sourceDocumentId, sourceTitle: data.documents[shot.sourceDocumentId]?.title || '', videoVersionId: shot.selectedVideoVersionId, dialogue: shot.dialogue, duration: shot.duration })) })
       if (path) notify(`已导出当前范围 ${ready.length} 个选用视频：${path}`)
@@ -1537,7 +1834,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       current = Math.max(0, Math.min(ready.length - 1, index)); choice.value = String(current)
       player.pause(); player.src = fileUrl(ready[current].media.version)
       const shot = ready[current].shot
-      status.textContent = `${current + 1} / ${ready.length} · ${shot.title} · ${shotReadiness(shot, assets, [], data.documents).label}${entries.length > ready.length ? `；另有 ${entries.length - ready.length} 镜缺少视频，未播放` : ''}`
+      status.textContent = `${current + 1} / ${ready.length} · ${shot.title} · ${shotReadiness(shot, assets, [], data.documents, data.storyboard.continuity, data).label}${entries.length > ready.length ? `；另有 ${entries.length - ready.length} 镜缺少视频，未播放` : ''}`
       previous.disabled = current === 0; next.disabled = current === ready.length - 1
       if (play) Promise.resolve(player.play()).catch(() => { status.textContent += ' · 请点击播放继续' })
     }
@@ -1596,22 +1893,66 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   async function exportMuse() {
     return exportVideoBundle(buildMuseExport, 'media_export_muse')
   }
+  function checkFlowVisualExport(data, available) {
+    const manifest = JSON.parse(buildFlowExport(data, available).texts.find(item => item.path === 'manifest.json').content)
+    const pending = data.storyboard.shots.map(shot => ({ shot, review: imageVisualReviewState(shot, available, data.documents, data.storyboard.continuity, data), input: manifest.shots.find(item => item.id === shot.id)?.inputPlan })).filter(item => !item.review.reviewed || !item.input?.ready)
+    if (!pending.length) return Promise.resolve('export')
+    return new Promise(resolve => {
+      const dialog = el('dialog', 'app-dialog visual-export-dialog'), actions = el('div', 'dialog-actions'), list = el('ul', 'visual-export-list')
+      dialog.setAttribute('aria-label', 'Flow 导出前视觉检查')
+      let finished = false
+      const finish = result => { if (finished) return; finished = true; dialog.close(); dialog.remove(); resolve(result) }
+      for (const { shot, review, input } of pending) {
+        const reasons = [...new Set([...(review.issues || []), ...(input?.notes || []).filter(note => !note.startsWith(`${review.label}：`))])]
+        list.append(el('li', '', `${shot.title}：${review.label}${review.changedFields.length ? `（${review.changedFields.join('、')}）` : ''}${reasons.length ? `；${reasons.join('；')}` : ''}`))
+      }
+      actions.append(button('取消', () => finish('cancel')), button('仅导出待复核素材', () => finish('export')), button('返回视觉复核', () => finish('review'), 'primary-button'))
+      dialog.append(el('h2', '', 'Flow 导出前视觉检查'), el('p', 'media-warning', `${data.storyboard.shots.length} 个镜头中，${pending.length} 个需要核对画面或视频输入。`), el('p', 'media-help', '图片已关联不代表画面一致。先核对人物服装、物品结构、场景布局和光线，再使用分镜图作为视频首帧。仍可导出素材用于修正，包内会保留检查报告与待办，不自动标为通过。'), list, actions)
+      dialog.addEventListener('cancel', event => { event.preventDefault(); finish('cancel') })
+      dialog.addEventListener('close', () => finish('cancel'))
+      document.body.append(dialog); dialog.showModal()
+    })
+  }
   async function exportVideoBundle(build, command, selection = null) {
-    return run(async () => {
+    let reviewIds = null
+    const result = await run(async () => {
       requireProject(); desktop()
       if (selection && selection.projectId !== context().projectId) throw new Error('项目已切换，请重新选择分场导出')
       const data = selection ? singleSceneExport(context(), selection.sourceId) : structuredClone(context())
+      const sourceRevision = data.storyboard.revision
       if (!selection) {
         data.exportScope = storyboardExportScope(data, selectedEpisodeId, selectedSourceId)
         data.storyboard.shots = visibleShots(data)
       }
       if (!data.storyboard.shots.length) throw new Error('尚无分镜，请先拆镜或新建镜头再导出')
+      const sourceSnapshot = JSON.stringify(data.storyboard.shots.map(shot => data.documents[shot.sourceDocumentId] || null))
       const latest = await invoke('media_list', { projectId: data.projectId })
       if (context().projectId !== data.projectId) throw new Error('项目已切换，请在目标项目重新导出')
-      data.storyboard = planReferenceBackfill(data.storyboard, latest.assets, data.documents).storyboard
+      data.storyboard = planReferenceBackfill(data.storyboard, latest.assets, data.documents, data.projectId).storyboard
+      if (command === 'media_export_flow') {
+        const decision = await checkFlowVisualExport(data, latest.assets)
+        if (context().projectId !== data.projectId || context().storyboard.revision !== sourceRevision || JSON.stringify(data.storyboard.shots.map(shot => context().documents[shot.sourceDocumentId] || null)) !== sourceSnapshot) throw new Error('项目、剧本或分镜已变化，请重新检查后导出')
+        if (decision === 'review') { reviewIds = data.storyboard.shots.map(shot => shot.id); return }
+        if (decision !== 'export') return
+      }
       const bundle = build(data, latest.assets)
       const path = await invoke(command, { projectId: data.projectId, bundle })
       notify(path)
+      return path
+    })
+    if (reviewIds) visualReviewUI.open({ shotIds: reviewIds })
+    return result
+  }
+  async function exportContinuity({ kind = 'all', projectId: owner } = {}) {
+    return run(async () => {
+      requireProject(); desktop()
+      const data = structuredClone(context())
+      if (owner && owner !== data.projectId) throw new Error('项目已切换，请重新打开设定后导出')
+      const latest = await invoke('media_list', { projectId: data.projectId })
+      if (context().projectId !== data.projectId) throw new Error('项目已切换，请在目标项目重新导出')
+      const bundle = buildContinuityExport(data, latest.assets, { kind })
+      const path = await invoke('media_export_continuity', { projectId: data.projectId, bundle })
+      notify(`设定素材包已导出：${path}`)
       return path
     })
   }
@@ -1647,18 +1988,22 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     })
   }
   function pendingAssetDraft(owner = null) {
+    const continuityDraft = continuityUI.pendingDraft(owner)
+    if (continuityDraft) return { ...continuityDraft, assetId: '__continuity__' }
     const first = [...assetDrafts.keys()].find(key => !owner || key.startsWith(`${owner}:`))
     if (!first) return null
     const separator = first.indexOf(':')
     return { projectId: first.slice(0, separator), assetId: first.slice(separator + 1) }
   }
   function discardAssetDrafts(owner, assetId = null) {
+    if (!assetId || assetId === '__continuity__') continuityUI.discardDraft(owner)
     for (const key of assetDrafts.keys()) {
       if (assetId ? key === `${owner}:${assetId}` : key.startsWith(`${owner}:`)) assetDrafts.delete(key)
     }
     if (owner === context().projectId) renderAssetDetail()
   }
   async function saveAssetDrafts(owner) {
+    if (continuityUI.pendingDraft(owner) && !await continuityUI.saveDraft(owner)) throw new Error('素材设定尚未保存，请检查设定面板')
     if (operationBusy || referenceSyncBusy) throw new Error('素材正在保存或同步，请稍后再试')
     desktop()
     const pending = [...assetDrafts].filter(([key]) => key.startsWith(`${owner}:`))
@@ -1682,6 +2027,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     } finally { operationBusy = false }
   }
   function showAssetDraft(assetId) {
+    if (assetId === '__continuity__') return continuityUI.showDraft()
     if (!assets.some(asset => asset.id === assetId)) return false
     selectedAssetId = assetId; roleFilter.value = ''; resultVersionId = ''
     navigate('assets'); renderAssets(); renderAssetDetail()
@@ -1690,17 +2036,16 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   }
   function showJobs() { renderJobs(); if (!jobsDialog.open) jobsDialog.showModal() }
   function openJobResult(job, target) {
-    const result = jobResult(job, assets, context().storyboard.shots, context().documents)
+    const result = jobResult(job, assets, context().storyboard.shots, context().documents, context())
     jobsDialog.close()
     if (target === 'shot' && result.shot) {
       const sourceId = result.shot.sourceDocumentId
       if (context().documents[sourceId]) showSource(sourceId)
       else { selectedEpisodeId = OTHER_EPISODE; selectedSourceId = UNASSIGNED_SOURCE }
       lastContextDocId = context().currentDocId
-      selectedShotId = result.shot.id
+      selectedShotId = result.shot.id; shotDetailOpen = true; detailPanel = job.capability === 'video' ? 'versions' : 'picture'
       navigate('storyboard'); renderSources(); renderShots()
-      const control = [...shotList.querySelectorAll('[data-shot-focus]')].find(node => node.dataset.shotFocus === `${selectedShotId}:select`)
-      control?.focus({ preventScroll: true }); control?.scrollIntoView({ block: 'nearest' })
+      selectDetailPanel(detailPanel, { focus: true })
     } else if (result.asset) {
       roleFilter.value = result.asset.role
       selectedAssetId = result.asset.id
@@ -1736,7 +2081,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
         })))
       }
       for (const job of group) {
-      const result = jobResult(job, assets, context().storyboard.shots, context().documents)
+      const result = jobResult(job, assets, context().storyboard.shots, context().documents, context())
       const row = el('article', 'media-job')
       const heading = el('div', 'media-job-heading'); heading.append(el('strong', '', job.request?.character ? `${job.request.character.name} · 正脸与三视图` : context().storyboard.shots.find(shot => shot.id === job.targetId)?.title || job.targetId), el('span', '', result.status))
       row.append(heading, el('p', 'media-help', `${job.capability === 'video' ? '视频' : '图片'} · ${job.request?.connection?.id || '执行端'} · ${job.id.slice(-8)}`))
@@ -1767,11 +2112,14 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   const taskProgressTimer = window.setInterval(() => { if (storyboardTasks.active()) updateStoryboardTaskLabels() }, 1000)
   window.addEventListener('beforeunload', () => { window.clearInterval(taskProgressTimer); window.clearTimeout(referenceSyncTimer) }, { once: true })
   const poll = window.setInterval(() => {
+    // Text extraction has no media job; keep its elapsed time and completion lock current.
+    continuityUI.refresh()
     if (!loading && !operationBusy && jobs.some(job => !terminal(job.status))) refresh()
   }, 5000)
   window.addEventListener('beforeunload', () => window.clearInterval(poll), { once: true })
   function contextObjects() {
-    const shots = context().storyboard.shots.map(shot => ({ key: `shot:${shot.id}`, kind: '镜头', label: shot.title, content: mediaPrompt(shot, context().project) }))
+    const requested = new Set(context().contextReferenceKeys || [])
+    const shots = context().storyboard.shots.map(shot => ({ key: `shot:${shot.id}`, kind: '镜头', label: shot.title, content: requested.has(`shot:${shot.id}`) ? mediaPrompt(shot, context().project, [], context()) : '' }))
     const versions = assets.flatMap(asset => asset.versions.map(version => ({
       key: `asset:${version.id}`, kind: '素材说明（无媒体字节）', label: `${asset.name} · ${version.id.slice(-8)}`,
       content: `素材名称：${asset.name}\n用途：${ASSET_ROLES[asset.role] || asset.role}\n固定版本：${version.id}\n格式：${version.mimeType}\n此文字请求仅引用素材说明，未附加图片或视频字节。`
@@ -1789,5 +2137,5 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     const found = context().projectId === projectId && findMediaVersion(assets, versionId)
     return preview(found?.version, found?.asset.name || '所选媒体版本')
   }
-  return { showStage, reserveStoryboardTask, updateStoryboardTask, releaseStoryboardTask, bindStoryboardTask: id => storyboardTasks.bind(id), getStoryboardTask: id => storyboardTasks.get(id), isStoryboardBusy: () => Boolean(storyboardTasks.active()), hasPendingWork: () => operationBusy || referenceSyncBusy, pendingAssetDraft, discardAssetDrafts, saveAssetDrafts, showAssetDraft, selectDocument, refresh, renderEndpoints, receiveCandidate, clearCandidate, applyCandidate, showJobs, generateStoryboard, restorePackage, showPendingImports, contextObjects, operationContext, previewVersion, openBatchPlan, openCharacterImages, hasCandidate: () => Boolean(candidate) }
+  return { showStage, focusShot, reserveStoryboardTask, updateStoryboardTask, releaseStoryboardTask, bindStoryboardTask: id => storyboardTasks.bind(id), getStoryboardTask: id => storyboardTasks.get(id), isStoryboardBusy: () => Boolean(storyboardTasks.active()), hasPendingWork: () => operationBusy || referenceSyncBusy || continuityUI.hasPendingWork(), openContinuity: () => continuityUI.open(), receiveEntityCandidate: (...args) => continuityUI.receiveCandidate(...args), clearEntityCandidate: id => continuityUI.clearCandidate(id), pendingAssetDraft, discardAssetDrafts, saveAssetDrafts, showAssetDraft, selectDocument, refresh, renderEndpoints, receiveCandidate, clearCandidate, applyCandidate, showJobs, generateStoryboard, restorePackage, showPendingImports, contextObjects, operationContext, previewVersion, openBatchPlan, openCharacterImages, hasCandidate: () => Boolean(candidate) }
 }

@@ -7,7 +7,7 @@ import { createShot } from '../src/storyboard.js'
 import { planReferenceBackfill } from '../src/storyboard-references.js'
 import { storyboardExportScope, singleSceneExport } from '../src/storyboard-scope.js'
 
-const asset = { name: '角色甲', role: 'character', selectedVersionId: 'new', versions: [{ id: 'fixed', mimeType: 'image/png' }, { id: 'new', mimeType: 'image/jpeg' }, { id: 'video', mimeType: 'video/mp4' }] }
+const asset = { projectId: 'project-1', name: '角色甲', role: 'character', selectedVersionId: 'new', versions: [{ id: 'fixed', mimeType: 'image/png' }, { id: 'new', mimeType: 'image/jpeg' }, { id: 'video', mimeType: 'video/mp4' }] }
 function context(shots) { return { project: { name: '测试项目', type: '短剧' }, storyboard: { revision: 3, shots }, documents: {}, connections: [{ apiKey: 'DO-NOT-EXPORT' }] } }
 test('exports pinned versions, deduplicates shared roles and preserves shot order and content', () => {
   const first = createShot({ title: '../第一镜', visual: '雨中的街道', action: '向左走', dialogue: '你好', camera: '缓慢推近' })
@@ -61,6 +61,7 @@ test('UI exports a snapshot without any video connection and refuses a project s
       return '已导出'
     } }
     vm.createContext(env); vm.runInContext(`${handler}\nthis.submit = ${target === 'flow' ? 'exportFlow' : 'exportMuse'}`, env)
+    env.checkFlowVisualExport = async () => 'export'
     await env.submit()
     assert.deepEqual(calls.map(call => call.command), switched ? ['media_list'] : ['media_list', `media_export_${target}`])
     if (switched) assert.match(notices[0], /项目已切换/)
@@ -83,6 +84,7 @@ test('单场导出入口无视当前全集范围，使用点击时的分场快�
         return '/导出/场二'
       } }
     vm.createContext(env); vm.runInContext(handler, env)
+    env.checkFlowVisualExport = async () => 'export'
     assert.equal(await env.exportVideoBundle(target === 'flow' ? buildFlowExport : buildMuseExport, `media_export_${target}`, { projectId: 'project-1', sourceId: 's2' }), '/导出/场二')
     const bundle = calls[1].payload.bundle, manifest = JSON.parse(bundle.texts.find(file => file.path === 'manifest.json').content)
     assert.equal(bundle.scopeName, '第一集_场二')

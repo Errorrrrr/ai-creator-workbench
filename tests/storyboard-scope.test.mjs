@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { storyboardGroups, scopeForDocument, scopedShots, moveSourceShot, replaceSourceShots, OTHER_EPISODE, UNASSIGNED_SOURCE, storyboardExportScope, storyboardSceneEntries, shotsForScenes, singleSceneExport } from '../src/storyboard-scope.js'
+import { isSceneDocument } from '../src/episode-scenes.js'
 
 const shot = (id, sourceDocumentId) => ({ id, sourceDocumentId, references: [{ versionId: `${id}-ref`, role: 'reference' }] })
 const data = {
@@ -78,17 +79,26 @@ test('替换只影响候选所属来源，保留其他场的镜头及素材引�
   assert.deepEqual(shots.map(s => s.id), ['second', 'replacement', 'other-episode', 'missing', 'manual', 'episode'])
 })
 
-test('分场选择器跟随左侧当前文档，刷新保留全集范围，空集可回到分集正文', async () => {
+test('分场选择器跟随左侧当前文档，刷新保留总览，集正文与待归场镜头不能直接拆镜', async () => {
   const { readFileSync } = await import('node:fs')
   const vm = await import('node:vm')
   const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
-  const logic = source.slice(source.indexOf('  function visibleShots('), source.indexOf('  function renderShots('))
+  // Exercise scope navigation without pulling in the unrelated next-action UI.
+  const extract = name => {
+    const match = new RegExp(`^( *)((?:async )?function ${name}\\()`, 'm').exec(source)
+    assert.ok(match, `missing production function ${name}`)
+    const body = source.slice(match.index), end = new RegExp(`^${match[1]}\\}`, 'm').exec(body)
+    return body.slice(0, end.index + end[0].length)
+  }
+  const logic = ['visibleShots', 'selectDocument', 'showSource', 'focusShot', 'renderSources'].map(extract).join('\n')
   const control = () => ({ value: '', options: [], replaceChildren(...options) { this.options = options }, append(option) { this.options.push(option) }, setAttribute() {} })
   const current = structuredClone(data); current.currentDocId = 's2'; current.projectId = 'p'
-  const env = { context: () => current, storyboardGroups, scopeForDocument, scopedShots, OTHER_EPISODE, UNASSIGNED_SOURCE,
-    selectedEpisodeId: '', selectedSourceId: '', lastContextDocId: null, storyboardTasks: { active: () => null }, renderStoryboardTaskProgress() {},
+  const env = { context: () => current, storyboardGroups, scopeForDocument, scopedShots, isSceneDocument, OTHER_EPISODE, UNASSIGNED_SOURCE,
+    selectedEpisodeId: '', selectedSourceId: '', lastContextDocId: null, shotDetailOpen: false, detailPanel: 'picture',
+    storyboardTasks: { active: () => null }, renderStoryboardTaskProgress() {}, renderNextAction() {}, selectDetailPanel() {},
     episodeSelect: control(), sourceSelect: control(), wholeEpisodeButton: control(), generateButton: control(), addShotButton: control(),
-    Option: function (text, value) { return { text, value } }, renderShots() {}, renderCandidate() {} }
+    organizeScenes() {}, organizeScenesButton: control(), assignShotsButton: control(), openScriptButton: control(), hierarchyBreadcrumb: control(),
+    Option: function (text, value) { return { text, value } }, renderShots() {}, renderCandidate() {}, navigate() {}, shotList: { querySelectorAll: () => [] } }
   vm.createContext(env); vm.runInContext(logic, env)
   env.renderSources()
   assert.equal(env.selectedSourceId, 's2')
@@ -108,5 +118,64 @@ test('分场选择器跟随左侧当前文档，刷新保留全集范围，空�
   current.currentDocId = 'ep2'; env.renderSources()
   assert.equal(env.selectedSourceId, '')
   assert.equal(env.selectedEpisodeId, 'ep2')
-  assert.ok(env.sourceSelect.options.some(option => option.value === 'ep2'))
+  assert.ok(!env.sourceSelect.options.some(option => option.value === 'ep2'), 'empty episode is an overview rather than a scene choice')
+  assert.equal(env.generateButton.disabled, true)
+  assert.equal(env.organizeScenesButton.hidden, false)
+  current.currentDocId = 'ep1'; env.renderSources()
+  assert.ok(env.sourceSelect.options.some(option => option.value === 'ep1' && /待归场/.test(option.text)), 'legacy episode shots remain accessible')
+  env.selectedSourceId = 'ep1'; env.renderSources()
+  assert.equal(env.generateButton.disabled, true)
+  assert.equal(env.addShotButton.disabled, true)
+  assert.equal(env.assignShotsButton.hidden, false)
+  assert.match(env.hierarchyBreadcrumb.textContent, /待归场/)
+  env.selectedEpisodeId = OTHER_EPISODE; env.selectedSourceId = UNASSIGNED_SOURCE; env.renderSources()
+  assert.equal(env.generateButton.disabled, true)
+  assert.equal(env.assignShotsButton.hidden, false)
+  const before = structuredClone(current.storyboard.shots)
+  assert.equal(env.focusShot('episode'), true)
+  assert.equal(env.selectedSourceId, 'ep1', 'legacy episode shots can be located without pretending they are a scene')
+  assert.equal(env.selectedShotId, 'episode')
+  assert.equal(env.focusShot('missing'), true)
+  assert.equal(env.selectedSourceId, UNASSIGNED_SOURCE)
+  assert.equal(env.selectedEpisodeId, OTHER_EPISODE)
+  assert.equal(env.focusShot('first-b'), true)
+  assert.equal(env.selectedSourceId, 's1')
+  assert.equal(env.selectedShotId, 'first-b')
+  assert.equal(env.shotDetailOpen, true, 'locating a shot opens its detail instead of only highlighting the grid')
+  assert.equal(env.detailPanel, 'picture')
+  assert.equal(env.focusShot('gone'), false)
+  env.selectDocument('s2')
+  assert.equal(env.shotDetailOpen, false, 'choosing a different scene returns to its overview')
+  assert.deepEqual(current.storyboard.shots, before, 'navigation never changes shot or media ownership')
+})
+
+test('旧来源镜头在分场列表明确待归场，查看与单场导出保持原ID和引用', () => {
+  const entries = storyboardSceneEntries(data)
+  const scene = entries.find(entry => entry.sourceId === 's1')
+  const legacy = entries.find(entry => entry.sourceId === 'ep1')
+  assert.equal(scene.pendingAssignment, false)
+  assert.equal(legacy.pendingAssignment, true)
+  assert.match(legacy.title, /^待归场/)
+  const exported = singleSceneExport(data, 'ep1')
+  assert.deepEqual(exported.storyboard.shots, data.storyboard.shots.filter(shot => shot.sourceDocumentId === 'ep1'))
+})
+
+test('绕过禁用按钮也不能对整集、其他文档或缺失来源直接拆镜或新建镜头', async () => {
+  const { readFileSync } = await import('node:fs'), vm = await import('node:vm')
+  const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
+  const extract = name => {
+    const match = new RegExp(`^( *)((?:async )?function ${name}\\()`, 'm').exec(source)
+    const body = source.slice(match.index), end = new RegExp(`^${match[1]}\\}`, 'm').exec(body)
+    return body.slice(0, end.index + end[0].length)
+  }
+  for (const sourceId of ['ep1', 'draft', 'deleted', '']) {
+    const current = structuredClone(data), before = structuredClone(current.storyboard.shots), notices = []
+    const env = { context: () => current, requireProject() {}, isSceneDocument, selectedSourceId: sourceId, sourceSelect: { value: sourceId }, SHOT_LIMIT: 120,
+      storyboardChoiceOpen: false, run: callback => callback(), notify: message => notices.push(message) }
+    vm.createContext(env); vm.runInContext([extract('generateStoryboard'), extract('addShot')].join('\n'), env)
+    await env.generateStoryboard()
+    assert.match(notices[0], /先整理本集分场/)
+    await assert.rejects(env.addShot(), /选择具体分场/)
+    assert.deepEqual(current.storyboard.shots, before)
+  }
 })

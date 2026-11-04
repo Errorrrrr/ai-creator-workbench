@@ -1,4 +1,5 @@
 // Navigation is derived from document IDs; changing titles never changes ownership.
+import { isSceneDocument } from './episode-scenes.js'
 export const OTHER_EPISODE = '__other_documents__'
 export const UNASSIGNED_SOURCE = '__unassigned_shots__'
 
@@ -12,7 +13,7 @@ export function storyboardGroups({ structure = {}, documents = {} }) {
     return { id, title: documents[id]?.title || episodes[id]?.title || id, sceneIds, sourceIds }
   })
   const other = Object.keys(documents).filter(id => !used.has(id))
-  groups.push({ id: OTHER_EPISODE, title: '其他内容与未归属', sceneIds: other, sourceIds: other })
+  groups.push({ id: OTHER_EPISODE, title: '待归场镜头', sceneIds: other, sourceIds: other })
   return groups
 }
 
@@ -37,12 +38,13 @@ export function storyboardSceneEntries(data) {
   return storyboardGroups(data).flatMap(group => {
     const entries = group.sourceIds.filter(id => (group.sceneIds.includes(id) && group.id !== OTHER_EPISODE) || shots.some(shot => shot.sourceDocumentId === id)).map(sourceId => ({
       sourceId, episodeId: group.id, episodeTitle: group.title,
-      title: data.documents[sourceId]?.title || '未归属镜头',
+      title: `${isSceneDocument(data, sourceId) ? '' : '待归场 · '}${data.documents[sourceId]?.title || '来源缺失镜头'}`,
+      pendingAssignment: !isSceneDocument(data, sourceId),
       shots: shots.filter(shot => shot.sourceDocumentId === sourceId)
     }))
     if (group.id === OTHER_EPISODE) {
       const orphaned = shots.filter(shot => !data.documents[shot.sourceDocumentId])
-      if (orphaned.length) entries.push({ sourceId: UNASSIGNED_SOURCE, episodeId: group.id, episodeTitle: group.title, title: '未归属镜头', shots: orphaned })
+      if (orphaned.length) entries.push({ sourceId: UNASSIGNED_SOURCE, episodeId: group.id, episodeTitle: group.title, title: '待归场 · 来源缺失镜头', pendingAssignment: true, shots: orphaned })
     }
     return entries
   })
