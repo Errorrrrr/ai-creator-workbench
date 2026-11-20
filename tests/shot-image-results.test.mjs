@@ -4,7 +4,11 @@ import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import { createShot, validateStoryboard, snapshotStoryboardSource, SHOT_LIMIT } from '../src/storyboard.js'
 import { storyboardGroups, replaceSourceShots } from '../src/storyboard-scope.js'
-import { planShotImageResults, imageResultCheckpoint } from '../src/shot-image-results.js'
+import { planShotImageResults, imageResultCheckpoint, latestShotRepairCandidate } from '../src/shot-image-results.js'
+import { createEntity, entityStateFingerprint, planEntityImageResults } from '../src/continuity-assets.js'
+import { planReferenceBackfill } from '../src/storyboard-references.js'
+import { visualInputSnapshot, visualInputFingerprint } from '../src/visual-review.js'
+import { emptySceneContinuity } from '../src/scene-continuity.js'
 
 const projectId = 'project-1'
 const first = '1793066400000', second = '1793066460000', third = '1793066520000'
@@ -28,6 +32,139 @@ const freeze = value => {
   if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value) }
   return value
 }
+
+function visualResultFixture(selected = 'old-image') {
+  const current = shot('shot-1', selected)
+  current.visual = '木筏上的人物抬手'
+  current.propNames = ['木筏']
+  current.imageResultCheckpoint = { jobId: 'old', createdAt: first }
+  const raft = createEntity({ id: 'raft', kind: 'prop', name: '木筏', traits: '三块木板', states: [{ id: 'raft-state', name: '完整', referenceVersionId: 'raft-image' }] })
+  const continuity = { version: 1, style: '电影写实', entities: [raft] }
+  raft.states[0].referenceFingerprint = entityStateFingerprint(raft, raft.states[0], continuity.style)
+  const media = [asset([version('old-image', 'old'), version('result', 'new')]), {
+    id: 'raft-asset', projectId, kind: 'image', role: 'prop', name: '木筏', selectedVersionId: 'raft-image',
+    versions: [{ id: 'raft-image', mimeType: 'image/png', metadata: { provenance: { entity: { entityId: raft.id, stateId: raft.states[0].id, kind: 'prop' } } } }],
+  }]
+  const data = { projectId, documents: { 'scene-1': { title: '第一场', content: '人物乘木筏前行', sceneContinuity: emptySceneContinuity() } }, storyboard: { ...board(current), continuity } }
+  data.storyboard = planReferenceBackfill(data.storyboard, media, data.documents, projectId).storyboard
+  const basis = { version: 1, fingerprint: visualInputFingerprint(data.storyboard.shots[0], media, data.documents, continuity, data), snapshot: visualInputSnapshot(data.storyboard.shots[0], media, data.documents, continuity, data) }
+  const jobs = [job('old'), job('new', 'shot-1', second, { request: { visualBasis: basis } })]
+  return { data, media, jobs, basis }
+}
+
+test('生成期间画面、剧本、参考或设定变化，完成图只留候选且重启不会再自动选用', () => {
+  const mutations = {
+    画面: f => { f.data.storyboard.shots[0].visual = '木筏上的人物坐下' },
+    来源剧本: f => { f.data.documents['scene-1'].content += '，天色渐暗' },
+    分场状态: f => { f.data.documents['scene-1'].sceneContinuity.exitState = '木筏已破损' },
+    视觉基准: f => { f.data.storyboard.continuity.style = '黑白漫画' },
+    相关设定: f => { f.data.storyboard.continuity.entities[0].traits = '五块木板' },
+    固定参考: f => { f.data.storyboard.shots[0].references = [] },
+    缺失参考: f => { f.media = f.media.filter(item => item.id !== 'raft-asset') },
+  }
+  for (const [name, mutate] of Object.entries(mutations)) {
+    for (const selected of ['old-image', '']) {
+      const f = visualResultFixture(selected); mutate(f)
+      const result = planShotImageResults(f.data.storyboard, f.media, f.jobs, projectId, f.data)
+      assert.equal(result.storyboard.shots[0].selectedImageVersionId, selected, name)
+      assert.equal(result.changed, 1, name)
+      assert.equal(result.linked.length, 0, name)
+      assert.equal(result.stale[0].versionId, 'result', name)
+      assert.deepEqual(result.storyboard.shots[0].imageResultCheckpoint, { jobId: 'new', createdAt: second })
+      const restored = JSON.parse(JSON.stringify(result.storyboard))
+      const retry = planShotImageResults(restored, f.media, f.jobs, projectId, { ...f.data, storyboard: restored })
+      assert.equal(retry.changed, 0, name)
+      assert.equal(retry.stale.length, 0, name)
+      assert.equal(f.media[0].versions.some(item => item.id === 'result'), true)
+    }
+  }
+})
+
+test('输入保持一致或只改无关资料时，普通完成图仍自动选用', () => {
+  const f = visualResultFixture()
+  f.data.documents.unrelated = { title: '另一场', content: '其他场景' }
+  f.data.storyboard.continuity.entities.push(createEntity({ id: 'cup', kind: 'prop', name: '水杯' }))
+  f.data.storyboard.shots[0].dialogue = '这段对白只影响视频'
+  const result = planShotImageResults(f.data.storyboard, f.media, f.jobs, projectId, f.data)
+  assert.equal(result.storyboard.shots[0].selectedImageVersionId, 'result')
+  assert.equal(result.linked.length, 1)
+  assert.equal(result.stale.length, 0)
+})
+
+test('旧输入结果保留候选后，按当前输入发起的新任务仍正常自动选用', () => {
+  const f = visualResultFixture()
+  f.data.storyboard.shots[0].visual = '人物站在木筏前端'
+  const stale = planShotImageResults(f.data.storyboard, f.media, f.jobs, projectId, f.data)
+  f.data.storyboard = stale.storyboard
+  const current = f.data.storyboard.shots[0]
+  const basis = { version: 1, fingerprint: visualInputFingerprint(current, f.media, f.data.documents, f.data.storyboard.continuity, f.data), snapshot: visualInputSnapshot(current, f.media, f.data.documents, f.data.storyboard.continuity, f.data) }
+  f.jobs.push(job('next', 'shot-1', third, { request: { visualBasis: basis } }))
+  f.media[0].versions.push(version('next-result', 'next'))
+  const result = planShotImageResults(f.data.storyboard, f.media, f.jobs, projectId, f.data)
+  assert.equal(result.storyboard.shots[0].selectedImageVersionId, 'next-result')
+  assert.equal(result.stale.length, 0)
+})
+
+test('没有有效生成依据的历史任务保持原有选用行为，缺少上下文的既有调用兼容', () => {
+  for (const record of [undefined, {}, { version: 1, fingerprint: 'visual-v1:1:bad', snapshot: {} }]) {
+    const f = visualResultFixture()
+    f.jobs[1].request.visualBasis = record
+    f.data.storyboard.shots[0].visual = '改写后的画面'
+    const result = planShotImageResults(f.data.storyboard, f.media, f.jobs, projectId, f.data)
+    assert.equal(result.storyboard.shots[0].selectedImageVersionId, 'result')
+    assert.equal(result.stale.length, 0)
+  }
+  const f = visualResultFixture()
+  f.data.storyboard.shots[0].visual = '改写后的画面'
+  assert.equal(planShotImageResults(f.data.storyboard, f.media, f.jobs, projectId).storyboard.shots[0].selectedImageVersionId, 'result')
+})
+
+test('有有效生成依据但当前输入无法核验时保留候选', () => {
+  const f = visualResultFixture()
+  Object.defineProperty(f.data.documents['scene-1'], 'content', { get() { throw new Error('资料读取失败') } })
+  const result = planShotImageResults(f.data.storyboard, f.media, f.jobs, projectId, f.data)
+  assert.equal(result.storyboard.shots[0].selectedImageVersionId, 'old-image')
+  assert.equal(result.stale.length, 1)
+})
+
+test('真实同步入口按同步参考后的输入决定选用，保存失败可重试且只提示一次', async () => {
+  for (const changed of [false, true]) {
+    const f = visualResultFixture()
+    if (changed) {
+      const raft = f.data.storyboard.continuity.entities[0], state = raft.states[0]
+      const entity = { entityId: raft.id, stateId: state.id, kind: 'prop', name: raft.name, stateName: state.name, definitionFingerprint: entityStateFingerprint(raft, state, f.data.storyboard.continuity.style) }
+      f.jobs.push(job('entity-new', 'entity-raft-state', third, { assetId: 'raft-asset', request: { entity } }))
+      f.media[1].versions.push({ id: 'raft-next', mimeType: 'image/png', metadata: { provenance: { jobId: 'entity-new', entity } } })
+    }
+    const notices = [], commits = []
+    const env = {
+      context: () => f.data, invoke: true, projectId, assets: f.media, jobs: f.jobs, referenceSyncBusy: false, loading: false, operationBusy: false, error: '',
+      continuityUI: { pendingDraft: () => null, refresh() {} }, storyboardTasks: { active: () => false },
+      planEntityImageResults, planReferenceBackfill, planShotImageResults,
+      scheduleReferenceSync() {}, renderShots() {}, refreshReferenceDetails() {}, selectedShot: () => null,
+      shotDetail: { querySelector: () => null }, refreshShotCandidates() {}, renderJobs() {}, productionOverview: { refresh() {} },
+      notify: message => notices.push(message),
+      fail: true,
+      commit: async (patch, options) => { commits.push(options); if (env.fail) throw new Error('磁盘不可写'); f.data.storyboard = patch.storyboard },
+    }
+    vm.createContext(env); vm.runInContext(productionFunction('synchronizeReferences'), env)
+    const original = structuredClone(f.data.storyboard)
+    await env.synchronizeReferences()
+    assert.deepEqual(f.data.storyboard, original)
+    assert.match(notices[0], /未保存/)
+    env.fail = false
+    await env.synchronizeReferences()
+    assert.equal(f.data.storyboard.shots[0].selectedImageVersionId, changed ? 'old-image' : 'result')
+    assert.equal(f.data.storyboard.shots[0].references[0].versionId, changed ? 'raft-next' : 'raft-image')
+    assert.equal(commits[1].atomic, true)
+    assert.equal(commits[1].revision, original.revision)
+    assert.equal(f.data.storyboard.revision, original.revision + 1)
+    if (changed) assert.equal(notices.filter(text => /保留为候选/.test(text)).length, 1)
+    await env.synchronizeReferences()
+    assert.equal(commits.length, 2)
+    if (changed) assert.equal(notices.filter(text => /保留为候选/.test(text)).length, 1)
+  }
+})
 
 const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
 function productionFunction(name) {
@@ -122,6 +259,23 @@ test('任务按发起时间确定新旧，旧任务晚收录不能覆盖新结�
   const assets = [asset([version('late-old-image', 'old'), version('new-image', 'new')])]
   const result = planShotImageResults(board(shot()), assets, jobs, projectId)
   assert.equal(result.storyboard.shots[0].selectedImageVersionId, 'new-image')
+})
+
+test('返修完成或重启仅保留为候选，按项目、镜头和原图定位可对比版本', () => {
+  const current = shot('shot-1', 'original')
+  const repair = job('repair', 'shot-1', second, { request: { imageRepair: true, references: [{ versionId: 'original', role: 'reference' }] } })
+  const media = [asset([version('original', 'old'), version('result', 'repair')])]
+  const jobs = [job('old'), repair]
+  const planned = planShotImageResults(board(current), media, jobs, projectId)
+  assert.equal(planned.storyboard.shots[0].selectedImageVersionId, 'original')
+  assert.equal(planned.linked.length, 0)
+  assert.equal(planShotImageResults(planned.storyboard, media, jobs, projectId).changed, 0)
+  assert.equal(latestShotRepairCandidate(current, media, jobs, projectId)?.id, 'result')
+  assert.equal(latestShotRepairCandidate(current, media, jobs, 'other'), null)
+  assert.equal(latestShotRepairCandidate(shot('other', 'original'), media, jobs, projectId), null)
+  assert.equal(latestShotRepairCandidate(shot('shot-1', 'changed'), media, jobs, projectId), null)
+  assert.equal(latestShotRepairCandidate(current, [asset([version('wrong', 'other-job')])], jobs, projectId), null)
+  assert.equal(latestShotRepairCandidate(current, media, [job('normal')], projectId), null)
 })
 
 test('最新任务未成功时保留当前图片，不回落选用更早完成的任务', () => {

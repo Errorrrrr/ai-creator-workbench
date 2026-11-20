@@ -57,7 +57,7 @@ for (const [name, build] of builders) {
         assert.equal(reference.states.length, 1)
       }
       const synchronized = planReferenceBackfill(data.storyboard, assets, data.documents, data.projectId)
-      assert.equal(shot.inputFingerprint, shotInputFingerprint(synchronized.storyboard.shots[index], data.documents))
+      assert.equal(shot.inputFingerprint, shotInputFingerprint(synchronized.storyboard.shots[index], data.documents, { ...data, storyboard: synchronized.storyboard, assets }))
       assert.equal(shot.inputSnapshotVersion, 1)
       assert.match(file(bundle, `shot-00${index + 1}/prompt.txt`), /固定特征不能改变/)
     }

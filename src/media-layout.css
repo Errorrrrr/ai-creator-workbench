@@ -59,6 +59,7 @@
 .shot-detail-paging button { min-height: 34px; }
 .shot-picture-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(210px, 28%); gap: 24px; align-items: start; }
 .shot-picture-figure { margin: 0; min-width: 0; }
+.shot-repair-comparison { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 10px; align-items: start; }
 .shot-picture-zoom { display: block; width: 100%; padding: 0; border: 0; border-radius: var(--radius-md); overflow: hidden; background: var(--surface); cursor: zoom-in; }
 .shot-picture-zoom:disabled { opacity: 1; cursor: default; }
 .shot-picture-figure .media-preview { max-height: 62dvh; min-height: 200px; object-fit: contain; border-radius: 0; }

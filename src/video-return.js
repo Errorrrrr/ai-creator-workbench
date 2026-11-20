@@ -42,9 +42,10 @@ export function planVideoReturn({ shots, assets, manifest = null, documents = {}
     const outdated = Boolean(shot && verifiable && source.inputFingerprint !== shotInputFingerprint(shot, documents, { structure, storyboard, assets: referenceAssets }))
     if (!verifiable) warnings.push('缺少制作输入快照，无法校验导出后修改；请手动核对并勾选')
     if (outdated) {
-      const labels = { sceneConstraints: '素材与分场状态承接', title: '标题', visual: '画面', action: '动作', dialogue: '对白', camera: '运镜', duration: '剧情时长', videoDuration: '生成时长', references: '参考图版本', selectedImageVersionId: '分镜图', sourceFingerprint: '来源剧本', characterNames: '角色', sceneNames: '场景', propNames: '道具', entryState: '进入状态', exitState: '结束状态', transition: '衔接', aspectRatio: '画幅', imageSize: '图片尺寸', imageQuality: '图片质量', videoMode: '生成模式', sourceDocumentId: '所属分场' }
+      const labels = { sceneConstraints: '素材与分场状态承接', visualConstraints: '视觉基准与素材设定', title: '标题', visual: '画面', action: '动作', dialogue: '对白', camera: '运镜', duration: '剧情时长', videoDuration: '生成时长', references: '参考图版本', selectedImageVersionId: '分镜图', sourceFingerprint: '来源剧本', characterNames: '角色', sceneNames: '场景', propNames: '道具', entryState: '进入状态', exitState: '结束状态', transition: '衔接', aspectRatio: '画幅', imageSize: '图片尺寸', imageQuality: '图片质量', videoMode: '生成模式', sourceDocumentId: '所属分场' }
       const current = shotInputFieldFingerprints(shot, documents, { structure, storyboard, assets: referenceAssets })
-      const changes = source.inputSnapshotVersion === 1 && source.inputSnapshot && typeof source.inputSnapshot === 'object' ? Object.keys(current).filter(key => current[key] !== source.inputSnapshot[key]).map(key => labels[key] || key) : []
+      const fields = new Set([...Object.keys(current), ...Object.keys(source.inputSnapshot || {})])
+      const changes = source.inputSnapshotVersion === 1 && source.inputSnapshot && typeof source.inputSnapshot === 'object' ? [...fields].filter(key => current[key] !== source.inputSnapshot[key]).map(key => labels[key] || key) : []
       warnings.push(`导出后镜头已修改${changes.length ? `：${changes.join('、')}` : ''}；此视频需重新核对`)
     }
     if (source?.sourceFingerprint && source.sourceFingerprint !== shot?.sourceFingerprint) warnings.push('拆镜来源与导出时不同，请核对内容')

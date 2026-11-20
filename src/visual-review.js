@@ -1,5 +1,6 @@
 import { entityStateFingerprint } from './continuity-assets.js'
 import { matchShotReferences } from './storyboard-references.js'
+import { matchContinuityEntities } from './continuity-linking.js'
 import { sceneContinuityContext, sceneContinuityStateDocumentIds } from './scene-continuity.js'
 
 const FIELDS = ['title', 'visual', 'action', 'camera', 'entryState', 'exitState', 'aspectRatio', 'characterNames', 'sceneNames', 'propNames', 'continuityNotes']
@@ -33,23 +34,28 @@ export function visualBaselineText(continuity) {
 
 // A compact description of the visual inputs, never image bytes or credentials.
 // Output selections, dialogue, durations and video settings do not describe a still.
+export function visualDefinitionSnapshot(shot, assets, documents = {}, continuity) {
+  // Hash each related definition separately to stay below 64 KiB even with the
+  // maximum 500 registered entities and long IDs. The export carries the full
+  // readable definitions; this snapshot only tracks whether they changed.
+  const entities = sort(matchContinuityEntities(shot, assets, documents, continuity).filter(match => !['manual', 'excluded'].includes(match.status)).map(match => ({
+    identity: fingerprint(match.entityId), definition: fingerprint([match.stateId,
+      entityStateFingerprint(match.entity, match.state, continuity?.style || ''), match.versionId || ''])
+  })))
+  return { style: fingerprint(continuity?.style || ''), entities }
+}
+
 export function visualInputSnapshot(shot, assets, documents = {}, continuity, context = {}) {
   const references = sort((shot.references || []).filter(ref => ref.role !== 'extend').map(ref => ({
     versionId: ref.versionId, role: ref.role, scope: ref.scope || '', present: image(find(assets, ref.versionId))
   })))
-  // Hash each related definition separately to stay below 64 KiB even with the
-  // maximum 500 registered entities and long IDs. The export carries the full
-  // readable definitions; this snapshot only tracks whether they changed.
-  const entities = sort(matchShotReferences(shot, assets, documents, continuity).filter(match => match.entityId && !['manual', 'excluded'].includes(match.status)).map(match => ({
-    identity: fingerprint(match.entityId), definition: fingerprint([match.stateId,
-      entityStateFingerprint(match.entity, match.state, continuity?.style || ''), match.versionId || ''])
-  })))
+  const definitions = visualDefinitionSnapshot(shot, assets, documents, continuity)
   const stateDocuments = sceneContinuityStateDocumentIds({ ...context, documentId: shot.sourceDocumentId, documents })
   const scene = stateDocuments.length && sceneContinuityContext({ ...context, documentId: shot.sourceDocumentId, documents, storyboard: context.storyboard || { continuity }, shot, assets, enforceLimit: false })
   return { version: 1,
     fields: Object.fromEntries(FIELDS.map(field => [field, fingerprint(Array.isArray(shot[field]) ? [...shot[field]].sort() : shot[field] ?? '')])),
     source: { documentId: shot.sourceDocumentId || '', fingerprint: fingerprint(documents[shot.sourceDocumentId]?.content || '') },
-    style: fingerprint(continuity?.style || ''), references, entities,
+    style: definitions.style, references, entities: definitions.entities,
     ...(scene?.stateDocumentIds?.length ? { sceneContinuity: fingerprint(scene.fingerprint) } : {}) }
 }
 
@@ -110,7 +116,7 @@ function referenceIssues(shot, assets, documents, continuity, context = {}) {
   return [...new Set(issues)]
 }
 
-function changedFields(previous, current) {
+export function visualInputChanges(previous, current) {
   if (!previous) return []
   return [
     ...FIELDS.filter(field => previous.fields?.[field] !== current.fields[field]).map(field => LABELS[field]),
@@ -136,7 +142,7 @@ export function imageVisualReviewState(shot, assets, documents = {}, continuity,
   } catch { /* Imported metadata is not an authenticated generation history. */ }
   const basis = review || generated || shot.imageGenerationBasis
   if (basis) {
-    const changes = changedFields(basis.snapshot, snapshot)
+    const changes = visualInputChanges(basis.snapshot, snapshot)
     if (basis.imageVersionId && basis.imageVersionId !== shot.selectedImageVersionId) changes.unshift('选用分镜图')
     if (basis.fingerprint !== current || changes.length) return { status: 'changed', label: '分镜图待复核', reviewed: false, issues, changedFields: changes.length ? changes : ['视觉输入'] }
   } else {

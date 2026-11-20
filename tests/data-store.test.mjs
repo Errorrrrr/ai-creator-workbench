@@ -4,6 +4,7 @@ import { webcrypto } from 'node:crypto'
 import { chunkDocument, createKnowledgeIndex, deserializeKnowledgeIndex } from '../src/knowledge-index.js'
 import { pruneSemanticIndex, semanticIndexCoverage } from '../src/semantic-search.js'
 import { createShot } from '../src/storyboard.js'
+import { getContinuityReviewBatch } from '../src/continuity-impact.js'
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto
 
@@ -309,6 +310,31 @@ test('text backups keep storyboard history writing but drop current and historic
     assert.equal(value.reviewedInputFingerprint, undefined)
   }
   assert.equal(draft.storyboard.shots[0].selectedVideoVersionId, 'original-video', 'export/restore never edits the source project')
+})
+
+test('设定复核批次随项目事务保存，失败不覆盖，重载和文字备份保留正确项目的待办', async () => {
+  const { store, saved } = await memoryStore()
+  const first = workspace('项目一'), second = workspace('项目二')
+  const shot = createShot({ title: '需复核的镜头' }, { documentId: 'idea' })
+  shot.continuityReview = { batchId: 'continuity-review-1', previouslyApproved: true }
+  first.storyboard = { revision: 1, continuityReviewBatch: { version: 1, id: 'continuity-review-1' }, shots: [shot] }
+  const firstId = await store.createProject(first, null), secondId = await store.createProject(second, null)
+  await store.activateProject(firstId)
+  assert.deepEqual(getContinuityReviewBatch({ ...store.getActiveProject().workspace, projectId: firstId }).shotIds, [shot.id])
+  await store.activateProject(secondId)
+  assert.equal(getContinuityReviewBatch({ ...store.getActiveProject().workspace, projectId: secondId }), null)
+  await store.activateProject(firstId)
+  const updated = structuredClone(first)
+  updated.storyboard.continuityReviewBatch.id = 'continuity-review-2'
+  updated.storyboard.shots[0].continuityReview.batchId = 'continuity-review-2'
+  saved.failNext = true
+  await assert.rejects(store.saveProject(firstId, updated, null), /simulated disk failure/)
+  await store.initializeProjects()
+  const reloaded = store.getActiveProject().workspace
+  assert.equal(getContinuityReviewBatch({ ...reloaded, projectId: firstId }).id, 'continuity-review-1')
+  const restored = store.parseBackup(store.projectBackup(reloaded, null)).workspace
+  assert.deepEqual(getContinuityReviewBatch({ ...restored, projectId: 'new-id' }), { projectId: 'new-id', id: 'continuity-review-1', shotIds: [shot.id], previouslyApprovedShotIds: [] })
+  assert.equal(reloaded.storyboard.shots[0].continuityReview.previouslyApproved, true, '文字恢复不修改原项目的历史通过标记')
 })
 
 test('version 1 library records without optional archive or inspiration fields still load', async () => {

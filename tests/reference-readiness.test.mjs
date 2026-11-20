@@ -173,7 +173,7 @@ test('参考判断不遮盖生成任务、未知提交或视频审核阶段，�
   f.assets.push({ id: 'video-asset', name: '成片', role: 'shot', kind: 'video', versions: [{ id: 'video-version', mimeType: 'video/mp4' }] })
   assert.equal(readiness(f).label, '视频待审核')
   f.shot.reviewedVideoVersionId = 'video-version'
-  f.shot.reviewedInputFingerprint = shotInputFingerprint(f.shot, docs)
+  f.shot.reviewedInputFingerprint = shotInputFingerprint(f.shot, docs, { ...dataFor(f.continuity, [f.shot]), assets: f.assets })
   assert.equal(readiness(f).label, '已完成')
   let row = productionRows(dataFor(f.continuity, [f.shot]), f.assets)[0]
   assert.equal(row.complete, 1)

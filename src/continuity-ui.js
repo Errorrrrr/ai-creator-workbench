@@ -1,5 +1,6 @@
 import { emptyContinuity, normalizeContinuity, validateContinuity, createEntity, createEntityState, entityStateFingerprint, parseEntityExtraction, mergeEntityExtraction } from './continuity-assets.js'
 import { planLegacyContinuityReferences } from './continuity-linking.js'
+import { planContinuityImpact, getContinuityReviewBatch } from './continuity-impact.js'
 import { contentFingerprint } from './storyboard.js'
 
 const LABELS = { character: '人物', scene: '场景', prop: '关键物品' }
@@ -56,7 +57,7 @@ function field(label, input, help = '') {
   return wrapper
 }
 
-export function initializeContinuityUI({ getContext, getAssets = () => [], getJobs = () => [], save, requestExtraction, generateReference, stopExtraction, preview, exportBundle, notify = () => {} }) {
+export function initializeContinuityUI({ getContext, getAssets = () => [], getJobs = () => [], readImpactAssets, save, requestExtraction, generateReference, stopExtraction, preview, exportBundle, onReviewImpact, notify = () => {} }) {
   let owner = '', baseRevision = 0, draft = emptyContinuity(), dirty = false, busy = false, selectedEntityId = '', selectedStateId = '', filter = 'all', scopeEpisodeId = '', scopeSceneId = '', message = '', extraction = null, runtimeSignature = '', baselineExpanded = false
   const candidates = new Map()
   const dialog = el('dialog', 'app-dialog continuity-dialog'); dialog.setAttribute('aria-label', '人物·场景·物品设定')
@@ -72,7 +73,12 @@ export function initializeContinuityUI({ getContext, getAssets = () => [], getJo
   const footer = el('footer', 'continuity-footer'), draftLabel = el('span', 'media-help')
   const discardButton = button('放弃修改', discard), saveButton = button('保存设定', () => saveDraft(), 'primary-button')
   const exportButton = button('导出全部设定素材包', exportSettings)
-  footer.append(draftLabel, exportButton, discardButton, saveButton)
+  const reviewButton = button('继续设定复核', () => {
+    const batch = getContinuityReviewBatch(context())
+    if (!batch || dirty || blocked()) return
+    if (onReviewImpact?.(batch)) dialog.close()
+  })
+  footer.append(draftLabel, reviewButton, exportButton, discardButton, saveButton)
   dialog.append(header, scopeHost, candidateHost, layout, notice, footer)
   document.body.append(dialog)
   dialog.addEventListener('cancel', event => { event.preventDefault(); close() })
@@ -90,12 +96,14 @@ export function initializeContinuityUI({ getContext, getAssets = () => [], getJo
     message = text; notice.textContent = text; notice.classList.toggle('continuity-error', isError)
     if (isError) notify(text)
   }
-  function markDirty() { dirty = true; updateControls() }
+  function markDirty() { if (!dirty) signal(''); dirty = true; updateControls() }
   function updateControls() {
     const locked = blocked(), stale = mismatch() || conflict()
     saveButton.disabled = locked || !dirty || stale
     discardButton.disabled = busy || (!dirty && !stale)
     closeButton.disabled = busy
+    reviewButton.hidden = !onReviewImpact || mismatch() || !getContinuityReviewBatch(context()) || dirty
+    reviewButton.disabled = locked || reviewButton.hidden
     exportButton.textContent = `导出${filter === 'all' ? '全部设定' : LABELS[filter]}素材包`
     exportButton.disabled = locked || stale || dirty || !exportBundle || !draft.entities.some(item => filter === 'all' || item.kind === filter)
     draftLabel.textContent = mismatch() ? '项目已切换，请放弃旧草稿后载入当前项目' : conflict() && dirty ? '分镜已更新，请放弃草稿后重新编辑，避免覆盖新内容' : dirty ? '有未保存修改' : '设定已保存'
@@ -110,6 +118,7 @@ export function initializeContinuityUI({ getContext, getAssets = () => [], getJo
   }
   function loadCurrent() {
     const current = context()
+    if (owner !== current.projectId) signal('')
     owner = current.projectId || ''; baseRevision = revision(current)
     draft = normalizeContinuity(current.storyboard?.continuity || emptyContinuity()); dirty = false
     if (!draft.entities.some(item => item.id === selectedEntityId)) selectedEntityId = draft.entities[0]?.id || ''
@@ -147,20 +156,78 @@ export function initializeContinuityUI({ getContext, getAssets = () => [], getJo
     if (context().mutationBusy) throw new Error('工作台正在保存或切换项目，请稍后重试。')
     if (conflict()) throw new Error('分镜或设定已更新，草稿保留。请放弃草稿后重新编辑。')
   }
+  function confirmImpact(plan, refreshed) {
+    const popup = el('dialog', 'app-dialog continuity-impact-dialog')
+    popup.setAttribute('aria-label', '设定修改影响')
+    const heading = el('h2', '', '设定修改影响')
+    const sceneCount = plan.groups.filter(group => !group.pendingAssignment).length
+    const unassigned = plan.groups.filter(group => group.pendingAssignment).reduce((count, group) => count + group.shots.length, 0)
+    const summary = el('p', 'media-help', `${sceneCount} 个分场${unassigned ? `，另有 ${unassigned} 个待归场镜头` : ''} · 共 ${plan.shots.length} 个镜头 · 修改前已通过 ${plan.previouslyApprovedCount} 个`)
+    const list = el('div', 'continuity-impact-list')
+    for (const group of plan.groups) {
+      const section = el('section')
+      section.append(el('h3', '', `${group.episodeTitle} · ${group.sourceTitle}`))
+      const rows = el('ul')
+      for (const shot of group.shots) {
+        const row = el('li')
+        const label = el('strong', '', `第 ${shot.number} 镜 · ${shot.title || '未命名镜头'}`)
+        const status = { approved: '修改前已通过', missing: '缺少分镜图', rejected: '已标记不一致', changed: '原图待复核', unreviewed: '尚未复核' }[shot.previousReviewStatus]
+        row.append(label, el('span', shot.previouslyApproved ? 'continuity-prior-approval' : 'media-help', status), el('small', 'media-help', shot.changedFields.join('、')))
+        rows.append(row)
+      }
+      section.append(rows); list.append(section)
+    }
+    popup.append(heading, summary)
+    if (refreshed) popup.append(el('p', 'media-warning', '影响范围已更新，请核对最新清单。'))
+    popup.append(list)
+    return new Promise(resolve => {
+      const finish = confirmed => { resolve(confirmed); popup.close(); popup.remove() }
+      const back = button('返回编辑', () => finish(false))
+      const actions = el('footer', 'continuity-impact-actions')
+      actions.append(back, button('确认保存', () => finish(true), 'primary-button'))
+      popup.append(actions)
+      popup.addEventListener('cancel', event => { event.preventDefault(); finish(false) })
+      popup.addEventListener('keydown', event => {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(false) }
+      })
+      popup.addEventListener('close', () => { popup.remove(); resolve(false) }, { once: true })
+      document.body.append(popup); popup.showModal(); back.focus()
+    })
+  }
+  async function saveWithImpact(next, options, checkSource) {
+    const plan = assets => {
+      assertWritable()
+      checkSource?.()
+      return planContinuityImpact(context(), next, assets)
+    }
+    let current = plan(readImpactAssets ? await readImpactAssets(options.projectId) : getAssets()), refreshed = false
+    while (current.shots.length || refreshed) {
+      if (!await confirmImpact(current, refreshed)) return false
+      const latest = plan(readImpactAssets ? await readImpactAssets(options.projectId) : getAssets())
+      const sameList = JSON.stringify(current.groups) === JSON.stringify(latest.groups)
+      current = latest
+      if (sameList) break
+      refreshed = true
+    }
+    await save(current.storyboard, options)
+    if (context().projectId !== options.projectId) {
+      loadCurrent(); signal('设定已保存到原项目。'); render()
+      return true
+    }
+    loadCurrent()
+    signal(current.shots.length ? `设定已保存，${current.shots.length} 个镜头受影响，其中 ${current.previouslyApprovedCount} 个在修改前已通过复核。` : '设定已保存，没有受影响的镜头。')
+    render()
+    return true
+  }
   async function saveDraft(requestedOwner = owner) {
     if (busy) return false
     if (!dirty) return true
     try {
       if (requestedOwner !== owner) throw new Error('草稿属于其他项目，请返回对应项目保存。')
       assertWritable(); validateContinuity(draft)
-      const projectId = owner, expectedRevision = baseRevision, next = copy(draft)
-      const visualChanged = JSON.stringify(context().storyboard?.continuity || emptyContinuity()) !== JSON.stringify(next)
-      const existingImages = context().storyboard?.shots.some(shot => shot.selectedImageVersionId)
+      const options = { projectId: owner, revision: baseRevision }, next = copy(draft)
       busy = true; updateControls()
-      await save(next, { projectId, revision: expectedRevision })
-      if (context().projectId !== projectId) throw new Error('保存时项目已切换，草稿保留，请重新打开对应项目核对。')
-      loadCurrent(); signal(visualChanged && existingImages ? '设定已保存。已有分镜图不会自动重绘；使用本次变更基准或参考的镜头需要重新核对视觉一致性。请到分镜页打开“视觉复核”。' : '设定已保存，分镜会使用对应状态的参考图。'); render()
-      return true
+      return await saveWithImpact(next, options)
     } catch (error) { signal(`设定未保存：${error.message}`, true); return false }
     finally { busy = false; updateControls() }
   }
@@ -282,16 +349,19 @@ export function initializeContinuityUI({ getContext, getAssets = () => [], getJo
     if (!candidate || candidate.error || dirty || busy) return
     try {
       assertWritable()
-      if (candidate.sources?.some(([id, content]) => context().documents?.[id]?.content !== content)) throw new Error('提取后分场内容有修改，请重新提取。原候选已保留。')
-      if (candidate.metadata.sourceFingerprints && candidate.sourceDocumentIds.some(id => !context().documents?.[id] || candidate.metadata.sourceFingerprints[id] !== contentFingerprint(context().documents[id].content))) throw new Error('提取后分场内容有修改，请重新提取。原候选已保留。')
+      const checkSource = () => {
+        if (activeCandidate() !== candidate) throw new Error('提取候选已更新，请查看当前候选。')
+        if (candidate.sources?.some(([id, content]) => context().documents?.[id]?.content !== content) ||
+            (candidate.metadata.sourceFingerprints && candidate.sourceDocumentIds.some(id => !context().documents?.[id] || candidate.metadata.sourceFingerprints[id] !== contentFingerprint(context().documents[id].content)))) throw new Error('提取后分场内容有修改，请重新提取。原候选已保留。')
+      }
+      checkSource()
       const extracted = parseEntityExtraction(candidate.text, { documents: context().documents, sourceDocumentIds: candidate.sourceDocumentIds, existing: draft })
       const next = mergeEntityExtraction(draft, extracted); validateContinuity(next)
       const projectId = owner, expectedRevision = baseRevision
       busy = true; updateControls()
-      await save(next, { projectId, revision: expectedRevision, resolvedCandidateId: candidate.draftId || undefined })
-      candidates.delete(projectId)
-      if (context().projectId !== projectId) { signal('候选已保存到原项目。'); return }
-      loadCurrent(); signal('候选已采纳，接下来可逐项生成设定图。'); render()
+      if (!await saveWithImpact(next, { projectId, revision: expectedRevision, resolvedCandidateId: candidate.draftId || undefined }, checkSource)) return
+      if (candidates.get(projectId) === candidate) candidates.delete(projectId)
+      renderCandidate()
     } catch (error) { signal(`未采纳：${error.message}`, true) }
     finally { busy = false; updateControls() }
   }
@@ -316,7 +386,7 @@ export function initializeContinuityUI({ getContext, getAssets = () => [], getJo
     const prefix = `新${LABELS[kind]}`; let name = prefix, number = 2
     while (draft.entities.some(item => item.kind === kind && [item.name, ...item.aliases].includes(name))) name = `${prefix} ${number++}`
     const next = createEntity({ kind, name, sourceDocumentIds: scopeIds() })
-    draft.entities.push(next); selectedEntityId = next.id; selectedStateId = next.defaultStateId || next.states[0]?.id || ''; filter = 'all'; dirty = true; renderSidebar(); renderEditor(); updateControls()
+    draft.entities.push(next); selectedEntityId = next.id; selectedStateId = next.defaultStateId || next.states[0]?.id || ''; filter = 'all'; markDirty(); renderSidebar(); renderEditor(); updateControls()
   }
   function inputField(label, value, maxLength, change, multiline = false, help = '') {
     const input = el(multiline ? 'textarea' : 'input'); input.value = value || ''; input.maxLength = maxLength

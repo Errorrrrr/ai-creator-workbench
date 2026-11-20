@@ -4,6 +4,8 @@ import vm from 'node:vm'
 import { readFileSync } from 'node:fs'
 import { createShot, findMediaVersion } from '../src/storyboard.js'
 import { shotImageReadiness } from '../src/shot-workflow.js'
+import { latestShotRepairCandidate, imageResultCheckpoint } from '../src/shot-image-results.js'
+import { getContinuityReviewBatch } from '../src/continuity-impact.js'
 import { imageVisualReviewState, makeVisualReview, visualBaselineText, visualInputFingerprint } from '../src/visual-review.js'
 
 const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
@@ -72,13 +74,15 @@ function harness() {
   let data = { projectId: 'project', documents: { scene: { title: '第一场', content: '平台漂浮在海面。' } }, storyboard: { revision: 1, shots } }
   const assets = [{ id: 'reference', name: '固定参考', kind: 'image', role: 'prop', versions: [{ id: 'reference-v1', mimeType: 'image/png' }] },
     { id: 'pictures', name: '分镜图', kind: 'image', role: 'shot', versions: [{ id: 'image-1', mimeType: 'image/png' }, { id: 'image-2', mimeType: 'image/png' }] }]
-  const controls = { fail: false, gate: null }, calls = { commits: [], notices: [], renders: 0 }
+  const controls = { fail: false, gate: null }, calls = { commits: [], notices: [], renders: 0, openedBatch: 0 }
   doc.querySelectorAll = () => []
   const env = {
     el, document: doc, queueMicrotask: callback => microtasks.push(callback), structuredClone,
-    context: () => data, assets, jobs: [], projectId: 'project', loading: false, error: '', operationBusy: false,
+    context: () => data, assets, jobs: [], projectId: 'project', loading: false, error: '', operationBusy: false, invoke: null,
+    latestShotRepairCandidate, imageResultCheckpoint, getContinuityReviewBatch, visualReviewUI: { refresh() {}, openSavedBatch() { calls.openedBatch++ } },
     shotDetail, shotDetailOpen: true, pictureZoom, pictureZoomBody, pictureNotes: new Map(),
-    selectedShotId: 'shot-1', selectedEpisodeId: 'episode', selectedSourceId: 'scene',
+    selectedShotId: 'shot-1', selectedEpisodeId: 'episode', selectedSourceId: 'scene', pictureReviewBatch: null,
+    lastContextDocId: null, detailPanel: 'picture', detailShotId: null, shotList: el('div'), OTHER_EPISODE: 'other', UNASSIGNED_SOURCE: 'unassigned',
     findMediaVersion, shotImageReadiness, imageVisualReviewState, makeVisualReview, visualBaselineText, visualInputFingerprint,
     preview(version) { const img = el('img'); img.dataset.versionId = version?.id || ''; return img },
     commit: async (patch, metadata) => {
@@ -90,13 +94,15 @@ function harness() {
     },
     notify: message => calls.notices.push(message), visibleShots: () => data.storyboard.shots,
     renderShots({ detail = true } = {}) { calls.renders++; if (detail) env.renderPictureReview(panel, env.selectedShot()) },
-    selectDetailPanel() {}, closeShotDetail() { env.shotDetailOpen = false },
+    selectDetailPanel() {}, showSource(id) { env.selectedSourceId = id }, navigate() {}, renderCandidate() {}, rememberShotDisclosures() {},
     refreshReferenceDetails() {}, productionOverview: { refresh() {} },
     storyboardView: el('section'), assetsView: el('section'), characterDialog: { open: false },
     updateBatchConfirmation() {}, renderSources() {}, renderGenerationReadiness() {}, scheduleReferenceSync() {}
   }
   vm.createContext(env)
-  vm.runInContext(['button', 'field', 'disclosure', 'selectedShot', 'bindShotDetailFocus', 'refreshPictureReview', 'renderPictureReview', 'changeStoryboard', 'saveVisualReview', 'run'].map(productionFunction).join('\n'), env)
+  vm.runInContext(['button', 'field', 'disclosure', 'selectedShot', 'bindShotDetailFocus', 'refreshPictureReview', 'renderPictureReview', 'changeStoryboard', 'saveVisualReview', 'run', 'focusShot', 'pictureReviewShots', 'openPictureReviewShot', 'returnPictureReview', 'closeShotDetail'].map(productionFunction).join('\n'), env)
+  const detailHeading = productionFunction('renderShotDetail').split("    const tabs =")[0] + '\n  }'
+  vm.runInContext(detailHeading.replace('function renderShotDetail(', 'function renderShotDetailHeader('), env)
   env.bindShotDetailFocus(); env.renderPictureReview(panel, env.selectedShot())
   const flushMicrotasks = () => { while (microtasks.length) microtasks.shift()() }
   // Reproduce WebKit's default blur to the page after mousedown, followed by a
@@ -196,4 +202,91 @@ test('保存等待期间不重复提交，真实键盘离开与非主键鼠标�
   const event = await h.mouseClick(h.find('标记需要修改'), { button: 2 })
   assert.equal(event.defaultPrevented, false)
   assert.equal(h.calls.commits.length, 1)
+})
+
+function batchHarness() {
+  const h = harness()
+  h.data.documents['scene-b'] = { title: '第二场', content: '平台漂向远方。' }
+  const third = { ...structuredClone(h.data.storyboard.shots[1]), id: 'shot-3', title: '第二场镜头', sourceDocumentId: 'scene-b' }
+  h.data.storyboard.shots.push(third)
+  h.data.storyboard.continuityReviewBatch = { version: 1, id: 'batch' }
+  for (const shot of [h.data.storyboard.shots[0], third]) shot.continuityReview = { batchId: 'batch', previouslyApproved: true }
+  h.env.visibleShots = () => h.data.storyboard.shots.filter(shot => shot.sourceDocumentId === h.env.selectedSourceId)
+  h.env.openPictureReviewShot('shot-1', { projectId: 'project', id: 'batch' })
+  return h
+}
+
+test('本批大图确认后跳过本场无关镜头并跨场继续，最后回到同批清单', async () => {
+  const h = batchHarness()
+  await h.mouseClick(h.find('确认并看下一镜'))
+  assert.equal(h.env.selectedShotId, 'shot-3')
+  assert.equal(h.env.selectedSourceId, 'scene-b')
+  assert.equal(h.data.storyboard.shots[1].visualReview, undefined)
+  assert.equal(h.calls.openedBatch, 0)
+  await h.mouseClick(h.find('确认并看下一镜'))
+  assert.equal(h.calls.openedBatch, 1)
+  assert.equal(h.env.shotDetailOpen, false)
+  assert.equal(h.env.pictureReviewBatch, null)
+  assert.equal(h.data.storyboard.shots[2].visualReview.decision, 'approved')
+})
+
+test('本批前后镜只在批次成员中跨场浏览，返回恢复复核清单', async () => {
+  const h = batchHarness()
+  h.env.renderShotDetailHeader()
+  assert.equal(h.env.shotDetail.querySelectorAll('button').find(node => node.textContent === '上一镜').disabled, true)
+  const next = h.env.shotDetail.querySelectorAll('button').find(node => node.textContent === '下一镜')
+  await h.mouseClick(next)
+  assert.equal(h.env.selectedShotId, 'shot-3')
+  h.env.renderShotDetailHeader()
+  assert.equal(h.env.shotDetail.querySelectorAll('button').find(node => node.textContent === '下一镜').disabled, true)
+  await h.mouseClick(h.env.shotDetail.querySelectorAll('button').find(node => node.textContent === '上一镜'))
+  assert.equal(h.env.selectedShotId, 'shot-1')
+  h.env.renderShotDetailHeader()
+  await h.mouseClick(h.env.shotDetail.querySelectorAll('button').find(node => node.textContent === '返回本批复核'))
+  assert.equal(h.calls.openedBatch, 1)
+  assert.equal(h.calls.commits.length, 0)
+})
+
+test('本批确认优先待核对图片，缺图和已拒绝镜头保留在返回清单', async () => {
+  for (const status of ['missing', 'rejected', 'approved']) {
+    const h = batchHarness(), third = h.data.storyboard.shots[2]
+    if (status === 'missing') third.selectedImageVersionId = ''
+    else third.visualReview = makeVisualReview(third, h.env.assets, h.data.documents, h.data.storyboard.continuity, { decision: status, notes: '需要修正' }, h.data)
+    await h.mouseClick(h.find('确认并看下一镜'))
+    assert.equal(h.calls.openedBatch, 1, status)
+    assert.equal(h.data.storyboard.shots[2].continuityReview.batchId, 'batch')
+    assert.equal(h.data.storyboard.shots[1].visualReview, undefined)
+  }
+})
+
+test('本批保存失败保留原镜与备注，重试成功才跨场；陈旧批次拒绝跳转', async () => {
+  const h = batchHarness(), note = h.panel.querySelector('textarea')
+  note.value = '已核对结构'; note.dispatch('input')
+  h.controls.fail = true
+  await h.mouseClick(h.find('确认并看下一镜'))
+  assert.equal(h.env.selectedShotId, 'shot-1')
+  assert.equal(h.panel.querySelector('textarea').value, '已核对结构')
+  assert.equal(h.calls.openedBatch, 0)
+  h.controls.fail = false
+  await h.mouseClick(h.find('确认并看下一镜'))
+  assert.equal(h.env.selectedShotId, 'shot-3')
+  h.data.storyboard.continuityReviewBatch.id = 'new-batch'
+  assert.equal(h.env.openPictureReviewShot('shot-1'), false)
+  assert.equal(h.env.selectedShotId, 'shot-3')
+  assert.equal(h.env.pictureReviewShots().length, 0)
+})
+
+test('本批项目切换或镜头被删除时不跳到其他镜头，普通浏览仍按本场推进', async () => {
+  const h = batchHarness()
+  h.data.storyboard.shots.splice(2, 1)
+  assert.equal(h.env.openPictureReviewShot('shot-3'), false)
+  assert.equal(h.env.selectedShotId, 'shot-1')
+  h.data.projectId = 'another-project'
+  assert.equal(h.env.openPictureReviewShot('shot-1'), false)
+  h.env.closeShotDetail()
+  assert.equal(h.calls.openedBatch, 0)
+  const ordinary = harness()
+  await ordinary.mouseClick(ordinary.find('确认并看下一镜'))
+  assert.equal(ordinary.env.selectedShotId, 'shot-2')
+  assert.equal(ordinary.calls.openedBatch, 0)
 })

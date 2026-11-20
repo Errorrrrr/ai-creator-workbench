@@ -1,4 +1,5 @@
 import { initializeContinuityUI } from './continuity-ui.js'
+import { getContinuityReviewBatch } from './continuity-impact.js'
 import { sceneContinuityContext } from './scene-continuity.js'
 import { isSceneDocument } from './episode-scenes.js'
 import { createVisualReviewUI } from './visual-review-ui.js'
@@ -21,7 +22,7 @@ import { OTHER_EPISODE, UNASSIGNED_SOURCE, storyboardGroups, scopeForDocument, s
 import { createStoryboardTasks, STORYBOARD_TASK_PHASES } from './storyboard-tasks.js'
 import { createProductionOverview } from './production-overview.js'
 import { createAssetLibraryTools } from './asset-library-tools.js'
-import { planShotImageResults, imageResultCheckpoint } from './shot-image-results.js'
+import { planShotImageResults, imageResultCheckpoint, latestShotRepairCandidate } from './shot-image-results.js'
 
 const $ = selector => document.querySelector(selector)
 const el = (tag, className = '', text = '') => {
@@ -93,6 +94,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   let resultVersionId = ''
   let detailShotId = null
   let detailPanel = 'picture', mediaStage = 'storyboard', shotDetailOpen = false
+  let pictureReviewBatch = null
   const pictureNotes = new Map()
   let draggingShotId = null
   let batchPlan = null, batchSelection = new Set()
@@ -117,9 +119,9 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   const sourceSelect = el('select'), episodeSelect = el('select'), presetSelect = el('select')
   sourceSelect.setAttribute('aria-label', '本集分场与镜头范围')
   episodeSelect.setAttribute('aria-label', '当前分集')
-  sourceSelect.addEventListener('change', () => { selectedSourceId = sourceSelect.value; shotDetailOpen = false; renderSources(); renderShots(); renderCandidate() })
+  sourceSelect.addEventListener('change', () => { selectedSourceId = sourceSelect.value; shotDetailOpen = false; pictureReviewBatch = null; renderSources(); renderShots(); renderCandidate() })
   episodeSelect.addEventListener('change', () => {
-    selectedEpisodeId = episodeSelect.value; shotDetailOpen = false
+    selectedEpisodeId = episodeSelect.value; shotDetailOpen = false; pictureReviewBatch = null
     selectedSourceId = storyboardGroups(context()).find(group => group.id === selectedEpisodeId)?.sceneIds[0] || ''
     renderSources(); renderShots(); renderCandidate()
   })
@@ -139,7 +141,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
 
   const shotActions = el('div', 'media-toolbar media-workbench-toolbar')
   const generateButton = button('AI 拆镜', generateStoryboard), addShotButton = button('新建镜头', addShot)
-  const wholeEpisodeButton = button('本集总览', () => { selectedSourceId = ''; shotDetailOpen = false; renderSources(); renderShots(); renderCandidate() })
+  const wholeEpisodeButton = button('本集总览', () => { selectedSourceId = ''; shotDetailOpen = false; pictureReviewBatch = null; renderSources(); renderShots(); renderCandidate() })
   const organizeScenesButton = button('整理本集分场', () => organizeScenes?.({ episodeId: selectedEpisodeId === OTHER_EPISODE ? null : selectedEpisodeId, sourceId: selectedSourceId }))
   const assignShotsButton = button('将待归场镜头归入分场', () => {
     const data = context(), shotIds = visibleShots(data).filter(shot => !isSceneDocument(data, shot.sourceDocumentId)).map(shot => shot.id)
@@ -196,6 +198,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   const assetNotice = el('p', 'media-notice'), assetGrid = el('div', 'asset-grid'), assetDetail = el('section', 'asset-detail')
   const assetBody = el('div', 'asset-workbench-body'); assetBody.append(assetGrid, assetDetail)
   function focusProductionScene(documentId, { stage = 'content', shotId } = {}) {
+    pictureReviewBatch = null
     if (stage === 'script' && documentId !== UNASSIGNED_SOURCE && openDocument) { openDocument(documentId); return }
     if (documentId === UNASSIGNED_SOURCE) { selectedEpisodeId = OTHER_EPISODE; selectedSourceId = UNASSIGNED_SOURCE }
     else showSource(documentId)
@@ -207,11 +210,15 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (stage === 'visual-review') visualReviewUI.open({ shotId })
   }
   const productionOverview = createProductionOverview({ getContext: context, getAssets: () => assets, getJobs: () => jobs, onSelectScene: focusProductionScene })
-  moreMenu.querySelector('.media-action-menu-panel').append(button('素材设定', () => continuityUI.open()), button('分场状态', () => { const id = sourceSelect.value; if (!isSceneDocument(context(), id)) return notify('请先选择一个具体分场'); openSceneContinuity?.(id) }), button('视觉复核', () => visualReviewUI.open()), button('制作进度', () => productionOverview.open()))
+  const continueReviewButton = button('继续设定复核', () => visualReviewUI.openSavedBatch())
+  continueReviewButton.hidden = !getContinuityReviewBatch(context())
+  moreMenu.addEventListener('toggle', () => { continueReviewButton.hidden = !getContinuityReviewBatch(context()) })
+  moreMenu.querySelector('.media-action-menu-panel').append(button('素材设定', () => continuityUI.open()), button('分场状态', () => { const id = sourceSelect.value; if (!isSceneDocument(context(), id)) return notify('请先选择一个具体分场'); openSceneContinuity?.(id) }), button('视觉复核', () => visualReviewUI.open()), continueReviewButton, button('制作进度', () => productionOverview.open()))
   const visualReviewUI = createVisualReviewUI({
     getContext: context, getAssets: () => assets, getShots: () => visibleShots(context()), preview, notify,
     onOpenBaseline: () => continuityUI.open({ baseline: true }),
-    onSelectShot: shotId => { const shot = context().storyboard.shots.find(item => item.id === shotId); if (shot) focusProductionScene(shot.sourceDocumentId, { shotId, stage: 'images' }) },
+    onRepair: invoke ? (id, notes, expected) => submitShot(id, 'image', { ...expected, notes }) : undefined,
+    onSelectShot: (shotId, batch) => batch ? openPictureReviewShot(shotId, batch) : focusShot(shotId),
     onReview: saveVisualReview
   })
   const assetLibraryTools = createAssetLibraryTools({ getAssets: () => assets, getContext: context, onFilterChange: renderAssets, onReset: () => { roleFilter.value = '' }, onSelectShot: (shotId) => { const shot = context().storyboard.shots.find(item => item.id === shotId); if (shot) focusProductionScene(context().documents[shot.sourceDocumentId] ? shot.sourceDocumentId : UNASSIGNED_SOURCE, { shotId }) }, preview })
@@ -219,13 +226,20 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   assetsView.querySelector('.media-view-content').append(assetToolbar, assetLibraryTools.element, pendingHost, assetNotice, assetBody)
   const continuityUI = initializeContinuityUI({
     getContext: context, getAssets: () => assets, getJobs: () => jobs, notify,
+    readImpactAssets: invoke ? async owner => {
+      const data = context()
+      if (data.projectId !== owner) throw new Error('项目已切换，请重新打开设定。')
+      if (!data.storyboard.shots.length) return assets
+      if (loading || error || projectId !== owner) await refresh()
+      if (context().projectId !== owner || projectId !== owner || loading || error) throw new Error('未能核对当前项目的素材，请刷新后重试。')
+      return assets
+    } : undefined,
     preview: versionId => previewVersion(versionId), stopExtraction: stopText, exportBundle: exportContinuity,
-    save: async (nextContinuity, options) => {
+    onReviewImpact: batch => visualReviewUI.open({ ...batch, filter: 'all', scopeLabel: '最近一次设定修改' }),
+    save: async (storyboard, options) => {
       const data = context()
       if (data.projectId !== options.projectId || data.storyboard.revision !== options.revision) throw new Error('项目或素材已有修改，请重新读取后保存')
-      const next = planReferenceBackfill({ ...data.storyboard, continuity: normalizeContinuity(nextContinuity) }, assets, data.documents, data.projectId).storyboard
-      next.revision = data.storyboard.revision + 1
-      await commit({ storyboard: next }, { ...options, atomic: true })
+      await commit({ storyboard }, { ...options, atomic: true })
       renderShots(); refreshReferenceDetails(); visualReviewUI.refresh(); scheduleReferenceSync()
     },
     requestExtraction: async ({ sourceDocumentIds }) => {
@@ -492,11 +506,13 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   }
   function openShotDetail(id, panel = 'picture') {
     if (!visibleShots().some(shot => shot.id === id)) return
+    pictureReviewBatch = null
     selectedShotId = id; shotDetailOpen = true; detailPanel = panel
     renderShots()
     selectDetailPanel(panel, { focus: true })
   }
   function closeShotDetail() {
+    if (pictureReviewBatch) return returnPictureReview()
     shotDetailOpen = false
     renderShots()
     const control = [...shotList.querySelectorAll('[data-shot-focus]')].find(node => node.dataset.shotFocus === `${selectedShotId}:select`)
@@ -505,22 +521,44 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
   function selectDocument(documentId) {
     const scope = scopeForDocument(context(), documentId)
     if (!scope) return
-    selectedEpisodeId = scope.episodeId; selectedSourceId = scope.sourceId; lastContextDocId = context().currentDocId; shotDetailOpen = false
+    selectedEpisodeId = scope.episodeId; selectedSourceId = scope.sourceId; lastContextDocId = context().currentDocId; shotDetailOpen = false; pictureReviewBatch = null
     renderSources(); renderShots(); renderCandidate()
   }
   function showSource(documentId) {
     const scope = scopeForDocument(context(), documentId)
     if (scope) { selectedEpisodeId = scope.episodeId; selectedSourceId = documentId }
   }
-  function focusShot(shotId) {
+  function focusShot(shotId, { reviewBatch = null } = {}) {
     const data = context(), shot = data.storyboard.shots.find(item => item.id === shotId)
     if (!shot) return false
+    pictureReviewBatch = reviewBatch
     if (data.documents[shot.sourceDocumentId]) showSource(shot.sourceDocumentId)
     else { selectedEpisodeId = OTHER_EPISODE; selectedSourceId = UNASSIGNED_SOURCE }
     lastContextDocId = data.currentDocId; selectedShotId = shot.id; shotDetailOpen = true; detailPanel = 'picture'
     navigate('storyboard'); renderSources(); renderShots(); renderCandidate()
     selectDetailPanel('picture', { focus: true })
     return true
+  }
+  function pictureReviewShots() {
+    if (!pictureReviewBatch) return null
+    const data = context(), batch = getContinuityReviewBatch(data)
+    if (data.projectId !== pictureReviewBatch.projectId || batch?.id !== pictureReviewBatch.id) return []
+    const shots = new Map(data.storyboard.shots.map(shot => [shot.id, shot]))
+    return batch.shotIds.map(id => shots.get(id)).filter(Boolean)
+  }
+  function openPictureReviewShot(shotId, batch = pictureReviewBatch) {
+    const current = getContinuityReviewBatch(context())
+    if (!batch || current?.projectId !== batch.projectId || current.id !== batch.id || !current.shotIds.includes(shotId)) {
+      notify('设定复核批次已变化，请重新打开。')
+      return false
+    }
+    return focusShot(shotId, { reviewBatch: { projectId: batch.projectId, id: batch.id } })
+  }
+  function returnPictureReview() {
+    const owner = pictureReviewBatch?.projectId
+    pictureReviewBatch = null; shotDetailOpen = false
+    renderShots()
+    if (owner === context().projectId) visualReviewUI.openSavedBatch()
   }
   function renderSources() {
     const data = context(), groups = storyboardGroups(data)
@@ -563,6 +601,14 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     renderStoryboardTaskProgress()
   }
   function renderShots({ detail = true } = {}) {
+    if (pictureReviewBatch && !pictureReviewShots().some(shot => shot.id === selectedShotId)) {
+      const owner = pictureReviewBatch.projectId
+      pictureReviewBatch = null; shotDetailOpen = false
+      if (owner === context().projectId) {
+        notify('设定复核批次或当前镜头已变化，请按最新清单继续。')
+        visualReviewUI.openSavedBatch()
+      }
+    }
     const data = context(), shots = visibleShots(data)
     const group = storyboardGroups(data).find(item => item.id === selectedEpisodeId)
     const scopeTitle = selectedSourceId ? `${isSceneDocument(data, selectedSourceId) ? '' : '待归场 · '}${data.documents[selectedSourceId]?.title || '来源缺失镜头'}` : `${group?.id === OTHER_EPISODE ? '待归场镜头' : group?.title || '分镜'} · 全部`
@@ -699,6 +745,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (resetScroll) shotDetail.scrollTop = 0
   }
   function showStage(stage) {
+    pictureReviewBatch = null
     mediaStage = stage; detailPanel = shotStagePanel(stage)
     shotDetailOpen = ['images', 'videos'].includes(stage)
     if (stage === 'images') detailPanel = 'picture'
@@ -749,15 +796,18 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     const expected = { projectId: data.projectId, imageVersionId: shot.selectedImageVersionId, fingerprint: visualInputFingerprint(shot, assets, data.documents, data.storyboard.continuity, data) }
     const noteKey = JSON.stringify([data.projectId, shot.id, shot.selectedImageVersionId])
     const body = el('div', 'shot-picture-layout'), figure = el('figure', 'shot-picture-figure'), inspector = el('aside', 'shot-picture-inspector')
-    const zoom = button('', () => {
-      if (context().projectId !== expected.projectId) return
-      const latest = findMediaVersion(assets, expected.imageVersionId)
-      if (!latest) return notify('图片已不存在，请重新选择')
-      pictureZoomBody.replaceChildren(preview(latest.version, shot.title)); pictureZoom.showModal()
-    }, 'shot-picture-zoom')
-    zoom.setAttribute('aria-label', `放大查看：${shot.title}`); zoom.disabled = !selected
-    zoom.append(preview(selected?.version, shot.title))
-    figure.append(zoom, el('figcaption', '', selected ? '当前选用图片 · 点击放大' : '生成图片或从已有版本中选用'))
+    const zoomImage = (version, name, label) => {
+      const zoom = button('', () => {
+        if (context().projectId !== expected.projectId) return
+        const latest = findMediaVersion(assets, version?.id)
+        if (!latest) return notify('图片已不存在，请重新选择')
+        pictureZoomBody.replaceChildren(preview(latest.version, name)); pictureZoom.showModal()
+      }, 'shot-picture-zoom')
+      zoom.setAttribute('aria-label', label); zoom.disabled = !version
+      zoom.append(preview(version, name))
+      return zoom
+    }
+    figure.append(zoomImage(selected?.version, shot.title, `放大查看：${shot.title}`), el('figcaption', '', selected ? '当前选用图片 · 点击放大' : '生成图片或从已有版本中选用'))
     const readiness = shotImageReadiness(shot, assets, jobs, data.documents, data.storyboard.continuity, data)
     inspector.append(el('span', `shot-readiness is-${readiness.tone}`, readiness.label), el('h3', '', '本镜头画面'), el('p', 'shot-picture-description', shot.visual || '尚未填写画面说明'))
     if (shot.action) inspector.append(el('p', 'media-help', shot.action))
@@ -766,14 +816,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     for (const reference of shot.references.filter(ref => ref.role !== 'extend')) {
       const found = findMediaVersion(assets, reference.versionId)
       const card = el('figure')
-      const view = button('', () => {
-        if (context().projectId !== expected.projectId) return
-        const latest = findMediaVersion(assets, reference.versionId)
-        if (!latest) return notify('参考图片已不存在')
-        pictureZoomBody.replaceChildren(preview(latest.version, found?.asset.name || '固定参考')); pictureZoom.showModal()
-      }, 'shot-picture-zoom')
-      view.setAttribute('aria-label', `放大参考：${found?.asset.name || '缺失的参考'}`); view.disabled = !found
-      view.append(preview(found?.version, found?.asset.name || '固定参考'))
+      const view = zoomImage(found?.version, found?.asset.name || '固定参考', `放大参考：${found?.asset.name || '缺失的参考'}`)
       card.append(view, el('figcaption', '', found?.asset.name || '参考版本缺失')); referenceGrid.append(card)
     }
     referenceDetails.append(referenceGrid, el('p', 'media-help', visualBaselineText(data.storyboard.continuity)))
@@ -781,26 +824,70 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (state.changedFields.length) inspector.append(el('p', 'media-warning', `需要重新检查：${state.changedFields.join('、')}`))
     if (state.issues.length && selected) inspector.append(el('p', 'media-warning', state.issues.join('；')))
     const note = el('textarea'); note.rows = 2; note.maxLength = 2000; note.placeholder = '例如：人物衣着与前镜不一致'
-    note.value = pictureNotes.get(noteKey) ?? shot.visualReview?.notes ?? ''
+    const priorReview = shot.visualReview?.imageVersionId === shot.selectedImageVersionId ? shot.visualReview : null
+    note.value = pictureNotes.get(noteKey) ?? priorReview?.notes ?? ''
     note.addEventListener('input', () => pictureNotes.set(noteKey, note.value))
     inspector.append(field('检查备注（可选）', note))
     const edit = el('div', 'shot-picture-edit-actions')
-    edit.append(button('修改画面', () => selectDetailPanel('content', { focus: true })), button('调整参考', () => selectDetailPanel('references', { focus: true })), button('重新生成', () => selectDetailPanel('generation', { focus: true })))
+    const canRepair = selected && priorReview?.decision === 'rejected' && invoke
+    const regenerate = canRepair
+      ? button('按备注返修', () => submitShot(shot.id, 'image', { ...expected, notes: note.value.trim() }))
+      : button('重新生成', () => selectDetailPanel('generation', { focus: true }))
+    edit.append(button('修改画面', () => selectDetailPanel('content', { focus: true })), button('调整参考', () => selectDetailPanel('references', { focus: true })), regenerate)
     inspector.append(edit)
-    body.append(figure, inspector)
+    const repair = latestShotRepairCandidate(shot, assets, jobs, data.projectId)
+    if (repair) {
+      const pair = el('div', 'shot-repair-comparison'), candidate = el('figure', 'shot-picture-figure')
+      const repairBasis = repair.metadata?.provenance?.visualBasis?.fingerprint
+      const caption = repairBasis && repairBasis !== expected.fingerprint ? '返修候选图 · 镜头输入已变化' : '返修候选图 · 点击放大'
+      candidate.append(zoomImage(repair, '返修候选图', '放大返修候选图'), el('figcaption', '', caption))
+      pair.append(figure, candidate); body.append(pair, inspector)
+      const adopt = button('选用返修图', () => run(async () => {
+        const current = context()
+        if (current.projectId !== expected.projectId || loading || error) throw new Error('项目或素材已变化，请重新打开镜头。')
+        await changeStoryboard(shots => {
+          const target = shots.find(item => item.id === shot.id)
+          if (target?.selectedImageVersionId !== expected.imageVersionId || latestShotRepairCandidate(target, assets, jobs, current.projectId)?.id !== repair.id ||
+            visualInputFingerprint(target, assets, current.documents, current.storyboard.continuity, current) !== expected.fingerprint) throw new Error('画面或候选已有变化，请重新对比后选用。')
+          target.selectedImageVersionId = repair.id
+          const checkpoint = imageResultCheckpoint(target.id, jobs, current.projectId)
+          if (checkpoint) target.imageResultCheckpoint = checkpoint
+        }, { atomic: true })
+        renderShots(); visualReviewUI.refresh(); productionOverview.refresh()
+        notify('已选用返修图，请核对新图。')
+      }), 'primary-button')
+      inspector.append(adopt)
+    } else body.append(figure, inspector)
     const actions = el('div', 'shot-picture-review-actions')
     const saveDecision = decision => run(async () => {
       const notes = note.value.trim()
       if (decision === 'rejected' && !notes) throw new Error('请在检查备注中填写需要修改的地方')
-      const scope = `${selectedEpisodeId}:${selectedSourceId}`, owner = data.projectId
+      const scope = `${selectedEpisodeId}:${selectedSourceId}`, owner = data.projectId, reviewBatch = pictureReviewBatch
       await saveVisualReview(shot.id, { decision, notes }, expected)
       pictureNotes.delete(noteKey)
       if (context().projectId !== owner || `${selectedEpisodeId}:${selectedSourceId}` !== scope || selectedShotId !== shot.id) return
+      if (reviewBatch) {
+        if (pictureReviewBatch !== reviewBatch) return
+        const shots = pictureReviewShots()
+        if (!shots.some(item => item.id === shot.id)) return returnPictureReview()
+        if (decision === 'approved') {
+          const current = context(), index = shots.findIndex(item => item.id === shot.id)
+          const remaining = [...shots.slice(index + 1), ...shots.slice(0, index)]
+          const next = remaining.find(item => {
+            const review = imageVisualReviewState(item, assets, current.documents, current.storyboard.continuity, current)
+            return !review.reviewed && !['missing', 'rejected'].includes(review.status) && !review.issues.length
+          })
+          if (next) return openPictureReviewShot(next.id)
+          return returnPictureReview()
+        }
+        renderShots(); notify('已保存修改备注')
+        return
+      }
       if (decision === 'approved') {
         const list = visibleShots(), next = list[list.findIndex(item => item.id === shot.id) + 1]
         if (next) { selectedShotId = next.id; renderShots(); selectDetailPanel('picture', { focus: true }) }
         else { closeShotDetail(); notify('本镜头已确认，已返回本场分镜') }
-      } else { renderShots(); notify('已记录问题，可在本镜头修改画面或重新生成') }
+      } else { renderShots(); notify('已保存修改备注') }
     })
     const reject = button('标记需要修改', () => saveDecision('rejected'))
     const approve = button('确认并看下一镜', () => saveDecision('approved'), 'primary-button')
@@ -818,12 +905,13 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (changedShot) shotDetail.scrollTop = 0
     if (!shot) return
     const heading = el('div', 'shot-detail-heading')
-    const paging = el('div', 'shot-detail-paging'), visible = visibleShots(), index = visible.findIndex(item => item.id === shot.id)
-    const previous = button('上一镜', () => openShotDetail(visible[index - 1]?.id, detailPanel))
-    const next = button('下一镜', () => openShotDetail(visible[index + 1]?.id, detailPanel))
+    const paging = el('div', 'shot-detail-paging'), reviewShots = pictureReviewShots(), visible = reviewShots || visibleShots(), index = visible.findIndex(item => item.id === shot.id)
+    const openNeighbour = id => reviewShots ? openPictureReviewShot(id) : openShotDetail(id, detailPanel)
+    const previous = button('上一镜', () => openNeighbour(visible[index - 1]?.id))
+    const next = button('下一镜', () => openNeighbour(visible[index + 1]?.id))
     previous.disabled = index <= 0; next.disabled = index >= visible.length - 1
-    paging.append(previous, el('span', 'media-help', `${index + 1} / ${visible.length}`), next)
-    heading.append(button('返回本场分镜', closeShotDetail, 'text-button'), el('h2', '', shot.title), paging)
+    paging.append(previous, el('span', 'media-help', `${reviewShots ? '本批 ' : ''}${index + 1} / ${visible.length}`), next)
+    heading.append(button(reviewShots ? '返回本批复核' : '返回本场分镜', closeShotDetail, 'text-button'), el('h2', '', shot.title), paging)
     shotDetail.append(heading)
     const tabs = el('div', 'shot-detail-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '镜头工作区域')
     const panels = {}
@@ -886,7 +974,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       const status = el('p', 'media-help'); status.dataset.generationReadiness = capability; readiness.append(status)
     }
     panels.generation.prepend(generation, readiness)
-    panels.generation.append(el('p', 'media-help', '生成会使用当前执行端的账号额度。新图片完成后自动选用到对应镜头，旧图保留为候选；视频需手动选用与审核。'), button('配置生成执行端', () => navigate('connections')))
+    panels.generation.append(el('p', 'media-help', '生成会使用当前执行端的账号额度。常规图片在输入保持一致时自动选用，旧图保留为候选。输入变化的结果、返修图和视频需手动选用。'), button('配置生成执行端', () => navigate('connections')))
     const management = disclosure('镜头管理', 'management', 'media-help-disclosure shot-management')
     management.append(button('删除此镜头', () => run(async () => {
       if (!window.confirm(`删除“${shot.title}”？仅移除分镜与引用，已经生成的素材仍保留。`)) return
@@ -931,7 +1019,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
         }
         group.append(card)
       }
-      if (!candidates.length) group.append(el('p', 'media-help', kind === 'image' ? '新生成图片会自动选用；导入图片可在这里选择。' : '视频生成完成后仍需检查关键帧并完整播放。'))
+      if (!candidates.length) group.append(el('p', 'media-help', kind === 'image' ? '生成或导入镜头图片后，可在这里查看版本。' : '视频生成完成后仍需检查关键帧并完整播放。'))
       media.append(group)
     }
     const refreshWhenIdle = () => {
@@ -1090,8 +1178,9 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (storyboardTasks.active() || data.textGenerating || continuityUI.pendingDraft(data.projectId)) { scheduleReferenceSync(1000); return }
     const entityPlan = planEntityImageResults(data.storyboard.continuity, assets, jobs, data.projectId)
     const withEntities = entityPlan.changed ? { ...data.storyboard, continuity: entityPlan.continuity } : data.storyboard
-    const imagePlan = planShotImageResults(withEntities, assets, jobs, data.projectId)
-    const plan = planReferenceBackfill(imagePlan.storyboard, assets, data.documents, data.projectId)
+    const plan = planReferenceBackfill(withEntities, assets, data.documents, data.projectId)
+    const imagePlan = planShotImageResults(plan.storyboard, assets, jobs, data.projectId, data)
+    plan.storyboard = imagePlan.storyboard
     if (!plan.changed && !imagePlan.changed && !entityPlan.changed) return
     plan.storyboard.revision = data.storyboard.revision + 1
     referenceSyncBusy = true
@@ -1100,14 +1189,15 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       if (context().projectId !== data.projectId) return
       renderShots({ detail: false }); refreshReferenceDetails(); continuityUI.refresh()
       if (entityPlan.linked.length) notify(`已关联 ${entityPlan.linked.length} 张设定图到对应素材状态`)
-      if (imagePlan.linked.length) {
+      if (imagePlan.linked.length || imagePlan.stale.length) {
         const shot = selectedShot(), host = shotDetail.querySelector('.shot-selected-media[data-selected-kind="image"]')
         if (shot && host) {
           const media = findMediaVersion(assets, shot.selectedImageVersionId)
           host.replaceChildren(el('h3', '', '当前选用分镜图'), preview(media?.version, shot.title), button('查看与选择版本', () => { renderShotDetail(); selectDetailPanel('versions', { focus: true }) }))
         }
         refreshShotCandidates(); renderJobs(); productionOverview.refresh()
-        notify(`已将 ${imagePlan.linked.length} 张新生成图片关联并选用到对应镜头，旧版本仍保留`)
+        if (imagePlan.linked.length) notify(`已将 ${imagePlan.linked.length} 张新生成图片关联并选用到对应镜头，旧版本仍保留`)
+        if (imagePlan.stale.length) notify(`${imagePlan.stale.length} 张图片的当前输入待核对，已保留为候选，可在镜头版本中查看并选用`)
       }
       if (plan.linked.length) notify(`已将 ${plan.linked.length} 张旧角色图关联到基础设定，后续分镜会自动使用`)
       if (plan.changed > plan.linked.length) notify(`已同步 ${plan.changed - plan.linked.length} 个镜头的参考：补齐 ${plan.added} 项${plan.removed ? `，移除 ${plan.removed} 项已失效自动引用` : ''}`)
@@ -1365,7 +1455,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       return shots.length
     })
   }
-  function prepareShotRequest(id, capability) {
+  function prepareShotRequest(id, capability, repair) {
     const data = context(), shot = data.storyboard.shots.find(item => item.id === id), connection = connectionFor(capability)
     if (!shot) throw new Error('镜头不存在')
     if (!shot.visual.trim()) throw new Error('请先填写镜头画面')
@@ -1377,14 +1467,29 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
     if (jobs.some(job => job.targetId === id && job.capability === capability && !terminal(job.status))) throw new Error('此镜头同类任务正在执行，请等待或取消后再提交')
     const videoParameters = capability === 'video' ? videoParameterState(shot, connection) : null
     if (videoParameters?.issues.length) throw new Error(videoParameters.issues.join('；'))
-    const input = prepareShotInputs(shot, assets, capability), { mode, references: refs } = input
+    const input = prepareShotInputs(shot, assets, capability)
+    let { mode, references: refs } = input
+    if (repair) {
+      if (capability !== 'image' || repair.projectId !== data.projectId || repair.imageVersionId !== shot.selectedImageVersionId ||
+          shot.visualReview?.decision !== 'rejected' || shot.visualReview.imageVersionId !== repair.imageVersionId ||
+          visualInputFingerprint(shot, assets, data.documents, data.storyboard.continuity, data) !== repair.fingerprint) throw new Error('图片或复核状态已变化，请重新核对后返修。')
+      if (!repair.notes?.trim() || repair.notes.length > 2000) throw new Error('请填写返修备注，最多 2000 字。')
+      const parent = findMediaVersion(assets, repair.imageVersionId)
+      if (parent?.asset.kind !== 'image' || !['image/png', 'image/jpeg', 'image/webp'].includes(parent.version.mimeType)) throw new Error('返修原图需为可用的 PNG、JPEG 或 WebP 图片。')
+      refs = [{ versionId: repair.imageVersionId, role: 'reference' }, ...refs.filter(ref => ref.versionId !== repair.imageVersionId)]
+      mode = 'edit'
+    }
     if (capability === 'video') validateVideoParameters(shot, assets, connection, input)
     const adapter = mediaAdapterFor(connection, capability)
     if (adapter.modes && !adapter.modes.includes(mode)) throw new Error('所选适配器不支持此生成模式；未提交生成')
     if (adapter.referenceRoles && (refs.length > adapter.maxReferences || refs.some(ref => !adapter.referenceRoles.includes(ref.role)))) throw new Error('参考数量或用途超出所选适配器能力；未提交生成')
-    const labels = refs.map((ref, index) => `输入 ${index + 1}：${ref.role} · ${findMediaVersion(assets, ref.versionId).asset.name} · 固定版本 ${ref.versionId}`)
+    const labels = refs.map((ref, index) => `输入 ${index + 1}：${repair && index === 0 ? '返修原图' : ref.role} · ${findMediaVersion(assets, ref.versionId).asset.name} · 固定版本 ${ref.versionId}`)
+    let direction = '沿用输入画面的身份、服装、物品结构、场景布局与光线，仅执行指定动作和运镜。'
+    if (repair) direction = `输入 1 是本镜头待返修的原图，后续输入是固定参考。以原图为底，仅调整审核备注指出的部分，保留其余画面和构图。\n审核备注：${repair.notes.trim()}`
+    else if (capability === 'image') direction = '根据本镜头的场景与构图制作单幅分镜画面。上传的角色设定图用于保持身份、服装和装备，物品设定图用于保持结构、比例和材质，场景图用于保持空间布局与本场光线。不要把设定图的白底、三视图排版或标注画进分镜；只改变明确要求的动作、机位和状态。'
     return {
-      projectId: data.projectId, targetId: id, capability, prompt: [mediaPrompt(shot, data.project, labels, data), visualBaselineText(data.storyboard.continuity), capability === 'image' ? '根据本镜头的场景与构图制作单幅分镜画面。上传的角色设定图用于保持身份、服装和装备，物品设定图用于保持结构、比例和材质，场景图用于保持空间布局与本场光线。不要把设定图的白底、三视图排版或标注画进分镜；只改变明确要求的动作、机位和状态。' : '沿用输入画面的身份、服装、物品结构、场景布局与光线，仅执行指定动作和运镜。'].filter(Boolean).join('\n'), references: refs,
+      projectId: data.projectId, targetId: id, capability, prompt: [mediaPrompt(shot, data.project, labels, data), visualBaselineText(data.storyboard.continuity), direction].filter(Boolean).join('\n'), references: refs,
+      ...(repair ? { imageRepair: true } : {}),
       ...(capability === 'image' ? { visualBasis: { version: 1, fingerprint: visualInputFingerprint(shot, assets, data.documents, data.storyboard.continuity, data), snapshot: visualInputSnapshot(shot, assets, data.documents, data.storyboard.continuity, data) } } : {}),
       connection: { id: connection.id, kind: connection.kind === 'cli' ? 'cli' : 'api', driverId: connection.driverId || null, baseUrl: connection.baseUrl || '', model: connection.kind === 'cli' ? connection.planningModel || '' : connection.model || '', adapter: adapter.id },
       parameters: { mode, aspectRatio: shot.aspectRatio || '16:9', duration: videoParameters?.duration ?? shot.duration, size: shot.imageSize || 'auto', quality: shot.imageQuality || 'auto' },
@@ -1573,21 +1678,24 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       }
     })
   }
-  async function submitShot(id, capability) {
-    await run(async () => {
+  async function submitShot(id, capability, repair) {
+    const submitted = await run(async () => {
       requireProject(); desktop(); await requireAdapterCatalog()
-      const submittingProjectId = context().projectId, signature = batchSignature([prepareShotRequest(id, capability)])
+      const initial = prepareShotRequest(id, capability, repair), submittingProjectId = initial.projectId, signature = batchSignature([initial])
+      if (repair && !window.confirm(`按此备注返修「${context().storyboard.shots.find(shot => shot.id === id).title}」？\n\n${repair.notes}\n\n将通过${connectionFor(capability).name || '图片执行端'}发送原图和 ${initial.references.length - 1} 张参考图。结果保存为候选，选用前保留原图。`)) return false
       await beforeSubmit?.()
       if (submittingProjectId !== context().projectId) throw new Error('项目已切换，未提交生成')
-      const data = context(), request = prepareShotRequest(id, capability), connection = connectionFor(capability)
+      const data = context(), request = prepareShotRequest(id, capability, repair), connection = connectionFor(capability)
       if (batchSignature([request]) !== signature) throw new Error('镜头输入或执行端已变化，未提交生成，请核对后重试')
       const apiKey = connection.kind === 'cli' ? null : await secret(connection)
       if (connection.kind !== 'cli' && !apiKey) throw new Error('请到连接中心配置此资源的密钥')
-      if (data.projectId !== context().projectId || batchSignature([prepareShotRequest(id, capability)]) !== signature) throw new Error('镜头输入或执行端已变化，未提交生成，请核对后重试')
+      if (data.projectId !== context().projectId || batchSignature([prepareShotRequest(id, capability, repair)]) !== signature) throw new Error('镜头输入或执行端已变化，未提交生成，请核对后重试')
       const job = await invoke('media_submit', { request: { ...request, apiKey: apiKey || null } })
       if (data.projectId === context().projectId) { jobs = [job, ...jobs.filter(item => item.id !== job.id)]; renderJobs() }
-      notify(capability === 'image' ? '任务已提交，新图片完成后会自动关联并选用到原镜头' : '任务已提交，结果将写回原镜头的候选版本'); await refresh()
+      notify(repair ? '已提交返修，完成后可在镜头大图对比并选用。' : capability === 'image' ? '任务已提交，输入保持一致时会自动选用到原镜头，输入变化的结果保留为候选' : '任务已提交，结果将写回原镜头的候选版本'); await refresh()
+      return true
     })
+    return submitted === true
   }
   async function refresh() {
     const data = context(), sequence = ++requestSequence
@@ -1906,7 +2014,7 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
         const reasons = [...new Set([...(review.issues || []), ...(input?.notes || []).filter(note => !note.startsWith(`${review.label}：`))])]
         list.append(el('li', '', `${shot.title}：${review.label}${review.changedFields.length ? `（${review.changedFields.join('、')}）` : ''}${reasons.length ? `；${reasons.join('；')}` : ''}`))
       }
-      actions.append(button('取消', () => finish('cancel')), button('仅导出待复核素材', () => finish('export')), button('返回视觉复核', () => finish('review'), 'primary-button'))
+      actions.append(button('取消', () => finish('cancel')), button('仍导出当前范围', () => finish('export')), button('返回视觉复核', () => finish('review'), 'primary-button'))
       dialog.append(el('h2', '', 'Flow 导出前视觉检查'), el('p', 'media-warning', `${data.storyboard.shots.length} 个镜头中，${pending.length} 个需要核对画面或视频输入。`), el('p', 'media-help', '图片已关联不代表画面一致。先核对人物服装、物品结构、场景布局和光线，再使用分镜图作为视频首帧。仍可导出素材用于修正，包内会保留检查报告与待办，不自动标为通过。'), list, actions)
       dialog.addEventListener('cancel', event => { event.preventDefault(); finish('cancel') })
       dialog.addEventListener('close', () => finish('cancel'))
@@ -2084,7 +2192,8 @@ export function initializeMediaWorkbench({ getContext, commit, invoke, secret, r
       const result = jobResult(job, assets, context().storyboard.shots, context().documents, context())
       const row = el('article', 'media-job')
       const heading = el('div', 'media-job-heading'); heading.append(el('strong', '', job.request?.character ? `${job.request.character.name} · 正脸与三视图` : context().storyboard.shots.find(shot => shot.id === job.targetId)?.title || job.targetId), el('span', '', result.status))
-      row.append(heading, el('p', 'media-help', `${job.capability === 'video' ? '视频' : '图片'} · ${job.request?.connection?.id || '执行端'} · ${job.id.slice(-8)}`))
+      const kind = job.request?.imageRepair ? '图片返修' : job.capability === 'video' ? '视频' : '图片'
+      row.append(heading, el('p', 'media-help', `${kind} · ${job.request?.connection?.id || '执行端'} · ${job.id.slice(-8)}`))
       row.append(el('p', 'media-help', `创建：${mediaTimeLabel(job.createdAt)} · 更新：${mediaTimeLabel(job.updatedAt)}`))
       const resultActions = el('div', 'media-toolbar')
       if (job.status === 'completed' && result.asset) resultActions.append(button('查看结果', () => openJobResult(job, 'asset')))

@@ -143,15 +143,110 @@ test('本场边界、前场结束和相关素材变化使视觉及视频审核�
   assert.equal(shotInputFingerprint(f.shot, f.documents, f.data), video)
 })
 
-test('无分场状态的旧项目不新增审核字段，无归属镜头保持兼容', () => {
+test('无分场状态仍追踪视觉设定，空约束的旧项目与无归属镜头保持兼容', () => {
   const f = fixture()
   delete f.documents.s1.sceneContinuity; delete f.documents.s2.sceneContinuity
   const old = shotInputFingerprint(f.shot, f.documents)
-  assert.equal(shotInputFingerprint(f.shot, f.documents, f.data), old)
+  assert.notEqual(shotInputFingerprint(f.shot, f.documents, f.data), old)
+  assert.ok(shotProductionInputs(f.shot, f.documents, f.data).visualConstraints)
   assert.equal(shotProductionInputs(f.shot, f.documents, f.data).sceneConstraints, undefined)
   assert.equal(shotInputFieldFingerprints(f.shot, f.documents, f.data).sceneConstraints, undefined)
   assert.equal(visualInputSnapshot(f.shot, f.assets, f.documents, f.storyboard.continuity, f.data).sceneContinuity, undefined)
   assert.doesNotThrow(() => visualInputSnapshot({ ...f.shot, sourceDocumentId: '' }, f.assets, f.documents, f.storyboard.continuity, f.data))
+  f.storyboard.continuity = { version: 1, style: '', entities: [] }
+  assert.equal(shotInputFingerprint(f.shot, f.documents, f.data), old)
+  assert.equal(shotProductionInputs(f.shot, f.documents, f.data).visualConstraints, undefined)
+})
+
+function unprofiledFixture() {
+  const f = fixture()
+  delete f.documents.s1.sceneContinuity; delete f.documents.s2.sceneContinuity
+  f.data.assets = f.assets
+  return f
+}
+
+test('没有填写分场状态时，实际素材与风格改变也使视频审核失效', () => {
+  for (const mutate of [
+    f => { f.storyboard.continuity.style += '，黑白水墨' },
+    f => { f.bag.traits += '，背带有红色补丁' },
+    f => { f.bag.states[0].description += '，缺少一个扣子' }
+  ]) {
+    const f = unprofiledFixture()
+    f.shot.selectedVideoVersionId = 'video'; f.shot.reviewedVideoVersionId = 'video'
+    f.shot.reviewedInputFingerprint = shotInputFingerprint(f.shot, f.documents, f.data)
+    assert.equal(videoReviewState(f.shot, f.documents, f.data).reviewed, true)
+    mutate(f)
+    assert.equal(videoReviewState(f.shot, f.documents, f.data).outdated, true)
+    assert.equal(f.shot.selectedVideoVersionId, 'video')
+    assert.equal(f.shot.reviewedVideoVersionId, 'video')
+  }
+})
+
+test('已有完整分场约束的视频审核保持原指纹，不因重复添加字段而失效', () => {
+  const f = fixture(), inputs = shotProductionInputs(f.shot, f.documents, f.data)
+  assert.ok(inputs.sceneConstraints)
+  assert.equal(inputs.visualConstraints, undefined)
+  const recorded = `v1:${contentFingerprint(JSON.stringify(inputs))}`
+  Object.assign(f.shot, { selectedVideoVersionId: 'video', reviewedVideoVersionId: 'video', reviewedInputFingerprint: recorded })
+  assert.equal(videoReviewState(f.shot, f.documents, f.data).reviewed, true)
+})
+
+test('无分场状态时，手选异版或明确排除不重新套用未采用的素材定义', () => {
+  for (const manual of [false, true]) {
+    const f = unprofiledFixture()
+    f.shot.references = f.shot.references.filter(ref => ref.entityId !== 'bag')
+    if (manual) {
+      f.assets.find(asset => asset.id === 'bag-asset').versions.push({ id: 'bag-picked', mimeType: 'image/png' })
+      f.shot.references.push({ versionId: 'bag-picked', role: 'reference', scope: 'continuity', origin: 'manual' })
+    } else f.shot.referenceExclusions = ['prop:@bag']
+    const before = shotInputFingerprint(f.shot, f.documents, f.data)
+    f.bag.traits += '，未采用的红色补丁'; f.bag.states[0].description += '，未采用的状态修改'
+    assert.equal(shotInputFingerprint(f.shot, f.documents, f.data), before)
+    f.storyboard.continuity.style += '，低饱和'
+    assert.notEqual(shotInputFingerprint(f.shot, f.documents, f.data), before)
+  }
+})
+
+test('无关素材与后场修改不会打回当前视频审核，设定排序保持稳定', () => {
+  const f = unprofiledFixture()
+  const torch = createEntity({ id: 'torch', kind: 'prop', name: '火把', traits: '三根竹条', sourceDocumentIds: ['s3'] })
+  f.storyboard.continuity.entities.push(torch)
+  const before = shotInputFingerprint(f.shot, f.documents, f.data)
+  torch.traits += '，增加灯罩'
+  f.documents.s3.content += '，火把点燃'
+  f.documents.s3.sceneContinuity = { ...emptySceneContinuity(), changes: '火把点燃' }
+  f.storyboard.continuity.entities.reverse()
+  assert.equal(shotInputFingerprint(f.shot, f.documents, f.data), before)
+})
+
+test('无分场状态的Flow和Muse清单与回填保持一致，相关设定改变提示重核', () => {
+  for (const build of [buildFlowExport, buildMuseExport]) {
+    const f = unprofiledFixture()
+    Object.assign(f.shot, planReferenceBackfill(f.storyboard, f.assets, f.documents, f.data.projectId).storyboard.shots[0])
+    const exported = manifest(build(f.data, f.assets))
+    const video = { id: 'download', kind: 'video', name: 'shot-001.mp4', versions: [{ id: 'video-v1', name: 'shot-001.mp4', mimeType: 'video/mp4' }] }
+    const options = { shots: [f.shot], assets: [video], referenceAssets: [...f.assets, video], manifest: exported, documents: f.documents, structure: f.structure, storyboard: f.storyboard }
+    assert.equal(planVideoReturn(options)[0].outdated, false)
+    assert.ok(exported.shots[0].inputSnapshot.visualConstraints)
+    f.bag.traits += '，六个黄铜扣'
+    const row = planVideoReturn(options)[0]
+    assert.equal(row.outdated, true)
+    assert.ok(row.warnings.some(value => value.includes('视觉基准与素材设定')))
+    assert.equal(row.verifiable, true)
+    f.storyboard.continuity = { version: 1, style: '', entities: [] }
+    const removed = planVideoReturn(options)[0]
+    assert.equal(removed.outdated, true)
+    assert.ok(removed.warnings.some(value => value.includes('视觉基准与素材设定')))
+  }
+})
+
+test('旧审核缺少实际设定快照时须重核，空约束审核继续有效', () => {
+  const f = unprofiledFixture()
+  const legacy = shotInputFingerprint(f.shot, f.documents)
+  Object.assign(f.shot, { selectedVideoVersionId: 'video', reviewedVideoVersionId: 'video', reviewedInputFingerprint: legacy })
+  assert.equal(videoReviewState(f.shot, f.documents, f.data).outdated, true)
+  f.storyboard.continuity = { version: 1, style: '', entities: [] }
+  assert.equal(videoReviewState(f.shot, f.documents, f.data).reviewed, true)
 })
 
 test('手动排除设定不重新注入固定特征，也不抹掉本场已写明的状态文字', () => {

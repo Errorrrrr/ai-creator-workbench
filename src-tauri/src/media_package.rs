@@ -1240,6 +1240,38 @@ mod export_preflight_tests {
     }
 
     #[test]
+    fn repair_jobs_roundtrip_in_project_packages_and_remap_the_first_reference() {
+        let mut value = continuity_manifest();
+        value.workspace["storyboard"]["shots"] = json!([{"id":"shot-0","sourceDocumentId":"scene","selectedImageVersionId":"v-0","selectedVideoVersionId":"","reviewedVideoVersionId":"","references":[]}]);
+        let job: Job = serde_json::from_value(json!({
+            "id":"job-0","projectId":"p","targetId":"shot-0","capability":"image","status":"completed",
+            "createdAt":"10","updatedAt":"10","remoteId":"old-remote","assetId":"a-0","error":null,
+            "request":{"projectId":"p","targetId":"shot-0","capability":"image","prompt":"修正木筏结构","references":[{"versionId":"v-0","role":"reference"}],
+                "connection":{"id":"conn","kind":"api","driverId":null,"baseUrl":"https://example.com/v1","model":"image-model","adapter":"openai-images"},
+                "parameters":{"mode":"edit","aspectRatio":"16:9","duration":5,"size":"1536x1024","quality":"high"},
+                "imageRepair":true,"visualBasis":{"version":1,"fingerprint":"visual-v1:12:123","snapshot":{"version":1}},"allowUserProfile":true}
+        })).unwrap();
+        value.jobs.push(job);
+        assert!(validate_manifest(&value).is_ok());
+        let mut restored: Manifest = serde_json::from_value(serde_json::to_value(value).unwrap()).unwrap();
+        assert!(validate_manifest(&restored).is_ok());
+        let mut mapping = HashMap::from([
+            ("v-0".into(), "new-original-image".into()),
+            ("a-0".into(), "new-asset".into()),
+            ("job-0".into(), "new-job".into()),
+        ]);
+        remap_storyboard(&mut restored.workspace, &mut mapping).unwrap();
+        restore_jobs(&mut restored.jobs, "new-project", &mut mapping).unwrap();
+        let request = &restored.jobs[0].request;
+        assert!(request.image_repair);
+        assert!(request.validate_output().is_ok());
+        assert_eq!(request.references[0].version_id, "new-original-image");
+        assert_eq!(request.target_id, restored.workspace["storyboard"]["shots"][0]["id"].as_str().unwrap());
+        assert!(restored.jobs[0].remote_id.is_none());
+        assert!(!request.allow_user_profile);
+    }
+
+    #[test]
     fn entity_asset_target_survives_when_job_history_was_removed() {
         let mut value = continuity_manifest();
         let asset = &mut value.assets[0];

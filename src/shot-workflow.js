@@ -18,7 +18,7 @@ export function shotReadiness(shot, assets, jobs = [], documents = {}, continuit
   if (jobs.some(job => job.targetId === shot.id && job.status === 'submission_unknown')) return { label: '任务待核对', tone: 'warning' }
   const selectedVideo = findMediaVersion(assets, shot.selectedVideoVersionId)
   if (selectedVideo?.asset.kind === 'video') {
-    const review = videoReviewState(shot, documents, context)
+    const review = videoReviewState(shot, documents, { ...context, assets, storyboard: { ...context.storyboard, continuity: continuity ?? context.storyboard?.continuity } })
     return review.reviewed ? { label: '已完成', tone: 'complete' }
       : { label: review.legacy ? '旧审核待复核' : review.outdated ? '内容已变，待复核' : '视频待审核', tone: 'review' }
   }

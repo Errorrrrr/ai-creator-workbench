@@ -233,10 +233,29 @@ pub(crate) struct Request {
     pub entity: Option<EntityOutput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_basis: Option<VisualBasis>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub image_repair: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl Request {
     pub(crate) fn validate_output(&self) -> Result<(), String> {
+        if self.image_repair {
+            if self.capability != "image"
+                || self.parameters.mode != "edit"
+                || self.visual_basis.is_none()
+                || self.character.is_some()
+                || self.entity.is_some()
+                || self.references.first().map(|reference| reference.role.as_str())
+                    != Some("reference")
+            {
+                return Err("图片返修必须使用带视觉依据的镜头编辑任务，并将原图作为第一张参考图".into());
+            }
+            media::valid_id(&self.references[0].version_id)?;
+        }
         if let Some(basis) = &self.visual_basis {
             basis.validate()?;
             if self.capability != "image" || self.character.is_some() || self.entity.is_some() {
@@ -948,6 +967,9 @@ async fn collect(
             continue;
         }
         let mut provenance = json!({"source":job.request.connection.kind,"connectionId":job.request.connection.id,"model":job.request.connection.model,"jobId":job.id,"artifact":artifact,"remoteId":job.remote_id,"parameters":job.request.parameters,"references":job.request.references});
+        if job.request.image_repair {
+            provenance["imageRepair"] = json!(true);
+        }
         if let Some(basis) = &job.request.visual_basis {
             provenance["visualBasis"] = serde_json::to_value(basis).map_err(|e| e.to_string())?;
         }
@@ -1281,12 +1303,64 @@ mod character_tests {
     fn legacy_jobs_keep_shot_destination_and_serialize_without_character() {
         let request = request();
         assert!(request.validate_output().is_ok());
+        assert!(!request.image_repair);
         assert_eq!(request.output_role(), "shot");
         assert_eq!(request.output_name("image-output.bin"), "image-output.bin");
-        assert!(serde_json::to_value(request)
-            .unwrap()
-            .get("character")
-            .is_none());
+        let stored = serde_json::to_value(request).unwrap();
+        assert!(stored.get("character").is_none());
+        assert!(stored.get("imageRepair").is_none());
+    }
+
+    fn repair_request() -> Request {
+        let mut request = request();
+        request.target_id = "shot-1".into();
+        request.image_repair = true;
+        request.parameters.mode = "edit".into();
+        request.references = vec![Reference { version_id: "original-image".into(), role: "reference".into() }];
+        request.visual_basis = Some(VisualBasis { version: 1, fingerprint: "visual-v1:12:123".into(), snapshot: json!({"version":1,"references":[]}) });
+        request
+    }
+
+    #[test]
+    fn image_repair_roundtrip_preserves_original_first_and_omits_legacy_false() {
+        let request = repair_request();
+        assert!(request.validate_output().is_ok());
+        let stored = serde_json::to_value(&request).unwrap();
+        assert_eq!(stored["imageRepair"], true);
+        let restored: Request = serde_json::from_value(stored).unwrap();
+        assert!(restored.validate_output().is_ok());
+        assert_eq!(restored.references[0].version_id, "original-image");
+        assert_eq!(restored.output_role(), "shot");
+        let mut value = serde_json::to_value(request).unwrap();
+        value["imageRepair"] = json!(false);
+        let restored: Request = serde_json::from_value(value).unwrap();
+        assert!(!restored.image_repair);
+        assert!(serde_json::to_value(restored).unwrap().get("imageRepair").is_none());
+    }
+
+    #[test]
+    fn image_repair_rejects_missing_original_and_non_shot_edit_requests() {
+        let base = serde_json::to_value(repair_request()).unwrap();
+        for (field, invalid) in [
+            ("capability", json!("video")),
+            ("parameters", json!({"mode":"generate","aspectRatio":"16:9","duration":5,"size":"1536x1024","quality":"high"})),
+            ("visualBasis", Value::Null),
+            ("references", json!([])),
+            ("references", json!([{"versionId":"original-image","role":"start"}])),
+            ("references", json!([{"versionId":"../outside","role":"reference"}])),
+            ("character", json!({"name":"陆骁","sourceDocumentId":"characters","sourceFingerprint":"1:a"})),
+            ("entity", json!({"entityId":"raft","stateId":"raft-state","kind":"prop","name":"木筏","stateName":"完整","definitionFingerprint":"1:a"})),
+        ] {
+            let mut value = base.clone();
+            value[field] = invalid;
+            let request: Request = serde_json::from_value(value).unwrap();
+            assert!(request.validate_output().is_err(), "accepted invalid repair {field}");
+        }
+        for invalid in [Value::Null, json!("true"), json!(1)] {
+            let mut value = base.clone();
+            value["imageRepair"] = invalid;
+            assert!(serde_json::from_value::<Request>(value).is_err());
+        }
     }
 
     #[test]

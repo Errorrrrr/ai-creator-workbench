@@ -75,14 +75,21 @@ test('返回视觉复核会打开当前范围的检查面板，释放操作后�
   assert.equal(h.shot.visualReview, undefined)
 })
 
-test('用户明确选择仅导出待复核素材，包内仍保留待办而不自动通过', async () => {
-  const h = harness(), result = h.env.exportVideoBundle(buildFlowExport, 'media_export_flow')
-  await h.untilDialog(); h.choose('仅导出待复核素材')
+test('用户选择仍导出当前范围，包内保留已通过和待复核镜头', async () => {
+  const h = harness()
+  const approved = createShot({ title: '已通过镜头', visual: '相邻的海面空镜', characterNames: [], sceneNames: [], propNames: [] }, { documentId: 's1' })
+  approved.selectedImageVersionId = 'still'
+  approved.visualReview = makeVisualReview(approved, h.assets, h.documents, h.continuity, { decision: 'approved' }, h.state)
+  h.state.storyboard.shots.push(approved)
+  const result = h.env.exportVideoBundle(buildFlowExport, 'media_export_flow')
+  await h.untilDialog(); h.choose('仍导出当前范围')
   assert.equal(await result, '/导出/Flow素材包')
   assert.equal(h.calls[1].command, 'media_export_flow')
   const bundle = h.calls[1].payload.bundle, manifest = JSON.parse(bundle.texts.find(file => file.path === 'manifest.json').content)
   assert.equal(manifest.shots[0].visualReview.reviewed, false)
   assert.equal(manifest.shots[0].inputPlan.ready, false)
+  assert.deepEqual(manifest.shots.map(shot => shot.id), [h.shot.id, approved.id])
+  assert.equal(manifest.shots[1].visualReview.reviewed, true)
   assert.ok(bundle.texts.find(file => file.path === '视觉检查.md'))
   assert.equal(h.shot.visualReview, undefined)
 })
@@ -94,7 +101,7 @@ test('检查期间项目、分镜或来源剧本变化后，拒绝继续导出�
     if (change === 'project') h.state.projectId = 'p2'
     else if (change === 'storyboard') h.state.storyboard.revision++
     else h.state.documents.s1.content += ' 修改了人物外观与地点'
-    h.choose('仅导出待复核素材')
+    h.choose('仍导出当前范围')
     await assert.rejects(result, /已变化|变更|重新检查|重新导出/, change)
     assert.deepEqual(h.calls.map(call => call.command), ['media_list'])
   }

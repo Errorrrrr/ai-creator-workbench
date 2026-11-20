@@ -4,6 +4,7 @@ import { createShot } from '../src/storyboard.js'
 import { createEntity, entityStateFingerprint } from '../src/continuity-assets.js'
 import { makeVisualReview, visualInputFingerprint, imageVisualReviewState } from '../src/visual-review.js'
 import { createVisualReviewUI, visualReviewNeighbours } from '../src/visual-review-ui.js'
+import { emptySceneContinuity } from '../src/scene-continuity.js'
 
 class Node {
   constructor(tag) { this.tagName = tag; this.children = []; this.dataset = {}; this.attrs = {}; this.listeners = {}; this.value = ''; this.open = false; this.disabled = false; this._text = ''; this.scrollTop = 0 }
@@ -29,7 +30,7 @@ class Node {
   close() { this.open = false }
 }
 
-function fixture() {
+function fixture(options = {}) {
   const original = globalThis.document, body = new Node('body')
   globalThis.document = { body, createElement: tag => new Node(tag), activeElement: null }
   const prop = createEntity({ id: 'raft', kind: 'prop', name: '木筏', traits: '三块木板，两个蓝色浮桶', sourceDocumentIds: ['s1', 's2'], states: [{ id: 'raft-base', name: '基础状态', referenceVersionId: 'raft-image' }] })
@@ -38,7 +39,7 @@ function fixture() {
   const shots = ['s1', 's2', 's3'].map((source, i) => ({ ...createShot({ title: `镜头${i + 1}`, visual: '木筏漂浮', propNames: ['木筏'] }, { documentId: source }), id: `shot-${i + 1}`, selectedImageVersionId: `selected-${i + 1}`, references: [{ versionId: 'raft-image', role: 'reference', scope: 'continuity', origin: 'auto', entityId: 'raft', stateId: 'raft-base' }] }))
   data.storyboard.shots = [shots[2], shots[1], shots[0]]
   const assets = [{ id: 'raft-asset', projectId: 'p', kind: 'image', role: 'prop', name: '木筏设定图', versions: [{ id: 'raft-image', mimeType: 'image/png' }] }, ...shots.map((shot, i) => ({ id: `asset-${i}`, projectId: 'p', kind: 'image', role: 'shot', name: `图${i + 1}`, versions: [{ id: shot.selectedImageVersionId, mimeType: 'image/png' }] }))]
-  const calls = { reviews: [], notices: [], selected: [], baseline: 0 }, controls = { fail: false, gate: null, visible: ['shot-1', 'shot-2'] }
+  const calls = { reviews: [], notices: [], selected: [], selectedBatches: [], baseline: 0 }, controls = { fail: false, gate: null, visible: ['shot-1', 'shot-2'] }
   const ui = createVisualReviewUI({
     getContext: () => data, getAssets: () => assets, getShots: () => data.storyboard.shots.filter(shot => controls.visible.includes(shot.id)),
     preview: (version, name) => { const img = new Node('img'); img.dataset.versionId = version.id; img.name = name; return img },
@@ -50,7 +51,7 @@ function fixture() {
       if (data.projectId !== expected.projectId || shot.selectedImageVersionId !== expected.imageVersionId || visualInputFingerprint(shot, assets, data.documents, data.storyboard.continuity) !== expected.fingerprint) throw new Error('图片或参考已变化')
       shot.visualReview = makeVisualReview(shot, assets, data.documents, data.storyboard.continuity, decision)
     },
-    onOpenBaseline: () => { calls.baseline++ }, onSelectShot: id => calls.selected.push(id), notify: text => calls.notices.push(text)
+    onOpenBaseline: () => { calls.baseline++ }, onSelectShot: (id, batch) => { calls.selected.push(id); calls.selectedBatches.push(batch) }, notify: text => calls.notices.push(text), ...options
   })
   ui.open()
   const dialog = body.querySelector('dialog')
@@ -167,6 +168,212 @@ test('导出范围参数独立于工作区选择，单镜定位可显示已通�
     assert.deepEqual(f.dialog.querySelectorAll('article').map(node => node.dataset.visualShot), ['shot-2', 'shot-3'])
     f.ui.open({ shotId: 'shot-2' }); assert.ok(f.card('shot-2'))
     await f.click('设置统一视觉基准'); assert.equal(f.calls.baseline, 1); assert.equal(f.dialog.open, false)
+  } finally { f.cleanup() }
+})
+
+test('设定修改复核批次跨场按项目顺序展示，保留修改前通过标记且不混入新镜头', async () => {
+  const f = fixture()
+  try {
+    f.shots[0].visualReview = makeVisualReview(f.shots[0], f.assets, f.data.documents, f.data.storyboard.continuity, { decision: 'approved' })
+    f.data.storyboard.continuity.style = '新的统一画风'
+    f.controls.visible = ['shot-2']
+    assert.equal(f.ui.open({ projectId: 'p', shotIds: ['shot-3', 'shot-1', 'shot-1'], filter: 'all', scopeLabel: '本次设定修改', previouslyApprovedShotIds: ['shot-1'] }), true)
+    assert.deepEqual(f.dialog.querySelectorAll('article').map(node => node.dataset.visualShot), ['shot-1', 'shot-3'])
+    assert.match(f.dialog.textContent, /本次设定修改 2 镜/)
+    assert.match(f.card('shot-1').textContent, /修改前已通过/)
+    assert.doesNotMatch(f.card('shot-3').textContent, /修改前已通过/)
+    assert.equal(f.card('shot-2'), null)
+    await f.setFilter('pending')
+    assert.deepEqual(f.dialog.querySelectorAll('article').map(node => node.dataset.visualShot), ['shot-1', 'shot-3'])
+    const prop = f.data.storyboard.continuity.entities[0]
+    prop.states[0].referenceFingerprint = entityStateFingerprint(prop, prop.states[0], f.data.storyboard.continuity.style)
+    f.ui.refresh()
+    await f.click('核对一致', f.card('shot-1'))
+    assert.equal(f.card('shot-1'), null)
+    await f.setFilter('approved')
+    assert.ok(f.card('shot-1')); assert.equal(f.card('shot-2'), null); assert.equal(f.card('shot-3'), null)
+    const added = { ...f.shots[1], id: 'new-shot' }
+    f.data.storyboard.shots.push(added); f.controls.visible = ['new-shot']; f.ui.refresh()
+    await f.setFilter('all')
+    assert.deepEqual(f.dialog.querySelectorAll('article').map(node => node.dataset.visualShot), ['shot-1', 'shot-3'])
+    f.ui.open({ filter: 'all' })
+    assert.ok(f.card('new-shot')); assert.doesNotMatch(f.dialog.textContent, /本次设定修改|修改前已通过/)
+  } finally { f.cleanup() }
+})
+
+test('固定复核批次忽略范围外定位，删除镜头后只复核剩余成员', () => {
+  const f = fixture()
+  try {
+    f.ui.open({ projectId: 'p', shotIds: ['shot-1', 'shot-3'], shotId: 'shot-2', filter: 'all', scopeLabel: '本次设定修改' })
+    assert.deepEqual(f.dialog.querySelectorAll('article').map(node => node.dataset.visualShot), ['shot-1', 'shot-3'])
+    f.data.storyboard.shots = f.data.storyboard.shots.filter(shot => shot.id !== 'shot-3'); f.ui.refresh()
+    assert.deepEqual(f.dialog.querySelectorAll('article').map(node => node.dataset.visualShot), ['shot-1'])
+    assert.match(f.dialog.textContent, /1 镜已移除/)
+    f.data.storyboard.shots = f.data.storyboard.shots.filter(shot => shot.id !== 'shot-1'); f.ui.refresh()
+    assert.equal(f.dialog.querySelectorAll('article').length, 0)
+    assert.match(f.dialog.textContent, /2 镜已移除/)
+    assert.equal(f.shots[1].visualReview, undefined)
+  } finally { f.cleanup() }
+})
+
+test('旧项目的设定复核入口不能打开当前项目，空批次也不会借用当前分场', () => {
+  const f = fixture()
+  try {
+    f.ui.close(); f.data.projectId = 'new-project'
+    assert.equal(f.ui.open({ projectId: 'p', shotIds: ['shot-1'], filter: 'all', scopeLabel: '本次设定修改' }), false)
+    assert.equal(f.dialog.open, false)
+    assert.match(f.calls.notices.at(-1), /项目已切换/)
+    assert.equal(f.ui.open({ projectId: 'new-project', shotIds: [], filter: 'all', scopeLabel: '本次设定修改' }), true)
+    assert.equal(f.dialog.querySelectorAll('article').length, 0)
+    assert.match(f.dialog.textContent, /本次设定修改 0 镜/)
+  } finally { f.cleanup() }
+})
+
+test('最近一次设定复核可从普通复核恢复，打开镜头后重新继续会定位原镜', async () => {
+  const f = fixture()
+  try {
+    f.data.storyboard.continuityReviewBatch = { version: 1, id: 'continuity-review-1' }
+    f.shots[0].continuityReview = { batchId: 'continuity-review-1', previouslyApproved: true }
+    f.shots[2].continuityReview = { batchId: 'continuity-review-1', previouslyApproved: false }
+    assert.equal(f.ui.openSavedBatch(), true)
+    assert.deepEqual(f.dialog.querySelectorAll('article').map(node => node.dataset.visualShot), ['shot-1', 'shot-3'])
+    assert.match(f.dialog.textContent, /最近一次设定修改 2 镜/)
+    assert.match(f.card('shot-1').textContent, /修改前已通过/)
+    await f.click('打开镜头', f.card('shot-3'))
+    assert.equal(f.calls.selected.at(-1), 'shot-3'); assert.equal(f.dialog.open, false)
+    assert.deepEqual(f.calls.selectedBatches.at(-1), { projectId: 'p', id: 'continuity-review-1' })
+    f.controls.visible = ['shot-2']; f.ui.open()
+    assert.deepEqual(f.dialog.querySelectorAll('article').map(node => node.dataset.visualShot), ['shot-2'])
+    assert.equal(f.ui.openSavedBatch(), true)
+    assert.deepEqual(f.dialog.querySelectorAll('article').map(node => node.dataset.visualShot), ['shot-1', 'shot-3'])
+    await f.setFilter('approved')
+    assert.equal(f.dialog.querySelectorAll('article').length, 0, '切换筛选清除定位，保持范围')
+    f.data.storyboard.shots = f.data.storyboard.shots.filter(shot => shot.id === 'shot-2')
+    f.ui.close(); assert.equal(f.ui.openSavedBatch(), false); assert.equal(f.dialog.open, false)
+  } finally { f.cleanup() }
+})
+
+test('本批打开大图前校验最新批次，旧按钮不跳转；普通复核不携带批次', async () => {
+  const f = fixture()
+  try {
+    f.data.storyboard.continuityReviewBatch = { version: 1, id: 'batch-1' }
+    f.shots[0].continuityReview = { batchId: 'batch-1', previouslyApproved: true }
+    f.ui.openSavedBatch()
+    f.data.storyboard.continuityReviewBatch.id = 'batch-2'
+    await f.click('打开镜头', f.card('shot-1'))
+    assert.equal(f.calls.selected.length, 0)
+    assert.equal(f.dialog.open, true)
+    assert.match(f.calls.notices.at(-1), /批次已变化/)
+    f.ui.open({ shotId: 'shot-1' })
+    await f.click('打开镜头', f.card('shot-1'))
+    assert.equal(f.calls.selected.at(-1), 'shot-1')
+    assert.equal(f.calls.selectedBatches.at(-1), undefined)
+  } finally { f.cleanup() }
+})
+
+test('空闲复核刷新保留界面，正文、素材或镜头变化会重新计算', () => {
+  const f = fixture()
+  try {
+    const original = f.card('shot-1'); f.ui.refresh()
+    assert.equal(f.card('shot-1'), original)
+    f.data.documents.s1.content += '风浪加剧'
+    f.ui.refresh(); const updated = f.card('shot-1')
+    assert.notEqual(updated, original)
+    f.ui.refresh(); assert.equal(f.card('shot-1'), updated)
+    f.assets[0].versions[0].mimeType = 'video/mp4'; f.ui.refresh()
+    assert.notEqual(f.card('shot-1'), updated)
+    const beforeScene = f.card('shot-2')
+    f.data.documents.s1.sceneContinuity = emptySceneContinuity(); f.ui.refresh()
+    assert.notEqual(f.card('shot-2'), beforeScene)
+    const beforeNeighbour = f.card('shot-2')
+    f.shots[2].selectedImageVersionId = 'selected-1'; f.ui.refresh()
+    assert.notEqual(f.card('shot-2'), beforeNeighbour)
+  } finally { f.cleanup() }
+})
+
+test('复核轮询不读取分镜历史、文档快照和生成请求大字段', () => {
+  const f = fixture()
+  try {
+    const unread = () => { throw new Error('不应读取历史或生成请求') }
+    Object.defineProperty(f.data.storyboard, 'sourceVersions', { enumerable: true, get: unread })
+    Object.defineProperty(f.data.documents.s1, 'versions', { enumerable: true, get: unread })
+    f.assets[0].versions[0].metadata = { provenance: {} }
+    Object.defineProperty(f.assets[0].versions[0].metadata.provenance, 'request', { enumerable: true, get: unread })
+    const original = f.card('shot-1')
+    assert.doesNotThrow(() => f.ui.refresh())
+    assert.equal(f.card('shot-1'), original)
+    f.shots[0].camera = '低机位'
+    assert.doesNotThrow(() => f.ui.refresh())
+    assert.notEqual(f.card('shot-1'), original)
+  } finally { f.cleanup() }
+})
+
+test('返修仅对当前拒绝图片提供入口，带备注和预期输入并阻止并行提交', async () => {
+  let release
+  const repairs = [], gate = new Promise(resolve => { release = resolve })
+  const f = fixture({ onRepair: async (...args) => { repairs.push(args); await gate } })
+  try {
+    f.shots[0].visualReview = makeVisualReview(f.shots[0], f.assets, f.data.documents, f.data.storyboard.continuity, { decision: 'rejected', notes: '浮桶颜色有误' })
+    f.ui.open({ filter: 'all' })
+    const card = f.card('shot-1')
+    assert.equal(f.card('shot-2').querySelectorAll('button').some(node => node.textContent === '按备注返修'), false)
+    const note = card.querySelector('textarea'); note.value = '  修正蓝色浮桶  '
+    const first = f.click('按备注返修', card)
+    await f.click('按备注返修', card)
+    assert.equal(repairs.length, 1); assert.equal(note.disabled, true)
+    assert.equal(repairs[0][0], 'shot-1'); assert.equal(repairs[0][1], '修正蓝色浮桶')
+    assert.equal(repairs[0][2].imageVersionId, 'selected-1')
+    release(); await first
+    assert.match(f.dialog.textContent, /返修任务已提交/)
+    f.shots[0].selectedImageVersionId = 'selected-2'; f.ui.refresh()
+    assert.equal(f.card('shot-1').querySelectorAll('button').some(node => node.textContent === '按备注返修'), false)
+  } finally { release(); f.cleanup() }
+})
+
+test('返修空备注、过期输入或提交失败均保留原选择并给出提示', async () => {
+  const f = fixture({ onRepair: async () => { throw new Error('连接中断') } })
+  try {
+    f.shots[0].visualReview = makeVisualReview(f.shots[0], f.assets, f.data.documents, f.data.storyboard.continuity, { decision: 'rejected', notes: '颜色错误' })
+    f.ui.open({ filter: 'all' })
+    let card = f.card('shot-1')
+    card.querySelector('textarea').value = '  '
+    await f.click('按备注返修', card)
+    assert.match(f.dialog.textContent, /请先在核对备注中填写/)
+    card.querySelector('textarea').value = '校正颜色'
+    await f.click('按备注返修', card)
+    assert.match(f.dialog.textContent, /返修未提交：连接中断/)
+    card = f.card('shot-1')
+    f.shots[0].camera += '俯视'
+    await f.click('按备注返修', card)
+    assert.match(f.dialog.textContent, /画面或参考已变化/)
+    assert.equal(f.shots[0].selectedImageVersionId, 'selected-1')
+  } finally { f.cleanup() }
+})
+
+test('返修确认被取消时只轻提示未提交，保留备注且不产生错误通知', async () => {
+  const f = fixture({ onRepair: async () => false })
+  try {
+    f.shots[0].visualReview = makeVisualReview(f.shots[0], f.assets, f.data.documents, f.data.storyboard.continuity, { decision: 'rejected', notes: '蓝色浮桶' })
+    f.ui.open({ filter: 'all' })
+    await f.click('按备注返修', f.card('shot-1'))
+    assert.match(f.dialog.textContent, /未提交返修/)
+    assert.equal(f.calls.notices.length, 0)
+    assert.equal(f.card('shot-1').querySelector('textarea').value, '蓝色浮桶')
+  } finally { f.cleanup() }
+})
+
+test('切换选用图片后旧拒绝备注不填入新图片，原图片未保存备注可恢复', async () => {
+  const f = fixture()
+  try {
+    f.shots[0].visualReview = makeVisualReview(f.shots[0], f.assets, f.data.documents, f.data.storyboard.continuity, { decision: 'rejected', notes: '旧图浮桶错误' })
+    f.ui.open({ filter: 'all' })
+    const originalNote = f.card('shot-1').querySelector('textarea')
+    assert.equal(originalNote.value, '旧图浮桶错误')
+    originalNote.value = '旧图的未保存修改'; await originalNote.emit('input')
+    f.shots[0].selectedImageVersionId = 'selected-2'; f.ui.refresh()
+    assert.equal(f.card('shot-1').querySelector('textarea').value, '')
+    f.shots[0].selectedImageVersionId = 'selected-1'; f.ui.refresh()
+    assert.equal(f.card('shot-1').querySelector('textarea').value, '旧图的未保存修改')
   } finally { f.cleanup() }
 })
 

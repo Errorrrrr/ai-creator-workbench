@@ -8,6 +8,7 @@ import { shotReadiness, shotImageReadiness, storyboardNextAction } from '../src/
 import { createEntity, entityStateFingerprint } from '../src/continuity-assets.js'
 import { makeVisualReview } from '../src/visual-review.js'
 import { isSceneDocument } from '../src/episode-scenes.js'
+import { getContinuityReviewBatch } from '../src/continuity-impact.js'
 
 const source = readFileSync(new URL('../src/media-workbench.js', import.meta.url), 'utf8')
 function productionFunction(name) {
@@ -96,9 +97,10 @@ function harness() {
     context: () => data, isSceneDocument, organizeScenes: null, assets: structuredClone(assets), assetDrafts: new Map(), assetCards: new Map(), assetLibraryTools: { filter: values => values, detail: () => el('section') }, resultVersionId: '', selectedAssetId: '小舟',
     assetGrid: el('div'), assetDetail: el('section'), assetBody: el('div'), assetNotice: el('p'), roleFilter: el('select'),
     storyboardView: el('section'), shotList: el('div'), shotBody: el('div'), shotStatus: el('p'), shotDetail: el('section'), nextActionButton: el('button'), generateButton: el('button'), organizeScenesButton: el('button'),
-    selectedShotId: 's1', selectedSourceId: 'scene1', selectedEpisodeId: 'episode1', shotDetailOpen: false, detailPanel: 'picture', mediaStage: 'storyboard', operationBusy: false,
+    selectedShotId: 's1', selectedSourceId: 'scene1', selectedEpisodeId: 'episode1', shotDetailOpen: false, detailPanel: 'picture', mediaStage: 'storyboard', operationBusy: false, pictureReviewBatch: null,
     jobsDialog: el('dialog'), lastContextDocId: null, OTHER_EPISODE: 'other', UNASSIGNED_SOURCE: 'unassigned',
     loading: false, error: '', recoveryIssues: [], ASSET_ROLES, jobs: [], shotReadiness, shotImageReadiness, storyboardNextAction,
+    getContinuityReviewBatch, visualReviewUI: { openSavedBatch() {} },
     preview: () => el('div'), notify() {}, desktop() {}, run: async callback => callback(), invoke: async () => {},
     renderShotDetail() {}, visibleShots: () => data.storyboard.shots, storyboardGroups: () => [{ id: 'episode1' }],
     shotIsStale: () => false, findMediaVersion: () => null, jobResult, reorder() {}, addShot() {}, renderSources() {}
@@ -109,7 +111,7 @@ function harness() {
     env.shotDetail.append(tab, content)
   }
   vm.createContext(env)
-  vm.runInContext(['button', 'field', 'disclosure', 'actionMenu', 'renderAssets', 'renderAssetDetail', 'nextStoryboardAction', 'renderNextAction', 'openShotDetail', 'closeShotDetail', 'selectDetailPanel', 'renderShots', 'openJobResult', 'pendingAssetDraft', 'showAssetDraft'].map(productionFunction).join('\n'), env)
+  vm.runInContext(['button', 'field', 'disclosure', 'actionMenu', 'renderAssets', 'renderAssetDetail', 'nextStoryboardAction', 'renderNextAction', 'openShotDetail', 'closeShotDetail', 'selectDetailPanel', 'renderShots', 'pictureReviewShots', 'openJobResult', 'pendingAssetDraft', 'showAssetDraft'].map(productionFunction).join('\n'), env)
   const descendants = node => node.querySelectorAll('*')
   const input = () => env.assetDetail.querySelector('input')
   const changeName = value => { input().value = value; input().listeners.get('input')() }
@@ -222,6 +224,26 @@ test('镜头大图聚焦画面标签，返回、轮询和排序恢复列表焦�
   assert.equal(h.doc.activeElement, control('s2:select'), 'disabled ordering action falls back to selected shot')
   const field = h.el('input'); field.focus(); env.renderShots({ detail: false })
   assert.equal(h.doc.activeElement, field)
+})
+
+test('批次大图镜头删除或批次改变后关闭详情并回最新清单，项目切换不打开旧批', () => {
+  for (const change of ['delete', 'batch', 'project']) {
+    const h = harness(), { env, data } = h
+    let opened = 0
+    env.visualReviewUI.openSavedBatch = () => { opened++ }
+    data.storyboard.continuityReviewBatch = { version: 1, id: 'batch' }
+    data.storyboard.shots[0].continuityReview = { batchId: 'batch', previouslyApproved: true }
+    data.storyboard.shots[1].continuityReview = { batchId: 'batch', previouslyApproved: true }
+    env.pictureReviewBatch = { projectId: 'p1', id: 'batch' }; env.shotDetailOpen = true
+    if (change === 'delete') data.storyboard.shots.shift()
+    if (change === 'batch') data.storyboard.continuityReviewBatch.id = 'batch-2'
+    if (change === 'project') data.projectId = 'other-project'
+    env.renderShots()
+    assert.equal(env.shotDetailOpen, false, change)
+    assert.equal(env.shotDetail.hidden, true, change)
+    assert.equal(env.pictureReviewBatch, null, change)
+    assert.equal(opened, change === 'project' ? 0 : 1, change)
+  }
 })
 
 test('菜单 Escape 在本地消费并恢复菜单焦点，不向全局停止生成冒泡', () => {

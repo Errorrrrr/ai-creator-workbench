@@ -5,6 +5,7 @@ import vm from 'node:vm'
 import { readFileSync } from 'node:fs'
 import { emptyContinuity, createEntity, createEntityState, entityStateFingerprint } from '../src/continuity-assets.js'
 import { contentFingerprint, createShot } from '../src/storyboard.js'
+import { makeVisualReview } from '../src/visual-review.js'
 import { initializeContinuityUI, continuityScopes, continuityImageCheckpoint, continuityReferenceOptions, cloneContinuityState } from '../src/continuity-ui.js'
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto
@@ -26,6 +27,7 @@ class Node {
   contains(node) { return this === node || this.children.some(child => child.contains(node)) }
   showModal() { this.open = true }
   close() { this.open = false }
+  remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this) }
   focus() { globalThis.document.activeElement = this }
 }
 
@@ -38,7 +40,7 @@ function fixture(options = {}) {
   const controls = { failSave: false, saveGate: null }
   const ui = initializeContinuityUI({
     getContext: () => data, getAssets: () => assets, getJobs: () => jobs,
-    save: async (next, meta) => { calls.saves.push({ next, meta }); if (controls.saveGate) await controls.saveGate; if (controls.failSave) throw new Error('磁盘不可写'); data.storyboard = { ...data.storyboard, revision: data.storyboard.revision + 1, continuity: next } },
+    save: async (next, meta) => { calls.saves.push({ next, meta }); if (controls.saveGate) await controls.saveGate; if (controls.failSave) throw new Error('磁盘不可写'); data.storyboard = next },
     requestExtraction: async metadata => { calls.extracted.push(metadata); data.textGenerating = true },
     generateReference: async (entityId, stateId) => { calls.generated.push({ entityId, stateId }) },
     stopExtraction: async () => { calls.stopped++; data.textGenerating = false },
@@ -51,7 +53,9 @@ function fixture(options = {}) {
   const input = label => { const wrapper = dialog.querySelectorAll('label').find(node => node.children[0]?.textContent === label); assert.ok(wrapper, `missing label ${label}`); return wrapper.children[1] }
   const select = label => { const result = dialog.querySelectorAll('select').find(node => node.attrs['aria-label'] === label); assert.ok(result, `missing select ${label}`); return result }
   const edit = async (label, value) => { const node = input(label); node.value = value; await node.emit('input'); return node }
-  return { ui, data, prop, calls, jobs, assets, controls, dialog, input, select, edit, click: async label => findButton(label).emit('click'), findButton, cleanup: () => { globalThis.document = previous.document; globalThis.window = previous.window } }
+  const impactDialog = () => body.querySelectorAll('dialog').find(node => node.open && node.attrs['aria-label'] === '设定修改影响')
+  const decideImpact = label => impactDialog().querySelectorAll('button').find(node => node.textContent === label).emit('click')
+  return { ui, data, prop, calls, jobs, assets, controls, dialog, input, select, edit, impactDialog, decideImpact, click: async label => findButton(label).emit('click'), findButton, cleanup: () => { globalThis.document = previous.document; globalThis.window = previous.window } }
 }
 
 function scheduleWorkbenchPoll(ui) {
@@ -208,12 +212,14 @@ test('统一视觉基准入口展开并聚焦，保存后保留旧分镜图并�
     assert.match(f.dialog.textContent, /画风、色彩、材质和成片质感/)
     assert.match(f.dialog.textContent, /不把所有分场强制设成同一种光线/)
     await f.edit('全项目视觉基准', '写实电影；保持低饱和与真实旧化材质')
-    f.controls.failSave = true; assert.equal(await f.ui.saveDraft(), false)
+    f.controls.failSave = true
+    const failed = f.ui.saveDraft(); await f.decideImpact('确认保存'); assert.equal(await failed, false)
     assert.equal(f.input('全项目视觉基准').value, '写实电影；保持低饱和与真实旧化材质')
-    f.controls.failSave = false; assert.equal(await f.ui.saveDraft(), true)
+    f.controls.failSave = false
+    const saved = f.ui.saveDraft(); await f.decideImpact('确认保存'); assert.equal(await saved, true)
     assert.equal(f.data.storyboard.continuity.style, '写实电影；保持低饱和与真实旧化材质')
     assert.equal(f.data.storyboard.shots[0].selectedImageVersionId, 'existing-image')
-    assert.match(f.dialog.textContent, /已有分镜图不会自动重绘.*需要重新核对视觉一致性/)
+    assert.match(f.dialog.textContent, /设定已保存，1 个镜头受影响/)
   } finally { f.cleanup() }
 })
 
@@ -227,6 +233,122 @@ test('提取快速失败保留之前候选，显示真实错误且不被启动�
     assert.equal(f.ui.hasPendingWork(), false); assert.match(f.dialog.textContent, /执行端区域不可用/); assert.match(f.dialog.textContent, /绳索/); assert.match(f.dialog.textContent, /已有候选保留/)
     assert.doesNotMatch(f.dialog.textContent, /提取任务已启动/); assert.doesNotMatch(f.dialog.textContent, /候选格式暂时无法采纳/)
     await f.click('采纳并保存设定'); assert.equal(f.calls.saves[0].meta.resolvedCandidateId, 'old-candidate')
+  } finally { f.cleanup() }
+})
+
+test('保存前展示跨场镜头与原审核状态，取消和失败均不产生复核批次', async () => {
+  const batches = [], f = fixture({ onReviewImpact: batch => { batches.push(batch); return true } })
+  try {
+    const first = createShot({ title: '海面全景', visual: '海面' }, { documentId: 's1' })
+    const second = createShot({ title: '掠过白浪', visual: '浪花' }, { documentId: 's2' })
+    first.selectedImageVersionId = 'sea-image'
+    f.assets.push({ id: 'sea-asset', projectId: 'p', kind: 'image', versions: [{ id: 'sea-image', mimeType: 'image/png' }] })
+    first.visualReview = makeVisualReview(first, f.assets, f.data.documents, f.data.storyboard.continuity, { decision: 'approved' }, f.data)
+    f.data.storyboard.shots = [second, first]
+    await f.edit('全项目视觉基准', '黑白摄影')
+    const cancelled = f.click('保存设定')
+    const popup = f.impactDialog()
+    assert.match(popup.textContent, /2 个分场.*2 个镜头.*修改前已通过 1 个/)
+    assert.match(popup.textContent, /第一场.*第 1 镜 · 海面全景修改前已通过.*第二场.*掠过白浪缺少分镜图/)
+    assert.equal(f.calls.saves.length, 0)
+    await f.decideImpact('返回编辑'); await cancelled
+    assert.equal(f.ui.hasDrafts(), true); assert.equal(f.findButton('继续设定复核').hidden, true)
+    f.controls.failSave = true
+    const failed = f.click('保存设定'); await f.decideImpact('确认保存'); await failed
+    assert.equal(f.ui.hasDrafts(), true); assert.equal(f.findButton('继续设定复核').hidden, true)
+    f.controls.failSave = false
+    const saved = f.click('保存设定'); await f.decideImpact('确认保存'); await saved
+    assert.equal(f.ui.hasDrafts(), false); assert.equal(f.findButton('继续设定复核').hidden, false)
+    f.ui.refresh(); await f.click('继续设定复核')
+    assert.deepEqual(batches, [{ projectId: 'p', id: 'continuity-review-3', shotIds: [first.id, second.id], previouslyApprovedShotIds: [first.id] }])
+    assert.equal(f.dialog.open, false)
+    f.ui.open(); await f.edit('全项目视觉基准', '水彩')
+    assert.equal(f.findButton('继续设定复核').hidden, true)
+  } finally { f.cleanup() }
+})
+
+test('确认期间重新核对素材与分镜版本，清单改变时重新展示，版本冲突保留草稿', async () => {
+  const f = fixture()
+  try {
+    const shot = createShot({ title: '海面' }, { documentId: 's1' })
+    shot.selectedImageVersionId = 'wave'; f.data.storyboard.shots = [shot]
+    await f.edit('全项目视觉基准', '自然光')
+    const saving = f.ui.saveDraft()
+    assert.match(f.impactDialog().textContent, /缺少分镜图/)
+    f.assets.push({ id: 'waves', projectId: 'p', kind: 'image', versions: [{ id: 'wave', mimeType: 'image/png' }] })
+    await f.decideImpact('确认保存')
+    assert.match(f.impactDialog().textContent, /影响范围已更新.*尚未复核/)
+    assert.equal(f.calls.saves.length, 0)
+    f.data.storyboard.revision++
+    await f.decideImpact('确认保存')
+    assert.equal(await saving, false); assert.equal(f.calls.saves.length, 0); assert.equal(f.ui.hasDrafts(), true)
+  } finally { f.cleanup() }
+})
+
+test('已保存批次在重新初始化、零影响保存和放弃新草稿后仍可继续，失败保留原批次', async () => {
+  const batches = [], f = fixture({ onReviewImpact: batch => { batches.push(batch); return true } })
+  try {
+    const shot = createShot({ title: '海面空镜', characterNames: [], sceneNames: [], propNames: [] }, { documentId: 's1' })
+    shot.continuityReview = { batchId: 'continuity-review-2', previouslyApproved: true }
+    f.data.storyboard.shots = [shot]
+    f.data.storyboard.continuityReviewBatch = { version: 1, id: 'continuity-review-2' }
+    f.ui.open()
+    assert.equal(f.findButton('继续设定复核').hidden, false)
+    await f.edit('固定外形特征', '新增木筏特征')
+    assert.equal(f.findButton('继续设定复核').hidden, true)
+    assert.equal(await f.ui.saveDraft(), true)
+    assert.equal(f.findButton('继续设定复核').hidden, false)
+    assert.equal(f.data.storyboard.continuityReviewBatch.id, 'continuity-review-2')
+    await f.edit('全项目视觉基准', '新画风')
+    const cancelled = f.ui.saveDraft(); await f.decideImpact('返回编辑'); assert.equal(await cancelled, false)
+    assert.equal(f.data.storyboard.continuityReviewBatch.id, 'continuity-review-2')
+    f.controls.failSave = true
+    const failed = f.ui.saveDraft(); await f.decideImpact('确认保存'); assert.equal(await failed, false)
+    assert.equal(f.data.storyboard.continuityReviewBatch.id, 'continuity-review-2')
+    f.ui.discardDraft()
+    assert.equal(f.findButton('继续设定复核').hidden, false)
+    const restored = JSON.parse(JSON.stringify(f.data))
+    const reloadedUI = initializeContinuityUI({ getContext: () => restored, onReviewImpact: batch => { batches.push(batch); return true } })
+    reloadedUI.open()
+    const reloadedDialog = globalThis.document.body.querySelectorAll('dialog').at(-1)
+    await reloadedDialog.querySelectorAll('button').find(node => node.textContent === '继续设定复核').emit('click')
+    assert.deepEqual(batches.at(-1), { projectId: 'p', id: 'continuity-review-2', shotIds: [shot.id], previouslyApprovedShotIds: [shot.id] })
+    restored.projectId = 'other'; restored.storyboard = { revision: 0, shots: [] }; reloadedUI.open()
+    assert.equal(reloadedDialog.querySelectorAll('button').find(node => node.textContent === '继续设定复核').hidden, true)
+  } finally { f.cleanup() }
+})
+
+test('素材读取失败保留设定草稿，等待素材期间切换项目也不会提交旧草稿', async () => {
+  let read = async () => { throw new Error('素材读取失败') }
+  const f = fixture({ readImpactAssets: owner => read(owner) })
+  try {
+    await f.edit('全项目视觉基准', '自然光')
+    assert.equal(await f.ui.saveDraft(), false)
+    assert.match(f.dialog.textContent, /素材读取失败/)
+    assert.equal(f.ui.hasDrafts(), true); assert.equal(f.calls.saves.length, 0)
+    let release
+    read = owner => new Promise(resolve => { assert.equal(owner, 'p'); release = resolve })
+    const pending = f.ui.saveDraft(); f.data.projectId = 'other'; release([])
+    assert.equal(await pending, false); assert.equal(f.calls.saves.length, 0)
+    assert.equal(f.ui.hasDrafts(), true); assert.equal(f.impactDialog(), undefined)
+  } finally { f.cleanup() }
+})
+
+test('候选采纳期间原文被编辑会阻止提交，生成前的返编辑保留草稿并停止生成', async () => {
+  const f = fixture()
+  try {
+    const shot = createShot({ title: '木筏与船灯', visual: '一盏船灯', propNames: ['船灯'] }, { documentId: 's1' })
+    f.data.storyboard.shots = [shot]
+    const text = JSON.stringify({ entities: [{ kind: 'prop', name: '船灯', description: '青铜油灯', sourceDocumentIds: ['s1'] }] })
+    f.ui.receiveCandidate(text, { projectId: 'p', sourceDocumentIds: ['s1'], sourceFingerprints: { s1: contentFingerprint(f.data.documents.s1.content) } }, 'draft-lamp')
+    const candidate = f.click('采纳并保存设定')
+    assert.match(f.impactDialog().textContent, /木筏与船灯/)
+    f.data.documents.s1.content += '灯亮。'
+    await f.decideImpact('确认保存'); await candidate
+    assert.equal(f.calls.saves.length, 0); assert.match(f.dialog.textContent, /原候选已保留/)
+    await f.edit('全项目视觉基准', '夕阳')
+    const generation = f.click('生成此状态设定图'); await f.decideImpact('返回编辑'); await generation
+    assert.equal(f.calls.saves.length, 0); assert.equal(f.calls.generated.length, 0); assert.equal(f.ui.hasDrafts(), true)
   } finally { f.cleanup() }
 })
 

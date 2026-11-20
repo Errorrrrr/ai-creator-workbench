@@ -1,6 +1,6 @@
 import { validateContinuity } from './continuity-assets.js'
 import { mediaAdapterFor } from './media-adapters.js'
-import { validateVisualRecord } from './visual-review.js'
+import { validateVisualRecord, visualDefinitionSnapshot } from './visual-review.js'
 import { sceneContinuityContext, sceneContinuityStateDocumentIds } from './scene-continuity.js'
 
 // Project data only. Files and generation jobs belong to the desktop media store.
@@ -20,7 +20,11 @@ export function contentFingerprint(content = '') {
 }
 
 export function storyboardSourceFingerprint(storyboard, documentId) {
-  return contentFingerprint(JSON.stringify(storyboard.shots.filter(shot => shot.sourceDocumentId === documentId)))
+  const shots = storyboard.shots.filter(shot => shot.sourceDocumentId === documentId).map(shot => {
+    const { continuityReview, ...content } = shot
+    return content
+  })
+  return contentFingerprint(JSON.stringify(shots))
 }
 
 // Capture creative inputs, not output selection, review flags or UI metadata.
@@ -28,11 +32,17 @@ export function shotProductionInputs(shot, documents = {}, context = {}) {
   const fields = [...TEXT_FIELDS, 'duration', 'transition', 'characterNames', 'sceneNames', 'propNames', 'selectedImageVersionId', 'aspectRatio', 'imageSize', 'imageQuality', 'videoMode', 'videoDuration', 'continuityNotes']
   const stateDocuments = sceneContinuityStateDocumentIds({ ...context, documentId: shot.sourceDocumentId, documents })
   const scene = stateDocuments.length && sceneContinuityContext({ ...context, documentId: shot.sourceDocumentId, documents, shot, enforceLimit: false })
+  // Explicit scene-state snapshots already cover these definitions. Older scenes
+  // still need to track actual visual requirements when no state form was saved.
+  const continuity = context.storyboard?.continuity
+  const definitions = !scene && visualDefinitionSnapshot(shot, context.assets || [], documents, continuity)
+  const visualConstraints = definitions && (continuity?.style?.trim() || definitions.entities.length) ? definitions : null
   return { ...Object.fromEntries(fields.map(field => [field, shot[field] ?? null])),
     references: shot.references.map(({ versionId, role, scope }) => ({ versionId, role, scope: scope || '' })),
     sourceDocumentId: shot.sourceDocumentId,
     sourceFingerprint: shot.sourceDocumentId ? contentFingerprint(documents[shot.sourceDocumentId]?.content ?? '') : '',
-    ...(scene?.stateDocumentIds?.length ? { sceneConstraints: scene.fingerprint } : {}) }
+    ...(scene?.stateDocumentIds?.length ? { sceneConstraints: scene.fingerprint } : {}),
+    ...(visualConstraints ? { visualConstraints } : {}) }
 }
 
 export function shotInputFingerprint(shot, documents = {}, context = {}) {
@@ -53,7 +63,9 @@ export function videoReviewState(shot, documents = {}, context = {}) {
 export function snapshotStoryboardSource(storyboard, sourceDocumentId, label = '重做前的分镜') {
   const shots = storyboard.shots.filter(shot => shot.sourceDocumentId === sourceDocumentId)
   if (!shots.length) return null
-  const version = { id: id(), createdAt: new Date().toISOString(), sourceDocumentId, label, shots: structuredClone(shots) }
+  const historicalShots = structuredClone(shots)
+  for (const shot of historicalShots) delete shot.continuityReview
+  const version = { id: id(), createdAt: new Date().toISOString(), sourceDocumentId, label, shots: historicalShots }
   storyboard.sourceVersions = [version, ...(storyboard.sourceVersions || [])].slice(0, 10)
   return version
 }
@@ -84,6 +96,10 @@ export function createShot(value = {}, source = {}) {
 export function validateStoryboard(value) {
   if (!object(value) || !Number.isSafeInteger(value.revision) || value.revision < 0 || !Array.isArray(value.shots) || value.shots.length > SHOT_LIMIT) throw new Error('分镜结构或修订号无效')
   if (value.continuity !== undefined) validateContinuity(value.continuity)
+  if (value.continuityReviewBatch !== undefined) {
+    const batch = value.continuityReviewBatch
+    if (!object(batch) || Object.keys(batch).some(key => !['version', 'id'].includes(key)) || batch.version !== 1 || typeof batch.id !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(batch.id)) throw new Error('设定复核批次无效')
+  }
   const ids = new Set()
   if (value.sourceVersions !== undefined) {
     if (!Array.isArray(value.sourceVersions) || value.sourceVersions.length > 10) throw new Error('分镜历史版本无效')
@@ -98,6 +114,10 @@ export function validateStoryboard(value) {
   for (const shot of value.shots) {
     if (!object(shot) || typeof shot.id !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(shot.id) || ids.has(shot.id)) throw new Error('镜头标识无效或重复')
     ids.add(shot.id)
+    if (shot.continuityReview !== undefined) {
+      const review = shot.continuityReview
+      if (!object(review) || Object.keys(review).some(key => !['batchId', 'previouslyApproved'].includes(key)) || typeof review.batchId !== 'string' || !/^[a-zA-Z0-9_-]{1,96}$/.test(review.batchId) || typeof review.previouslyApproved !== 'boolean') throw new Error('镜头设定复核标记无效')
+    }
     if (shot.visualReview !== undefined) validateVisualRecord(shot.visualReview, { review: true })
     if (shot.imageGenerationBasis !== undefined) validateVisualRecord(shot.imageGenerationBasis)
     if (shot.continuityNotes !== undefined && (typeof shot.continuityNotes !== 'string' || shot.continuityNotes.length > 500000)) throw new Error('镜头连续性设定无效')

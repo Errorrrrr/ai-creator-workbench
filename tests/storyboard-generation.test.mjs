@@ -1,4 +1,4 @@
-import { visualBaselineText, visualInputFingerprint, visualInputSnapshot } from '../src/visual-review.js'
+import { makeVisualReview, visualBaselineText, visualInputFingerprint, visualInputSnapshot } from '../src/visual-review.js'
 import { continuityReadiness } from '../src/continuity-linking.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -104,6 +104,35 @@ test('实际提交入口在凭据和原生调用前拦截不兼容参数，图�
   value.videoDuration = 6
   assert.equal(env.prepareShotRequest(value.id, 'video').parameters.duration, 6)
   assert.equal(env.prepareShotRequest(value.id, 'image').parameters.duration, 5)
+})
+
+test('备注返修固定首图、去重并保留参考，取消或变化均不提交', async () => {
+  const value = shot({ references: [{ versionId: 'subject', role: 'reference' }, { versionId: 'start', role: 'start' }] })
+  const { env, data, calls } = harness([value])
+  value.visualReview = makeVisualReview(value, assets, {}, undefined, { decision: 'rejected', notes: '衣袖改回红色' }, data)
+  const repair = { projectId: data.projectId, imageVersionId: value.selectedImageVersionId, fingerprint: value.visualReview.fingerprint, notes: value.visualReview.notes }
+  const request = env.prepareShotRequest(value.id, 'image', repair)
+  assert.equal(request.parameters.mode, 'edit'); assert.equal(request.imageRepair, true)
+  assert.deepEqual(Array.from(request.references, ref => ref.versionId), ['start', 'subject'])
+  assert.equal(request.references[0].role, 'reference'); assert.match(request.prompt, /返修原图/); assert.match(request.prompt, /衣袖改回红色/)
+  assert.equal(env.prepareShotRequest(value.id, 'image').imageRepair, undefined)
+  assert.throws(() => env.prepareShotRequest(value.id, 'image', { ...repair, notes: ' ' }), /填写返修备注/)
+  const confirmations = []
+  env.window = { confirm: message => { confirmations.push(message); return false } }
+  assert.equal(await env.submitShot(value.id, 'image', repair), false)
+  assert.match(confirmations[0], /衣袖改回红色/); assert.deepEqual(calls, { secret: 0, invoke: 0 })
+  env.window.confirm = () => true
+  env.beforeSubmit = async () => { value.selectedImageVersionId = 'end' }
+  await assert.rejects(env.submitShot(value.id, 'image', repair), /图片或复核状态已变化/)
+  assert.deepEqual(calls, { secret: 0, invoke: 0 })
+  value.selectedImageVersionId = 'start'; env.beforeSubmit = null
+  let received
+  env.invoke = async (command, args) => { assert.equal(command, 'media_submit'); received = args.request; return { id: 'j1' } }
+  Object.assign(env, { renderJobs() {}, notify() {}, refresh: async () => {} })
+  assert.equal(await env.submitShot(value.id, 'image', repair), true)
+  assert.equal(received.imageRepair, true); assert.equal(received.targetId, value.id)
+  assert.deepEqual(Array.from(received.references, ref => ref.versionId), ['start', 'subject'])
+  assert.equal(value.selectedImageVersionId, 'start')
 })
 
 test('批量预览汇总每个不兼容镜头，显式统一生成时长仅修改已选镜头', async () => {

@@ -530,6 +530,7 @@ function restorePortableProject(project) {
       shot.references = []
       shot.selectedImageVersionId = ''; shot.selectedVideoVersionId = ''; shot.reviewedVideoVersionId = ''
       delete shot.reviewedInputFingerprint
+      if (shot.continuityReview) shot.continuityReview.previouslyApproved = false
     }
   }
   for (const entity of copy.workspace.storyboard?.continuity?.entities || []) for (const state of entity.states) {

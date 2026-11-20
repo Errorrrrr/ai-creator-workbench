@@ -53,6 +53,16 @@
 .continuity-empty { padding: 42px 16px; text-align: center; color: var(--muted-strong); font-size: 13px; line-height: 1.9; }
 .continuity-notice { margin: 0; padding: 0 28px 16px; color: var(--muted-strong); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .continuity-notice:empty { display: none; }
+.app-dialog.continuity-impact-dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); padding: clamp(16px, 3vw, 24px); box-sizing: border-box; }
+.continuity-impact-dialog[open] { display: flex; flex-direction: column; gap: 14px; }
+.continuity-impact-dialog h2, .continuity-impact-dialog p, .continuity-impact-list h3 { margin: 0; }
+.continuity-impact-list { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.continuity-impact-list h3 { background: var(--surface); padding: 8px 10px; font-size: 14px; overflow-wrap: anywhere; }
+.continuity-impact-list ul { list-style: none; padding: 0; margin: 0 0 12px; }
+.continuity-impact-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 3px 12px; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 13px; overflow-wrap: anywhere; }
+.continuity-impact-list li small { grid-column: 1 / -1; }
+.continuity-prior-approval { color: var(--ink); font-size: 12px; font-weight: 650; }
+.continuity-impact-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .app-dialog.scene-continuity-dialog { width: min(850px, calc(100vw - 32px)); }
 .scene-continuity-dialog .continuity-editor { padding-top: 20px; }
 .scene-continuity-dialog > .media-help { padding: 0 28px; }
